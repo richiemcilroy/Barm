@@ -1,0 +1,80 @@
+type Shape =
+  | { kind: "circle", r: f64 }
+  | { kind: "square", side: f64 }
+  | { kind: "rect", w: f64, h: f64 }
+
+type Tree = { kind: "leaf", value: int } | { kind: "node", left: Tree, right: Tree }
+
+type Dir = "up" | "down" | "left" | "right"
+
+function area(s: Shape): f64 {
+  switch (s.kind) {
+    case "circle":
+      return 3.0 * s.r * s.r
+    case "square":
+      return s.side * s.side
+    case "rect":
+      return s.w * s.h
+  }
+}
+
+function describe(s: Shape): string {
+  if (s.kind === "circle") return `circle r=${s.r}`
+  if (s.kind === "square") return `square ${s.side}`
+  return `rect ${s.w}x${s.h}`
+}
+
+function sum(t: Tree): int {
+  switch (t.kind) {
+    case "leaf":
+      return t.value
+    case "node":
+      return sum(t.left) + sum(t.right)
+  }
+}
+
+function build(depth: int, start: int): Tree {
+  if (depth === 0) return { kind: "leaf", value: start }
+  return { kind: "node", left: build(depth - 1, start), right: build(depth - 1, start + depth) }
+}
+
+function opposite(d: Dir): Dir {
+  switch (d) {
+    case "up": return "down"
+    case "down": return "up"
+    case "left": return "right"
+    case "right": return "left"
+  }
+}
+
+function firstLong(words: string[]): string | undefined {
+  return words.find(w => w.byteLength > 3)
+}
+
+function main() {
+  const shapes: Shape[] = [{ kind: "circle", r: 2 }, { kind: "square", side: 3 }, { kind: "rect", w: 2, h: 5 }]
+  for (const s of shapes) console.log(s.kind, area(s), describe(s))
+  console.log(shapes)
+
+  const t = build(3, 1)
+  console.log("tree sum", sum(t))
+
+  const d: Dir = "left"
+  const o = opposite(d)
+  const label: string = o
+  console.log(o, label, opposite(opposite(d)) === d)
+
+  const w1 = firstLong(["a", "abcd", "xyz"])
+  const w2 = firstLong(["a"])
+  console.log(w1, w2, w1 ?? "none", w2 ?? "none")
+  if (w1 !== undefined) console.log(w1.toUpperCase())
+  console.log(w2?.toUpperCase())
+
+  let maybe: int | undefined = undefined
+  console.log(maybe === undefined, maybe ?? 7)
+  maybe = 5
+  if (maybe !== undefined) console.log(maybe + 1)
+
+  const kinds = shapes.map(s => s.kind)
+  console.log(kinds, kinds.includes("square"))
+}

@@ -1,0 +1,10 @@
+// Native-only (not compared with Node): 64-bit ints and sized integers.
+function main() {
+  const big: int = 9007199254740993
+  console.log(big, big + 1, big * 2)
+  const bytes: u8[] = [u8(250), u8(5)]
+  console.log(bytes, u8(bytes[0]! + bytes[1]!))
+  console.log(parseInt("nope"), parseInt("12"))
+  const x: i32 = i32(-5)
+  console.log(x, i32(x * x))
+}

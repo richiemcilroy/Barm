@@ -1,0 +1,23 @@
+function main() {
+  const s = "  Hello, World  "
+  console.log(`[${s.trim()}]`, `[${s.trimStart()}]`, `[${s.trimEnd()}]`)
+  const t = s.trim()
+  console.log(t.toUpperCase(), t.toLowerCase(), t.byteLength)
+  console.log(t.slice(0, 5), t.slice(-5), t.slice(7, -1))
+  console.log(t.includes("World"), t.startsWith("Hell"), t.endsWith("x"), t.indexOf("o"), t.indexOf("zz"))
+  console.log(t.split(", "), "a,b,,c".split(","), "abc".split(""))
+  console.log(t.replace("l", "L"), t.replaceAll("l", "L"), "ab".repeat(3))
+  console.log("5".padStart(3, "0"), "x".padEnd(4, "-") + "|", "7".padStart(2))
+  console.log("héllo wörld".chars().length, "héllo".byteLength, "日本語".chars())
+  const words = ["pear", "apple", "fig", "banana"]
+  console.log(words.slice().sort(), words.join(" + "))
+  console.log("a" < "b", "abc" < "abd", "Z" < "a", "apple" === "apple")
+  let acc = ""
+  for (const w of words) acc += w.slice(0, 1)
+  console.log(acc)
+  const n = 42
+  const f = 3.5
+  console.log("n=" + n + ", f=" + f, `${n / 8} ${f * 2} ${n % 5}`)
+  console.log(String(1.5), String(10), String(true), String(0.1 + 0.2))
+  console.log((1234.5678).toFixed(2), (0.5).toFixed(0), (1.005).toFixed(2), (7).toFixed(3))
+}

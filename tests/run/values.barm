@@ -1,0 +1,46 @@
+type Point = { x: f64, y: f64 }
+type Particle = { pos: Point, vel: Point, tags: string[] }
+
+function step(inout ps: Particle[], dt: f64) {
+  for (let i = 0; i < ps.length; i++) {
+    ps[i]!.pos.x += ps[i]!.vel.x * dt
+    ps[i]!.pos.y += ps[i]!.vel.y * dt
+  }
+}
+
+function addTag(inout p: Particle, tag: string) {
+  p.tags.push(tag)
+}
+
+function total(ps: Particle[]): f64 {
+  let t = 0.0
+  for (const p of ps) t += p.pos.x + p.pos.y
+  return t
+}
+
+function main() {
+  let ps: Particle[] = [
+    { pos: { x: 0, y: 0 }, vel: { x: 1, y: 2 }, tags: [] },
+    { pos: { x: 10, y: 10 }, vel: { x: -1, y: 0.5 }, tags: ["fast"] },
+  ]
+  step(&ps, 0.5)
+  step(&ps, 0.5)
+  console.log(ps[0]!.pos, ps[1]!.pos)
+  addTag(&ps[0]!, "moved")
+  console.log(ps[0]!.tags, ps[1]!.tags)
+  console.log("total", total(ps))
+
+  const grid: int[][] = [[1, 2], [3, 4]]
+  let g = grid.map(row => row.map(v => v * 10))
+  g[1]!.push(99)
+  console.log(g, grid.length)
+
+  const counts = new Map<string, int[]>()
+  counts.set("a", [1])
+  const existing = counts.get("a") ?? []
+  console.log(existing, counts.get("b") ?? [0])
+
+  let word = "ab"
+  for (let i = 0; i < 3; i++) word += String(i)
+  console.log(word, word.byteLength)
+}

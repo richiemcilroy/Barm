@@ -1,0 +1,39 @@
+type Tree = { value: int, left: Tree | undefined, right: Tree | undefined }
+
+function make(depth: int, v: int): Tree {
+  if (depth === 0) return { value: v, left: undefined, right: undefined }
+  return { value: v, left: make(depth - 1, v * 2), right: make(depth - 1, v * 2 + 1) }
+}
+
+function sum(t: Tree): int {
+  let s = t.value
+  if (t.left !== undefined) s += sum(t.left)
+  if (t.right !== undefined) s += sum(t.right)
+  return s
+}
+
+function leftmost(t: Tree): int {
+  let cur = t
+  while (cur.left !== undefined) {
+    cur = cur.left
+  }
+  return cur.value
+}
+
+function mirror(t: Tree): Tree {
+  return {
+    value: t.value,
+    left: t.right === undefined ? undefined : mirror(t.right),
+    right: t.left === undefined ? undefined : mirror(t.left),
+  }
+}
+
+function main() {
+  const t = make(4, 1)
+  console.log(sum(t), leftmost(t), leftmost(mirror(t)))
+  let u = make(1, 5)
+  u.left = undefined
+  console.log(u.left === undefined, u.right?.value, sum(u))
+  const small = make(1, 7)
+  console.log(small)
+}
