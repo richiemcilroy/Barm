@@ -1,0 +1,17 @@
+// Small record value churn: every iteration builds a new {x, y} record.
+
+type P = { x: f64, y: f64 }
+
+function add(a: P, b: P): P {
+  return { x: a.x + b.x, y: a.y + b.y }
+}
+
+function main() {
+  const n = 600_000_000
+  const one: P = { x: 1.0, y: 0.5 }
+  let v: P = { x: 0.0, y: 0.0 }
+  for (let i = 0; i < n; i++) {
+    v = add(v, one)
+  }
+  console.log(`${v.x.toFixed(1)} ${v.y.toFixed(1)}`)
+}

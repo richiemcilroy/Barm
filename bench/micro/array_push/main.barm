@@ -1,0 +1,18 @@
+// Push N floats into a growable array, then sum it with for-of and with an indexed loop.
+
+function main() {
+  const n = 30_000_000
+  const xs: f64[] = []
+  for (let i = 0; i < n; i++) {
+    xs.push(i * 0.5)
+  }
+  let sumOf = 0.0
+  for (const x of xs) {
+    sumOf += x
+  }
+  let sumIdx = 0.0
+  for (let i = 0; i < xs.length; i++) {
+    sumIdx += xs[i]!
+  }
+  console.log(`${xs.length} ${sumOf.toFixed(1)} ${sumIdx.toFixed(1)}`)
+}

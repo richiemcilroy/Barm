@@ -1,0 +1,16 @@
+// Insert N string keys into a string -> int map, then look every key up again.
+
+function main() {
+  const n = 2_000_000
+  const m = new Map<string, number>()
+  for (let i = 0; i < n; i++) {
+    m.set("k" + i, i)
+  }
+  let sum = 0
+  for (let i = 0; i < n; i++) {
+    sum += m.get("k" + i)!
+  }
+  console.log(`${m.size} ${sum}`)
+}
+
+main()

@@ -1,0 +1,39 @@
+// The Benchmarks Game binary-trees: allocate, walk and free many perfect binary trees.
+
+type Tree = { left: Tree | undefined, right: Tree | undefined }
+
+function bottomUp(depth: number): Tree {
+  if (depth === 0) return { left: undefined, right: undefined }
+  return { left: bottomUp(depth - 1), right: bottomUp(depth - 1) }
+}
+
+function check(t: Tree): number {
+  const left = t.left
+  const right = t.right
+  if (left === undefined || right === undefined) return 1
+  return 1 + check(left) + check(right)
+}
+
+function main() {
+  const n = 18
+  const minDepth = 4
+  const maxDepth = Math.max(minDepth + 2, n)
+
+  const stretchDepth = maxDepth + 1
+  console.log(`stretch tree of depth ${stretchDepth}\t check: ${check(bottomUp(stretchDepth))}`)
+
+  const longLived = bottomUp(maxDepth)
+
+  for (let depth = minDepth; depth <= maxDepth; depth += 2) {
+    const iterations = 1 << (maxDepth - depth + minDepth)
+    let sum = 0
+    for (let i = 0; i < iterations; i++) {
+      sum += check(bottomUp(depth))
+    }
+    console.log(`${iterations}\t trees of depth ${depth}\t check: ${sum}`)
+  }
+
+  console.log(`long lived tree of depth ${maxDepth}\t check: ${check(longLived)}`)
+}
+
+main()
