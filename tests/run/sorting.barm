@@ -1,0 +1,44 @@
+type Item = { name: string, score: f64, rank: int }
+
+function main() {
+  const xs: f64[] = [3.5, -1, 0, 2, -0.0, 10, 0.5, 2, -7.25, 0]
+  const asc = xs.slice().sort((a, b) => a - b)
+  const desc = xs.slice().sort((a, b) => b - a)
+  console.log(asc, desc)
+  console.log(asc.map(x => Object_is_neg_zero(x)), desc.map(x => Object_is_neg_zero(x)))
+
+  const items: Item[] = [
+    { name: "a", score: 2.5, rank: 3 },
+    { name: "b", score: 1.0, rank: 1 },
+    { name: "c", score: 2.5, rank: 2 },
+    { name: "d", score: -4.0, rank: 5 },
+    { name: "e", score: 1.0, rank: 4 },
+  ]
+  console.log(items.slice().sort((a, b) => a.score - b.score).map(i => i.name).join(""))
+  console.log(items.slice().sort((a, b) => b.score - a.score).map(i => i.name).join(""))
+  console.log(items.slice().sort((a, b) => a.rank - b.rank).map(i => i.name).join(""))
+  console.log(items.slice().sort((a, b) => b.rank - a.rank).map(i => i.name).join(""))
+  console.log(items.slice().sort((a, b) => a.name < b.name ? 1 : -1).map(i => i.name).join(""))
+
+  const ints: int[] = [5, -3, 9, 0, -3, 12, 7]
+  console.log(ints.slice().sort((a, b) => a - b), ints.slice().sort((a, b) => b - a))
+
+  let big: f64[] = []
+  let state = 7
+  for (let i = 0; i < 5000; i++) {
+    state = (state * 48271) % 2147483647
+    big.push((state % 1000) / 7)
+  }
+  const sorted = big.slice().sort((a, b) => a - b)
+  let ok = true
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i - 1]! > sorted[i]!) ok = false
+  }
+  console.log(ok, sorted[0], sorted[4999], sorted.length)
+  const words = ["pear", "fig", "apple", "kiwi"]
+  console.log(words.slice().sort(), words.slice().sort((a, b) => a.byteLength - b.byteLength))
+}
+
+function Object_is_neg_zero(x: f64): bool {
+  return x === 0 && 1 / x < 0
+}

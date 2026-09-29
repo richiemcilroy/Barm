@@ -1,0 +1,71 @@
+function classify(n: int): string {
+  switch (n % 4) {
+    case 0:
+    case 1:
+      return "low"
+    case 2:
+      return "mid"
+    default:
+      return "high"
+  }
+}
+
+function findFirstPair(xs: int[], target: int): string {
+  for (let i = 0; i < xs.length; i++) {
+    const label = `i${i}`
+    for (let j = i + 1; j < xs.length; j++) {
+      if (xs[i]! + xs[j]! === target) return `${label}+j${j}`
+    }
+  }
+  return "none"
+}
+
+function fib(n: int): int {
+  if (n < 2) return n
+  return fib(n - 1) + fib(n - 2)
+}
+
+function max<T>(xs: T[], better: (a: T, b: T) => bool): T | undefined {
+  let best: T | undefined = undefined
+  for (const x of xs) {
+    if (best === undefined || better(x, best)) best = x
+  }
+  return best
+}
+
+function main() {
+  const out: string[] = []
+  for (let i = 0; i < 6; i++) out.push(classify(i))
+  console.log(out.join(" "))
+
+  let evens = 0
+  let i = 0
+  while (true) {
+    i++
+    if (i > 20) break
+    if (i % 2 === 1) continue
+    evens += i
+  }
+  console.log("evens", evens)
+
+  let k = 0
+  do {
+    k += 3
+  } while (k < 10)
+  console.log("k", k)
+
+  console.log(findFirstPair([1, 4, 6, 9], 10), findFirstPair([1, 2], 10))
+  console.log(fib(20))
+  console.log(max([3, 9, 2], (a, b) => a > b), max(["x", "yy", "z"], (a, b) => a.byteLength > b.byteLength), max([] as int[], (a, b) => a > b))
+
+  const words = ["one", "two", "three"]
+  let found = ""
+  for (const w of words) {
+    const upper = w.toUpperCase()
+    if (upper.startsWith("T")) {
+      found = upper
+      break
+    }
+  }
+  console.log(found)
+}

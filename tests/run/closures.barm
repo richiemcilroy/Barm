@@ -1,0 +1,58 @@
+function makeCounter(start: int): () => int {
+  let n = start
+  return () => {
+    n += 1
+    return n
+  }
+}
+
+function compose(f: (x: int) => int, g: (x: int) => int): (x: int) => int {
+  return (x: int) => g(f(x))
+}
+
+function applyTwice(f: (s: string) => string, s: string): string {
+  return f(f(s))
+}
+
+function main() {
+  const c = makeCounter(10)
+  console.log(c(), c(), c())
+  const other = makeCounter(0)
+  console.log(other(), c())
+
+  const inc = (x: int) => x + 1
+  const dbl = (x: int) => x * 2
+  const both = compose(inc, dbl)
+  console.log(both(5), compose(dbl, inc)(5))
+
+  const suffix = "!"
+  console.log(applyTwice((s: string) => s + suffix, "hi"))
+
+  let total = 0
+  const xs: int[] = [1, 2, 3, 4]
+  xs.forEach(x => {
+    total += x
+  })
+  console.log("total", total)
+
+  const adders: ((x: int) => int)[] = []
+  for (let i = 0; i < 3; i++) {
+    const k = i * 10
+    adders.push((x: int) => x + k)
+  }
+  console.log(adders.map(f => f(1)))
+
+  const names = ["b", "a", "c"]
+  const prefix = "item-"
+  const labeled = names.map(n => prefix + n).filter(n => n !== "item-a")
+  console.log(labeled)
+
+  let calls = 0
+  const log = (msg: string) => {
+    calls++
+    console.log(`[${calls}] ${msg}`)
+  }
+  log("first")
+  log("second")
+  console.log("calls", calls)
+}

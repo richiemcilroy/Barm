@@ -1,0 +1,7 @@
+496 16 31
+true 11 16
+{
+  value: 7,
+  left: { value: 14, left: undefined, right: undefined },
+  right: { value: 15, left: undefined, right: undefined }
+}

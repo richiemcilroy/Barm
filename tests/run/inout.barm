@@ -1,0 +1,72 @@
+// `inout` arrays: callers make them unique before calls that write elements in place.
+
+type P = { x: int, tags: int[] }
+
+function bump(inout a: int[]) {
+  for (let i = 0; i < a.length; i++) {
+    a[i] = a[i]! + 1
+  }
+}
+
+function bumpTwice(inout a: int[]) {
+  bump(&a)
+  bump(&a)
+}
+
+function bumpDown(inout a: int[], n: int) {
+  if (n === 0) return
+  a[0] = a[0]! + 10
+  bumpDown(&a, n - 1)
+}
+
+function keep(inout a: int[]): int[] {
+  a[0] = 99
+  return a
+}
+
+function grow(inout a: int[]) {
+  a.push(a.length)
+}
+
+function main() {
+  let a = [1, 2, 3]
+  const b = a.slice()
+  // `c` shares `a`'s buffer (read before the calls only), so `bump` must copy first.
+  const c = a
+  console.log(c)
+  bump(&a)
+  console.log(a, b)
+
+  bumpTwice(&a)
+  console.log(a)
+
+  const d = a
+  console.log(d)
+  for (let i = 0; i < 3; i++) {
+    bump(&a)
+  }
+  console.log(a)
+
+  const e = a
+  console.log(e)
+  bumpDown(&a, 3)
+  console.log(a)
+
+  const g = keep(&a)
+  console.log(a, g)
+  a[1] = -1
+  console.log(a)
+
+  let p: P = { x: 1, tags: [5, 6] }
+  console.log(p.tags)
+  bump(&p.tags)
+  grow(&p.tags)
+  console.log(p)
+
+  let ps: P[] = [{ x: 1, tags: [1] }, { x: 2, tags: [2] }]
+  console.log(ps[1]!.tags)
+  for (let i = 0; i < ps.length; i++) {
+    bump(&ps[i]!.tags)
+  }
+  console.log(ps)
+}
