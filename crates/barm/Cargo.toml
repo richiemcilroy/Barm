@@ -1,0 +1,28 @@
+[package]
+name = "barm"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+description = "The Barm compiler and toolchain"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "barm"
+path = "src/main.rs"
+
+[[test]]
+name = "ui"
+path = "../../tests/ui.rs"
+harness = false
+
+[[test]]
+name = "robustness"
+path = "../../tests/robustness.rs"
+harness = false
+
+[[test]]
+name = "run"
+path = "../../tests/run.rs"
+harness = false
