@@ -1,0 +1,2047 @@
+/* barm.c — the Barm runtime (C11, libc + libm only).
+ *
+ * Generated programs #include "barm.h" and this file into a single translation unit,
+ * so everything that is not part of the barm.h contract is `static` and prefixed `bm_`.
+ * See barm.h for ownership conventions.
+ */
+#include "barm.h"
+
+#include <float.h>
+#include <math.h>
+#include <setjmp.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#if defined(__unix__) || defined(__APPLE__)
+#include <unistd.h>
+#define BM_HAVE_ISATTY 1
+#endif
+
+#if defined(__GNUC__) || defined(__clang__)
+#define BM_LIKELY(x) __builtin_expect(!!(x), 1)
+#define BM_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#define BM_LIKELY(x) (x)
+#define BM_UNLIKELY(x) (x)
+#endif
+
+/* ================================================================== globals */
+
+int bm_argc;
+char **bm_argv;
+
+static jmp_buf *bm_test_jmp;       /* non-NULL while a test is running */
+static bm_sb bm_test_msg;          /* failure message of the running test */
+static const char *bm_test_loc;
+static int64_t bm_tests_passed, bm_tests_failed;
+
+/* ================================================================== traps and memory */
+
+static _Noreturn void bm_oom(size_t size) {
+    bm_out_flush();
+    fprintf(stderr, "trap: out of memory (allocating %zu bytes)\n", size);
+    fflush(stderr);
+    exit(101);
+}
+
+_Noreturn void bm_trap(const char *msg, const char *loc) {
+    if (bm_test_jmp) {
+        bm_test_msg.len = 0;
+        bm_sb_push_cstr(&bm_test_msg, "trap: ");
+        bm_sb_push_cstr(&bm_test_msg, msg);
+        bm_test_loc = loc;
+        longjmp(*bm_test_jmp, 1);
+    }
+    bm_out_flush();
+    fprintf(stderr, "trap: %s\n", msg);
+    if (loc && *loc) fprintf(stderr, "  at %s\n", loc);
+    fflush(stderr);
+    exit(101);
+}
+
+void *bm_alloc(size_t size) {
+    void *p = malloc(size ? size : 1);
+    if (BM_UNLIKELY(!p)) bm_oom(size);
+    return p;
+}
+
+void *bm_realloc(void *p, size_t size) {
+    void *q = realloc(p, size ? size : 1);
+    if (BM_UNLIKELY(!q)) bm_oom(size);
+    return q;
+}
+
+void bm_free(void *p) { free(p); }
+
+/* a * b + c, trapping on overflow (allocation sizes). */
+static size_t bm_size_mul_add(size_t a, size_t b, size_t c) {
+    if (b && a > (SIZE_MAX - c) / b) bm_trap("allocation size overflow", NULL);
+    return a * b + c;
+}
+
+/* ================================================================== string builder */
+
+/* A builder's buffer is laid out as a bm_strbuf (header, bytes, room for a NUL) so that
+ * bm_str_from_sb can adopt it without copying. sb->data points at the bytes. */
+#define BM_STR_HDR offsetof(bm_strbuf, data)
+
+static void bm_sb_grow(bm_sb *sb, size_t need) {
+    size_t cap = sb->cap ? sb->cap * 2 : 32;
+    if (cap < need) cap = need;
+    if (cap > SIZE_MAX - BM_STR_HDR - 1) bm_trap("string too long", NULL);
+    char *base = sb->data ? sb->data - BM_STR_HDR : NULL;
+    base = (char *)bm_realloc(base, BM_STR_HDR + cap + 1);
+    sb->data = base + BM_STR_HDR;
+    sb->cap = cap;
+}
+
+static inline char *bm_sb_reserve(bm_sb *sb, size_t extra) {
+    if (BM_UNLIKELY(sb->cap - sb->len < extra)) {
+        if (extra > SIZE_MAX - sb->len) bm_trap("string too long", NULL);
+        bm_sb_grow(sb, sb->len + extra);
+    }
+    return sb->data + sb->len;
+}
+
+void bm_sb_push(bm_sb *sb, const char *s, size_t n) {
+    if (!n) return;
+    memcpy(bm_sb_reserve(sb, n), s, n);
+    sb->len += n;
+}
+
+void bm_sb_push_cstr(bm_sb *sb, const char *s) { bm_sb_push(sb, s, strlen(s)); }
+
+void bm_sb_push_char(bm_sb *sb, char c) {
+    *bm_sb_reserve(sb, 1) = c;
+    sb->len++;
+}
+
+void bm_sb_free(bm_sb *sb) {
+    if (sb->data) free(sb->data - BM_STR_HDR);
+    sb->data = NULL;
+    sb->len = sb->cap = 0;
+}
+
+void bm_sb_push_str(bm_sb *sb, bm_str s) { bm_sb_push(sb, s.p->data, (size_t)s.p->len); }
+
+/* ================================================================== hashing */
+
+static inline uint64_t bm_mix64(uint64_t x) { /* splitmix64 finalizer */
+    x ^= x >> 30;
+    x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 27;
+    x *= 0x94d049bb133111ebULL;
+    x ^= x >> 31;
+    return x;
+}
+
+static inline uint64_t bm_mum(uint64_t a, uint64_t b) {
+#ifdef __SIZEOF_INT128__
+    __extension__ typedef unsigned __int128 bm_u128;
+    bm_u128 r = (bm_u128)a * b;
+    return (uint64_t)r ^ (uint64_t)(r >> 64);
+#else
+    uint64_t ha = a >> 32, la = (uint32_t)a, hb = b >> 32, lb = (uint32_t)b;
+    uint64_t rh = ha * hb, rm0 = ha * lb, rm1 = hb * la, rl = la * lb;
+    uint64_t t = rl + (rm0 << 32), c = t < rl;
+    uint64_t lo = t + (rm1 << 32);
+    c += lo < t;
+    uint64_t hi = rh + (rm0 >> 32) + (rm1 >> 32) + c;
+    return lo ^ hi;
+#endif
+}
+
+static inline uint64_t bm_r64(const unsigned char *p) { uint64_t v; memcpy(&v, p, 8); return v; }
+static inline uint64_t bm_r32(const unsigned char *p) { uint32_t v; memcpy(&v, p, 4); return v; }
+
+/* wyhash-style byte hash. */
+static uint64_t bm_hash_bytes(const void *data, size_t len) {
+    const uint64_t s0 = 0xa0761d6478bd642fULL, s1 = 0xe7037ed1a0b428dbULL, s2 = 0x8ebc6af09c88c6e3ULL;
+    const unsigned char *p = (const unsigned char *)data;
+    uint64_t seed = 0x243f6a8885a308d3ULL ^ bm_mum(len ^ s0, s1);
+    uint64_t a, b;
+    if (len <= 16) {
+        if (len >= 8) {
+            a = bm_r64(p);
+            b = bm_r64(p + len - 8);
+        } else if (len >= 4) {
+            a = bm_r32(p);
+            b = bm_r32(p + len - 4);
+        } else if (len > 0) {
+            a = ((uint64_t)p[0] << 16) | ((uint64_t)p[len >> 1] << 8) | p[len - 1];
+            b = 0;
+        } else {
+            a = b = 0;
+        }
+    } else {
+        size_t n = len;
+        while (n > 16) {
+            seed = bm_mum(bm_r64(p) ^ s1, bm_r64(p + 8) ^ seed);
+            p += 16;
+            n -= 16;
+        }
+        a = bm_r64(p + n - 16);
+        b = bm_r64(p + n - 8);
+    }
+    return bm_mum(s1 ^ len, bm_mum(a ^ s2, b ^ seed));
+}
+
+/* ================================================================== strings */
+
+bm_strbuf bm_empty_strbuf = {-1, 0, {0}}; /* flexible-array initializer: GNU C (gcc, clang) */
+
+typedef struct { int64_t rc; int64_t len; char data[8]; } bm_small_strbuf;
+#define BM_A1(c) {-1, 1, {(char)(c), 0}}
+#define BM_A4(c) BM_A1(c), BM_A1((c) + 1), BM_A1((c) + 2), BM_A1((c) + 3)
+#define BM_A16(c) BM_A4(c), BM_A4((c) + 4), BM_A4((c) + 8), BM_A4((c) + 12)
+/* Immortal one-character ASCII strings: chars()/split("") and friends never allocate for ASCII. */
+static bm_small_strbuf bm_ascii_strs[128] = {
+    BM_A16(0), BM_A16(16), BM_A16(32), BM_A16(48), BM_A16(64), BM_A16(80), BM_A16(96), BM_A16(112),
+};
+#undef BM_A1
+#undef BM_A4
+#undef BM_A16
+
+BM_STR_LIT(bm_lit_true, "true");
+BM_STR_LIT(bm_lit_false, "false");
+
+static inline bm_str bm_ascii_str(unsigned char c) { return (bm_str){(bm_strbuf *)&bm_ascii_strs[c]}; }
+
+static bm_strbuf *bm_strbuf_new(size_t n) {
+    bm_strbuf *b = (bm_strbuf *)bm_alloc(bm_size_mul_add(n, 1, BM_STR_HDR + 1));
+    b->rc = 1;
+    b->len = (int64_t)n;
+    b->data[n] = 0;
+    return b;
+}
+
+void bm_str_release_slow(bm_str s) { free(s.p); }
+
+bm_str bm_str_from(const char *bytes, size_t n) {
+    if (n == 0) return BM_EMPTY_STR;
+    if (n == 1 && (unsigned char)bytes[0] < 128) return bm_ascii_str((unsigned char)bytes[0]);
+    bm_strbuf *b = bm_strbuf_new(n);
+    memcpy(b->data, bytes, n);
+    return (bm_str){b};
+}
+
+bm_str bm_str_from_sb(bm_sb *sb) {
+    size_t n = sb->len;
+    if (n <= 1) { /* empty or one byte: bm_str_from may return an immortal string */
+        bm_str r = bm_str_from(sb->data, n);
+        bm_sb_free(sb);
+        return r;
+    }
+    bm_strbuf *b = (bm_strbuf *)(sb->data - BM_STR_HDR);
+    if (sb->cap - n > 64) b = (bm_strbuf *)bm_realloc(b, BM_STR_HDR + n + 1);
+    b->rc = 1;
+    b->len = (int64_t)n;
+    b->data[n] = 0;
+    sb->data = NULL;
+    sb->len = sb->cap = 0;
+    return (bm_str){b};
+}
+
+bm_str bm_str_concat(bm_str a, bm_str b) {
+    size_t na = (size_t)a.p->len, nb = (size_t)b.p->len;
+    if (nb == 0) { bm_str_retain(a); return a; }
+    if (na == 0) { bm_str_retain(b); return b; }
+    bm_strbuf *r = bm_strbuf_new(bm_size_mul_add(na, 1, nb));
+    memcpy(r->data, a.p->data, na);
+    memcpy(r->data + na, b.p->data, nb);
+    return (bm_str){r};
+}
+
+bool bm_str_eq(bm_str a, bm_str b) {
+    return a.p == b.p || (a.p->len == b.p->len && memcmp(a.p->data, b.p->data, (size_t)a.p->len) == 0);
+}
+
+int bm_str_cmp(bm_str a, bm_str b) {
+    if (a.p == b.p) return 0;
+    int64_t na = a.p->len, nb = b.p->len;
+    int c = memcmp(a.p->data, b.p->data, (size_t)(na < nb ? na : nb));
+    if (c) return c < 0 ? -1 : 1;
+    return na < nb ? -1 : na > nb;
+}
+
+uint64_t bm_str_hash(bm_str s) { return bm_hash_bytes(s.p->data, (size_t)s.p->len); }
+
+/* ------------------------------------------------------------------ integer / bool formatting */
+
+/* Writes the decimal digits of v ending at `end`; returns the start. */
+static char *bm_fmt_u64_rev(char *end, uint64_t v) {
+    do {
+        *--end = (char)('0' + v % 10);
+        v /= 10;
+    } while (v);
+    return end;
+}
+
+static size_t bm_fmt_i64(char *buf, int64_t v) { /* buf >= 21 bytes */
+    char tmp[24], *end = tmp + sizeof tmp;
+    uint64_t u = v < 0 ? (uint64_t)0 - (uint64_t)v : (uint64_t)v;
+    char *p = bm_fmt_u64_rev(end, u);
+    if (v < 0) *--p = '-';
+    size_t n = (size_t)(end - p);
+    memcpy(buf, p, n);
+    return n;
+}
+
+bm_str bm_str_from_int(bm_int v) {
+    char buf[24];
+    return bm_str_from(buf, bm_fmt_i64(buf, v));
+}
+
+void bm_sb_push_int(bm_sb *sb, bm_int v) {
+    char buf[24];
+    bm_sb_push(sb, buf, bm_fmt_i64(buf, v));
+}
+
+static void bm_sb_push_u64(bm_sb *sb, uint64_t v) {
+    char tmp[24], *end = tmp + sizeof tmp;
+    char *p = bm_fmt_u64_rev(end, v);
+    bm_sb_push(sb, p, (size_t)(end - p));
+}
+
+bm_str bm_str_from_bool(bool v) { return v ? BM_LIT(bm_lit_true) : BM_LIT(bm_lit_false); }
+
+/* ------------------------------------------------------------------ JS number formatting */
+
+/* Shortest decimal digits d1..dk (no trailing zeros) and exponent n such that
+ * v == 0.d1..dk × 10^n round-trips (v > 0, finite). For f32, round-trips as a float. */
+static int bm_shortest_digits(double v, bool is_f32, char *digits, int *n_out) {
+    char tmp[48];
+    if (is_f32) {
+        for (int prec = 0; prec < 9; prec++) {
+            snprintf(tmp, sizeof tmp, "%.*e", prec, v);
+            if (strtof(tmp, NULL) == (float)v) break;
+        }
+    } else if (v >= DBL_MIN) {
+        /* For normal doubles, if any <=15-digit decimal round-trips then the correctly rounded
+         * 15-digit one does too, and stripping its trailing zeros gives the shortest. */
+        snprintf(tmp, sizeof tmp, "%.14e", v);
+        if (strtod(tmp, NULL) != v) {
+            snprintf(tmp, sizeof tmp, "%.15e", v);
+            if (strtod(tmp, NULL) != v) snprintf(tmp, sizeof tmp, "%.16e", v);
+        }
+    } else { /* subnormal: fewer significant bits, search all precisions */
+        for (int prec = 0; prec < 17; prec++) {
+            snprintf(tmp, sizeof tmp, "%.*e", prec, v);
+            if (strtod(tmp, NULL) == v) break;
+        }
+    }
+    int k = 0;
+    const char *s = tmp;
+    for (; *s && *s != 'e'; s++)
+        if (*s >= '0' && *s <= '9') digits[k++] = *s;
+    int e = *s == 'e' ? atoi(s + 1) : 0;
+    while (k > 1 && digits[k - 1] == '0') k--;
+    *n_out = e + 1;
+    return k;
+}
+
+/* JS Number::toString(v) into buf (>= 32 bytes); returns the length. */
+static size_t bm_fmt_number(char *buf, double v, bool is_f32) {
+    if (v != v) { memcpy(buf, "NaN", 3); return 3; }
+    if (v == 0) { buf[0] = '0'; return 1; }
+    char *p = buf;
+    if (v < 0) { *p++ = '-'; v = -v; }
+    if (isinf(v)) { memcpy(p, "Infinity", 8); return (size_t)(p - buf) + 8; }
+    if (v < (is_f32 ? 16777216.0 : 9007199254740992.0) && v == (double)(int64_t)v)
+        return (size_t)(p - buf) + bm_fmt_i64(p, (int64_t)v);
+    char d[24] = {0};
+    int n, k = bm_shortest_digits(v, is_f32, d, &n);
+    if (k <= n && n <= 21) {
+        memcpy(p, d, (size_t)k); p += k;
+        for (int i = k; i < n; i++) *p++ = '0';
+    } else if (0 < n && n <= 21) {
+        memcpy(p, d, (size_t)n); p += n;
+        *p++ = '.';
+        memcpy(p, d + n, (size_t)(k - n)); p += k - n;
+    } else if (-6 < n && n <= 0) {
+        *p++ = '0'; *p++ = '.';
+        for (int i = n; i < 0; i++) *p++ = '0';
+        memcpy(p, d, (size_t)k); p += k;
+    } else {
+        *p++ = d[0];
+        if (k > 1) { *p++ = '.'; memcpy(p, d + 1, (size_t)(k - 1)); p += k - 1; }
+        *p++ = 'e';
+        int e = n - 1;
+        *p++ = e < 0 ? '-' : '+';
+        p += bm_fmt_i64(p, e < 0 ? -e : e);
+    }
+    return (size_t)(p - buf);
+}
+
+bm_str bm_str_from_f64(double v) {
+    char buf[40];
+    return bm_str_from(buf, bm_fmt_number(buf, v, false));
+}
+
+void bm_sb_push_f64(bm_sb *sb, double v) {
+    char buf[40];
+    bm_sb_push(sb, buf, bm_fmt_number(buf, v, false));
+}
+
+static void bm_toFixed_check(bm_int digits, const char *loc) {
+    if (digits < 0 || digits > 100) bm_trap("toFixed() digits argument must be between 0 and 100", loc);
+}
+
+bm_str bm_f64_to_fixed(double v, bm_int digits, const char *loc) {
+    bm_toFixed_check(digits, loc);
+    if (v != v || fabs(v) >= 1e21) return bm_str_from_f64(v);
+    if (v == 0) v = 0.0; /* (-0).toFixed() is "0" */
+    int f = (int)digits;
+    char buf[160];
+    int len;
+    /* printf rounds exact ties to even; JS rounds them away from zero. A tie happens exactly
+     * when v = m × 2^-(f+1) with m odd; then "%.{f+1}f" is exact and ends in '5'. */
+    int e2;
+    double fr = frexp(fabs(v), &e2);
+    uint64_t mant = (uint64_t)ldexp(fr, 53);
+    int e = e2 - 53;
+    while (mant && !(mant & 1)) { mant >>= 1; e++; }
+    if (mant && e == -(f + 1)) {
+        len = snprintf(buf, sizeof buf, "%.*f", f + 1, v);
+        buf[--len] = 0;                 /* drop the '5' */
+        if (f == 0) buf[--len] = 0;     /* drop the '.' */
+        int i = len - 1;
+        for (;;) {                      /* increment the magnitude */
+            if (i < 0 || buf[i] == '-') {
+                memmove(buf + (i + 2), buf + (i + 1), (size_t)(len - i)); /* shift incl. NUL */
+                buf[i + 1] = '1';
+                len++;
+                break;
+            }
+            if (buf[i] == '.') { i--; continue; }
+            if (buf[i] == '9') { buf[i--] = '0'; continue; }
+            buf[i]++;
+            break;
+        }
+    } else {
+        len = snprintf(buf, sizeof buf, "%.*f", f, v);
+    }
+    return bm_str_from(buf, (size_t)len);
+}
+
+bm_str bm_int_to_fixed(bm_int v, bm_int digits, const char *loc) {
+    bm_toFixed_check(digits, loc);
+    bm_sb sb = {0};
+    bm_sb_push_int(&sb, v);
+    if (digits > 0) {
+        bm_sb_push_char(&sb, '.');
+        memset(bm_sb_reserve(&sb, (size_t)digits), '0', (size_t)digits);
+        sb.len += (size_t)digits;
+    }
+    return bm_str_from_sb(&sb);
+}
+
+/* ------------------------------------------------------------------ UTF-8 helpers */
+
+static inline size_t bm_utf8_len(unsigned char c) {
+    if (c < 0x80) return 1;
+    if (c >= 0xF0) return 4;
+    if (c >= 0xE0) return 3;
+    if (c >= 0xC0) return 2;
+    return 1; /* stray continuation byte (invalid UTF-8): treat as one unit */
+}
+
+/* Decodes the character at p (n bytes available); returns its byte length. */
+static size_t bm_utf8_decode(const unsigned char *p, size_t n, uint32_t *cp) {
+    size_t l = bm_utf8_len(p[0]);
+    if (l > n) l = n;
+    uint32_t c = l == 1 ? p[0] : l == 2 ? p[0] & 0x1F : l == 3 ? p[0] & 0x0F : p[0] & 0x07;
+    for (size_t i = 1; i < l; i++) c = (c << 6) | (p[i] & 0x3F);
+    *cp = c;
+    return l;
+}
+
+static inline bool bm_is_cont(unsigned char c) { return (c & 0xC0) == 0x80; }
+
+static bool bm_is_js_space(uint32_t c) {
+    if (c < 0x80) return c == ' ' || (c >= 0x09 && c <= 0x0D);
+    return c == 0xA0 || c == 0x1680 || (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 ||
+           c == 0x202F || c == 0x205F || c == 0x3000 || c == 0xFEFF;
+}
+
+static void bm_trim_range(bm_str s, bool left, bool right, size_t *a_out, size_t *b_out) {
+    const unsigned char *d = (const unsigned char *)s.p->data;
+    size_t a = 0, b = (size_t)s.p->len;
+    uint32_t cp;
+    if (left)
+        while (a < b) {
+            size_t l = bm_utf8_decode(d + a, b - a, &cp);
+            if (!bm_is_js_space(cp)) break;
+            a += l;
+        }
+    if (right)
+        while (b > a) {
+            size_t st = b - 1;
+            while (st > a && bm_is_cont(d[st]) && b - st < 4) st--;
+            bm_utf8_decode(d + st, b - st, &cp);
+            if (!bm_is_js_space(cp)) break;
+            b = st;
+        }
+    *a_out = a;
+    *b_out = b;
+}
+
+bm_int bm_str_char_count(bm_str s) {
+    const unsigned char *d = (const unsigned char *)s.p->data;
+    size_t n = (size_t)s.p->len, count = 0, i = 0;
+#if defined(__GNUC__) || defined(__clang__)
+    for (; i + 8 <= n; i += 8) { /* count non-continuation bytes, 8 at a time */
+        uint64_t w = bm_r64(d + i);
+        uint64_t cont = (w & ~(w << 1)) & 0x8080808080808080ULL; /* bit7=1, bit6=0 */
+        count += 8 - (size_t)__builtin_popcountll(cont);
+    }
+#endif
+    for (; i < n; i++) count += !bm_is_cont(d[i]);
+    return (bm_int)count;
+}
+
+/* Byte offset after `chars` characters starting at d (bounded by n). */
+static size_t bm_utf8_advance(const char *d, size_t n, size_t chars) {
+    size_t i = 0;
+    while (chars-- && i < n) i += bm_utf8_len((unsigned char)d[i]);
+    return i < n ? i : n;
+}
+
+/* ------------------------------------------------------------------ string methods */
+
+static inline int64_t bm_clamp_index(int64_t i, int64_t len) {
+    if (i < 0) { i += len; return i < 0 ? 0 : i; }
+    return i > len ? len : i;
+}
+
+static void bm_check_boundary(bm_str s, int64_t i, const char *loc) {
+    if (i > 0 && i < s.p->len && bm_is_cont((unsigned char)s.p->data[i])) {
+        char msg[96];
+        snprintf(msg, sizeof msg, "string index %lld is not on a UTF-8 character boundary", (long long)i);
+        bm_trap(msg, loc);
+    }
+}
+
+bm_str bm_str_slice(bm_str s, bm_int start, bm_int end, bool has_end, const char *loc) {
+    int64_t len = s.p->len;
+    int64_t a = bm_clamp_index(start, len);
+    int64_t b = has_end ? bm_clamp_index(end, len) : len;
+    if (b < a) b = a;
+    bm_check_boundary(s, a, loc);
+    bm_check_boundary(s, b, loc);
+    if (a == 0 && b == len) { bm_str_retain(s); return s; }
+    return bm_str_from(s.p->data + a, (size_t)(b - a));
+}
+
+/* Byte index of needle in h at or after `from`, or -1. */
+static int64_t bm_find(const char *h, size_t hn, const char *nd, size_t nn, size_t from) {
+    if (from > hn || nn > hn - from) return -1;
+    if (nn == 0) return (int64_t)from;
+    const char *p = h + from, *last = h + hn - nn; /* last possible start */
+    char first = nd[0];
+    while (p <= last) {
+        p = (const char *)memchr(p, first, (size_t)(last - p) + 1);
+        if (!p) return -1;
+        if (memcmp(p + 1, nd + 1, nn - 1) == 0) return p - h;
+        p++;
+    }
+    return -1;
+}
+
+bool bm_str_includes(bm_str s, bm_str needle) { return bm_str_index_of(s, needle) >= 0; }
+
+bool bm_str_starts_with(bm_str s, bm_str prefix) {
+    return prefix.p->len <= s.p->len && memcmp(s.p->data, prefix.p->data, (size_t)prefix.p->len) == 0;
+}
+
+bool bm_str_ends_with(bm_str s, bm_str suffix) {
+    return suffix.p->len <= s.p->len &&
+           memcmp(s.p->data + s.p->len - suffix.p->len, suffix.p->data, (size_t)suffix.p->len) == 0;
+}
+
+bm_int bm_str_index_of(bm_str s, bm_str needle) {
+    return bm_find(s.p->data, (size_t)s.p->len, needle.p->data, (size_t)needle.p->len, 0);
+}
+
+static bm_arrbuf *bm_arrbuf_new(size_t esize, int64_t cap);
+
+bm_arr bm_str_chars(bm_str s) {
+    int64_t count = bm_str_char_count(s);
+    if (count == 0) return BM_EMPTY_ARR;
+    bm_arrbuf *b = bm_arrbuf_new(sizeof(bm_str), count);
+    bm_str *out = (bm_str *)(void *)b->data;
+    const char *d = s.p->data;
+    size_t n = (size_t)s.p->len, i = 0;
+    int64_t k = 0;
+    while (i < n && k < count) {
+        size_t l = bm_utf8_len((unsigned char)d[i]);
+        if (l > n - i) l = n - i;
+        out[k++] = bm_str_from(d + i, l);
+        i += l;
+    }
+    return (bm_arr){b, k};
+}
+
+bm_arr bm_str_split(bm_str s, bm_str sep) {
+    if (sep.p->len == 0) return bm_str_chars(s);
+    bm_arr r = BM_EMPTY_ARR;
+    const char *d = s.p->data;
+    size_t n = (size_t)s.p->len, sn = (size_t)sep.p->len, from = 0;
+    int64_t pos = bm_find(d, n, sep.p->data, sn, 0);
+    if (pos < 0) {
+        bm_str_retain(s);
+        bm_arr_push(&r, &bm_type_str, &s);
+        return r;
+    }
+    for (;;) {
+        size_t end = pos < 0 ? n : (size_t)pos;
+        bm_str piece = bm_str_from(d + from, end - from);
+        bm_arr_push_fast(&r, &bm_type_str, &piece);
+        if (pos < 0) break;
+        from = end + sn;
+        pos = bm_find(d, n, sep.p->data, sn, from);
+    }
+    return r;
+}
+
+static bm_str bm_str_trim_impl(bm_str s, bool left, bool right) {
+    size_t a, b;
+    bm_trim_range(s, left, right, &a, &b);
+    if (a == 0 && b == (size_t)s.p->len) { bm_str_retain(s); return s; }
+    return bm_str_from(s.p->data + a, b - a);
+}
+
+bm_str bm_str_trim(bm_str s) { return bm_str_trim_impl(s, true, true); }
+bm_str bm_str_trim_start(bm_str s) { return bm_str_trim_impl(s, true, false); }
+bm_str bm_str_trim_end(bm_str s) { return bm_str_trim_impl(s, false, true); }
+
+static bm_str bm_str_map_ascii(bm_str s, char lo, char hi, int delta) {
+    const char *d = s.p->data;
+    size_t n = (size_t)s.p->len, i = 0;
+    while (i < n && !(d[i] >= lo && d[i] <= hi)) i++;
+    if (i == n) { bm_str_retain(s); return s; }
+    bm_strbuf *b = bm_strbuf_new(n);
+    memcpy(b->data, d, n);
+    for (; i < n; i++)
+        if (b->data[i] >= lo && b->data[i] <= hi) b->data[i] = (char)(b->data[i] + delta);
+    return (bm_str){b};
+}
+
+bm_str bm_str_to_upper(bm_str s) { return bm_str_map_ascii(s, 'a', 'z', 'A' - 'a'); }
+bm_str bm_str_to_lower(bm_str s) { return bm_str_map_ascii(s, 'A', 'Z', 'a' - 'A'); }
+
+/* Appends a JS replacement string, expanding $$, $&, $` and $'. */
+static void bm_push_replacement(bm_sb *sb, bm_str repl, const char *s, size_t slen, size_t pos, size_t mlen) {
+    const char *r = repl.p->data;
+    size_t rn = (size_t)repl.p->len;
+    if (!memchr(r, '$', rn)) { bm_sb_push(sb, r, rn); return; }
+    for (size_t i = 0; i < rn; i++) {
+        if (r[i] == '$' && i + 1 < rn) {
+            char c = r[i + 1];
+            if (c == '$') { bm_sb_push_char(sb, '$'); i++; continue; }
+            if (c == '&') { bm_sb_push(sb, s + pos, mlen); i++; continue; }
+            if (c == '`') { bm_sb_push(sb, s, pos); i++; continue; }
+            if (c == '\'') { bm_sb_push(sb, s + pos + mlen, slen - pos - mlen); i++; continue; }
+        }
+        bm_sb_push_char(sb, r[i]);
+    }
+}
+
+bm_str bm_str_replace(bm_str s, bm_str search, bm_str replacement) {
+    const char *d = s.p->data;
+    size_t n = (size_t)s.p->len, mn = (size_t)search.p->len;
+    int64_t pos = bm_find(d, n, search.p->data, mn, 0);
+    if (pos < 0) { bm_str_retain(s); return s; }
+    bm_sb sb = {0};
+    bm_sb_push(&sb, d, (size_t)pos);
+    bm_push_replacement(&sb, replacement, d, n, (size_t)pos, mn);
+    bm_sb_push(&sb, d + pos + mn, n - (size_t)pos - mn);
+    return bm_str_from_sb(&sb);
+}
+
+bm_str bm_str_replace_all(bm_str s, bm_str search, bm_str replacement) {
+    const char *d = s.p->data;
+    size_t n = (size_t)s.p->len, mn = (size_t)search.p->len;
+    bm_sb sb = {0};
+    if (mn == 0) { /* insert at every character boundary, including both ends */
+        size_t i = 0;
+        for (;;) {
+            bm_push_replacement(&sb, replacement, d, n, i, 0);
+            if (i >= n) break;
+            size_t l = bm_utf8_len((unsigned char)d[i]);
+            if (l > n - i) l = n - i;
+            bm_sb_push(&sb, d + i, l);
+            i += l;
+        }
+        return bm_str_from_sb(&sb);
+    }
+    int64_t pos = bm_find(d, n, search.p->data, mn, 0);
+    if (pos < 0) { bm_str_retain(s); return s; }
+    size_t last = 0;
+    while (pos >= 0) {
+        bm_sb_push(&sb, d + last, (size_t)pos - last);
+        bm_push_replacement(&sb, replacement, d, n, (size_t)pos, mn);
+        last = (size_t)pos + mn;
+        pos = bm_find(d, n, search.p->data, mn, last);
+    }
+    bm_sb_push(&sb, d + last, n - last);
+    return bm_str_from_sb(&sb);
+}
+
+bm_str bm_str_repeat(bm_str s, bm_int count, const char *loc) {
+    if (count < 0) {
+        char msg[64];
+        snprintf(msg, sizeof msg, "Invalid count value: %lld", (long long)count);
+        bm_trap(msg, loc);
+    }
+    size_t n = (size_t)s.p->len;
+    if (count == 0 || n == 0) return BM_EMPTY_STR;
+    if (count == 1) { bm_str_retain(s); return s; }
+    if ((uint64_t)count > (uint64_t)(INT64_MAX / 2) / n) bm_trap("Invalid string length", loc);
+    size_t total = n * (size_t)count;
+    bm_strbuf *b = bm_strbuf_new(total);
+    memcpy(b->data, s.p->data, n);
+    size_t have = n;
+    while (have < total) { /* doubling copies */
+        size_t c = have <= total - have ? have : total - have;
+        memcpy(b->data + have, b->data, c);
+        have += c;
+    }
+    return (bm_str){b};
+}
+
+/* Appends `chars` characters of fill (cycled). fill is non-empty. */
+static void bm_push_fill(bm_sb *sb, bm_str fill, int64_t chars) {
+    int64_t fc = bm_str_char_count(fill);
+    int64_t full = chars / fc, rem = chars % fc;
+    for (int64_t i = 0; i < full; i++) bm_sb_push_str(sb, fill);
+    bm_sb_push(sb, fill.p->data, bm_utf8_advance(fill.p->data, (size_t)fill.p->len, (size_t)rem));
+}
+
+static bm_str bm_str_pad(bm_str s, bm_int len, bm_str fill, bool at_start) {
+    int64_t cur = bm_str_char_count(s);
+    if (len <= cur || fill.p->len == 0) { bm_str_retain(s); return s; }
+    bm_sb sb = {0};
+    if (!at_start) bm_sb_push_str(&sb, s);
+    bm_push_fill(&sb, fill, len - cur);
+    if (at_start) bm_sb_push_str(&sb, s);
+    return bm_str_from_sb(&sb);
+}
+
+bm_str bm_str_pad_start(bm_str s, bm_int len, bm_str fill) { return bm_str_pad(s, len, fill, true); }
+bm_str bm_str_pad_end(bm_str s, bm_int len, bm_str fill) { return bm_str_pad(s, len, fill, false); }
+
+/* ------------------------------------------------------------------ parsing */
+
+static inline bool bm_is_digit(char c) { return c >= '0' && c <= '9'; }
+
+bool bm_parse_float(bm_str s, double *out) {
+    size_t a, b;
+    bm_trim_range(s, true, true, &a, &b);
+    const char *p = s.p->data + a, *e = s.p->data + b, *q = p;
+    if (p == e) return false;
+    bool neg = *q == '-';
+    if (*q == '+' || *q == '-') q++;
+    if (e - q == 8 && memcmp(q, "Infinity", 8) == 0) {
+        *out = neg ? -INFINITY : INFINITY;
+        return true;
+    }
+    size_t nd = 0;
+    while (q < e && bm_is_digit(*q)) q++, nd++;
+    if (q < e && *q == '.') {
+        q++;
+        while (q < e && bm_is_digit(*q)) q++, nd++;
+    }
+    if (nd == 0) return false;
+    if (q < e && (*q == 'e' || *q == 'E')) {
+        q++;
+        if (q < e && (*q == '+' || *q == '-')) q++;
+        size_t ne = 0;
+        while (q < e && bm_is_digit(*q)) q++, ne++;
+        if (ne == 0) return false;
+    }
+    if (q != e) return false;
+    /* The span is validated; strtod stops at e (whitespace, NUL or a non-ASCII byte). */
+    char *end;
+    double d = strtod(p, &end);
+    if (end != e) return false;
+    *out = d;
+    return true;
+}
+
+bool bm_parse_int(bm_str s, bm_int radix, bm_int *out) {
+    size_t a, b;
+    bm_trim_range(s, true, false, &a, &b);
+    const char *p = s.p->data + a, *e = s.p->data + b;
+    bool neg = false;
+    if (p < e && (*p == '+' || *p == '-')) neg = *p++ == '-';
+    bool hex_prefix = e - p >= 2 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X');
+    if (radix == 0) {
+        radix = 10;
+        if (hex_prefix) { radix = 16; p += 2; }
+    } else if (radix == 16) {
+        if (hex_prefix) p += 2;
+    } else if (radix < 2 || radix > 36) {
+        return false;
+    }
+    uint64_t v = 0, limit = neg ? (uint64_t)INT64_MAX + 1 : (uint64_t)INT64_MAX;
+    size_t nd = 0;
+    for (; p < e; p++) {
+        char c = *p;
+        int dv = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'z' ? c - 'a' + 10 : c >= 'A' && c <= 'Z' ? c - 'A' + 10 : 99;
+        if (dv >= radix) break;
+        if (v > (limit - (uint64_t)dv) / (uint64_t)radix) return false; /* doesn't fit in int */
+        v = v * (uint64_t)radix + (uint64_t)dv;
+        nd++;
+    }
+    if (nd == 0) return false;
+    *out = neg ? (bm_int)(0 - v) : (bm_int)v;
+    return true;
+}
+
+/* ================================================================== arrays */
+
+static int64_t bm_grow_cap(int64_t cur, int64_t min_cap) {
+    int64_t c = cur > INT64_MAX / 2 ? INT64_MAX : cur * 2; /* geometric, at least 4 */
+    if (c < 4) c = 4;
+    return c < min_cap ? min_cap : c;
+}
+
+static bm_arrbuf *bm_arrbuf_new(size_t esize, int64_t cap) {
+    bm_arrbuf *b = (bm_arrbuf *)bm_alloc(bm_size_mul_add((size_t)cap, esize, sizeof(bm_arrbuf)));
+    b->rc = 1;
+    b->cap = cap;
+    b->_pad[0] = b->_pad[1] = 0;
+    return b;
+}
+
+/* Copies n elements and retains the copies. */
+static void bm_copy_retain(unsigned char *dst, const unsigned char *src, int64_t n, const bm_type *t) {
+    size_t es = t->size;
+    if (!es || n <= 0) return;
+    memcpy(dst, src, (size_t)n * es);
+    if (t->retain)
+        for (int64_t i = 0; i < n; i++) t->retain(dst + (size_t)i * es);
+}
+
+void bm_arr_release_slow(bm_arr a, const bm_type *t) {
+    if (t && t->release && t->size) {
+        size_t es = t->size;
+        for (int64_t i = 0; i < a.len; i++) t->release(a.p->data + (size_t)i * es);
+    }
+    free(a.p);
+}
+
+void bm_arr_make_unique(bm_arr *a, const bm_type *t, bm_int min_cap) {
+    bm_arrbuf *p = a->p;
+    size_t es = t->size;
+    if (p && p->rc == 1) {
+        if (p->cap >= min_cap) return;
+        int64_t nc = bm_grow_cap(p->cap, min_cap);
+        p = (bm_arrbuf *)bm_realloc(p, bm_size_mul_add((size_t)nc, es, sizeof(bm_arrbuf)));
+        p->cap = nc;
+        a->p = p;
+        return;
+    }
+    if (!p) {
+        if (min_cap > 0) a->p = bm_arrbuf_new(es, bm_grow_cap(0, min_cap));
+        return;
+    }
+    /* shared (rc > 1) or immortal (rc < 0): clone the value's elements */
+    int64_t len = a->len;
+    int64_t nc = min_cap > len ? bm_grow_cap(len, min_cap) : len;
+    bm_arrbuf *q = NULL;
+    if (nc > 0) {
+        q = bm_arrbuf_new(es, nc);
+        bm_copy_retain(q->data, p->data, len, t);
+    }
+    if (p->rc > 0) p->rc--; /* was > 1, so this never frees */
+    a->p = q;
+}
+
+bm_arr bm_arr_with_capacity(const bm_type *t, bm_int cap) {
+    if (cap <= 0) return BM_EMPTY_ARR;
+    return (bm_arr){bm_arrbuf_new(t->size, cap), 0};
+}
+
+void *bm_arr_reserve_tail(bm_arr *a, const bm_type *t, bm_int n) {
+    if (n < 0 || n > INT64_MAX - a->len) bm_trap("invalid array reserve count", NULL);
+    bm_arr_make_unique(a, t, a->len + n);
+    return a->p ? a->p->data + (size_t)a->len * t->size : NULL;
+}
+
+_Noreturn void bm_arr_oob(bm_int i, bm_int len, const char *loc) {
+    char msg[96];
+    snprintf(msg, sizeof msg, "index %lld out of bounds for length %lld", (long long)i, (long long)len);
+    bm_trap(msg, loc);
+}
+
+void *bm_arr_at_mut(bm_arr *a, const bm_type *t, bm_int i, const char *loc) {
+    bm_int n = bm_arr_len(*a);
+    if ((uint64_t)i >= (uint64_t)n) bm_arr_oob(i, n, loc);
+    bm_arr_make_unique(a, t, 0);
+    return a->p->data + (size_t)i * t->size;
+}
+
+void bm_arr_push(bm_arr *a, const bm_type *t, void *elem) {
+    int64_t len = bm_arr_len(*a);
+    bm_arr_make_unique(a, t, len + 1);
+    if (t->size) memcpy(a->p->data + (size_t)len * t->size, elem, t->size);
+    a->len = len + 1;
+}
+
+bool bm_arr_pop(bm_arr *a, const bm_type *t, void *out) {
+    int64_t len = bm_arr_len(*a);
+    if (len == 0) return false;
+    bm_arr_make_unique(a, t, 0);
+    size_t es = t->size;
+    if (es) {
+        unsigned char *src = a->p->data + (size_t)(len - 1) * es;
+        if (out) memcpy(out, src, es);
+        else if (t->release) t->release(src);
+    }
+    a->len = len - 1;
+    return true;
+}
+
+bool bm_arr_shift(bm_arr *a, const bm_type *t, void *out) {
+    int64_t len = bm_arr_len(*a);
+    if (len == 0) return false;
+    bm_arr_make_unique(a, t, 0);
+    size_t es = t->size;
+    if (es) {
+        unsigned char *d = a->p->data;
+        if (out) memcpy(out, d, es);
+        else if (t->release) t->release(d);
+        memmove(d, d + es, (size_t)(len - 1) * es);
+    }
+    a->len = len - 1;
+    return true;
+}
+
+void bm_arr_unshift(bm_arr *a, const bm_type *t, void *elem) {
+    int64_t len = bm_arr_len(*a);
+    bm_arr_make_unique(a, t, len + 1);
+    size_t es = t->size;
+    if (es) {
+        unsigned char *d = a->p->data;
+        memmove(d + es, d, (size_t)len * es);
+        memcpy(d, elem, es);
+    }
+    a->len = len + 1;
+}
+
+bm_arr bm_arr_slice(bm_arr a, const bm_type *t, bm_int start, bm_int end, bool has_start, bool has_end) {
+    int64_t len = bm_arr_len(a);
+    int64_t s = has_start ? bm_clamp_index(start, len) : 0;
+    int64_t e = has_end ? bm_clamp_index(end, len) : len;
+    if (e <= s) return BM_EMPTY_ARR;
+    if (s == 0 && e == len) { bm_arr_retain(a); return a; } /* whole array: share (copy-on-write) */
+    bm_arrbuf *b = bm_arrbuf_new(t->size, e - s);
+    bm_copy_retain(b->data, a.p->data + (size_t)s * t->size, e - s, t);
+    return (bm_arr){b, e - s};
+}
+
+bm_arr bm_arr_concat(bm_arr a, bm_arr b, const bm_type *t) {
+    int64_t na = bm_arr_len(a), nb = bm_arr_len(b);
+    if (nb == 0) { bm_arr_retain(a); return a; }
+    if (na == 0) { bm_arr_retain(b); return b; }
+    if (na > INT64_MAX - nb) bm_trap("array too long", NULL);
+    bm_arrbuf *r = bm_arrbuf_new(t->size, na + nb);
+    bm_copy_retain(r->data, a.p->data, na, t);
+    bm_copy_retain(r->data + (size_t)na * t->size, b.p->data, nb, t);
+    return (bm_arr){r, na + nb};
+}
+
+static void bm_swap_bytes(unsigned char *x, unsigned char *y, size_t n) {
+    unsigned char tmp[64];
+    while (n) {
+        size_t c = n < sizeof tmp ? n : sizeof tmp;
+        memcpy(tmp, x, c);
+        memcpy(x, y, c);
+        memcpy(y, tmp, c);
+        x += c, y += c, n -= c;
+    }
+}
+
+void bm_arr_reverse(bm_arr *a, const bm_type *t) {
+    int64_t len = bm_arr_len(*a);
+    size_t es = t->size;
+    if (len < 2 || !es) return;
+    bm_arr_make_unique(a, t, 0);
+    unsigned char *d = a->p->data;
+    for (int64_t i = 0, j = len - 1; i < j; i++, j--) {
+        if (es == 8) {
+            uint64_t x, y;
+            memcpy(&x, d + (size_t)i * 8, 8);
+            memcpy(&y, d + (size_t)j * 8, 8);
+            memcpy(d + (size_t)i * 8, &y, 8);
+            memcpy(d + (size_t)j * 8, &x, 8);
+        } else {
+            bm_swap_bytes(d + (size_t)i * es, d + (size_t)j * es, es);
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ stable merge sort */
+
+typedef int (*bm_cmp3)(void *ctx, const void *a, const void *b); /* > 0 when a sorts after b */
+
+static void bm_insertion_sort(unsigned char *base, size_t n, size_t es, bm_cmp3 cmp, void *ctx, unsigned char *tmp) {
+    for (size_t i = 1; i < n; i++) {
+        unsigned char *x = base + i * es;
+        if (cmp(ctx, x - es, x) <= 0) continue;
+        memcpy(tmp, x, es);
+        size_t j = i - 1;
+        while (j > 0 && cmp(ctx, base + (j - 1) * es, tmp) > 0) j--;
+        memmove(base + (j + 1) * es, base + j * es, (i - j) * es);
+        memcpy(base + j * es, tmp, es);
+    }
+}
+
+/* tmp must hold at least max(1, n/2) elements. */
+static void bm_merge_sort(unsigned char *base, size_t n, size_t es, bm_cmp3 cmp, void *ctx, unsigned char *tmp) {
+    if (n <= 12) {
+        bm_insertion_sort(base, n, es, cmp, ctx, tmp);
+        return;
+    }
+    size_t h = n / 2;
+    bm_merge_sort(base, h, es, cmp, ctx, tmp);
+    bm_merge_sort(base + h * es, n - h, es, cmp, ctx, tmp);
+    if (cmp(ctx, base + (h - 1) * es, base + h * es) <= 0) return; /* already in order */
+    memcpy(tmp, base, h * es);
+    size_t i = 0, j = h, k = 0;
+    while (i < h && j < n) {
+        if (cmp(ctx, tmp + i * es, base + j * es) <= 0) memcpy(base + k++ * es, tmp + i++ * es, es);
+        else memcpy(base + k++ * es, base + j++ * es, es);
+    }
+    if (i < h) memcpy(base + k * es, tmp + i * es, (h - i) * es);
+}
+
+typedef struct { double (*cmp)(void *ctx, const void *x, const void *y); void *ctx; } bm_user_cmp;
+
+static int bm_user_cmp_fn(void *c, const void *a, const void *b) {
+    bm_user_cmp *u = (bm_user_cmp *)c;
+    double r = u->cmp(u->ctx, a, b);
+    return r > 0 ? 1 : r < 0 ? -1 : 0; /* NaN counts as 0 (JS) */
+}
+
+static int bm_str_cmp_fn(void *c, const void *a, const void *b) {
+    (void)c;
+    return bm_str_cmp(*(const bm_str *)a, *(const bm_str *)b);
+}
+
+typedef struct { bm_str key; int64_t idx; } bm_sort_key;
+
+void bm_arr_sort(bm_arr *a, const bm_type *t, double (*cmp)(void *ctx, const void *x, const void *y), void *ctx) {
+    int64_t n = bm_arr_len(*a);
+    size_t es = t->size;
+    if (n < 2 || !es) return;
+    bm_arr_make_unique(a, t, 0);
+    unsigned char *d = a->p->data;
+    if (cmp || t == &bm_type_str) {
+        unsigned char *tmp = (unsigned char *)bm_alloc(bm_size_mul_add((size_t)n / 2 + 1, es, 0));
+        bm_user_cmp u = {cmp, ctx};
+        if (cmp) bm_merge_sort(d, (size_t)n, es, bm_user_cmp_fn, &u, tmp);
+        else bm_merge_sort(d, (size_t)n, es, bm_str_cmp_fn, NULL, tmp);
+        free(tmp);
+        return;
+    }
+    /* JS default order: compare String(x). */
+    bm_sort_key *keys = (bm_sort_key *)bm_alloc(bm_size_mul_add((size_t)n, sizeof(bm_sort_key), 0));
+    for (int64_t i = 0; i < n; i++) {
+        bm_sb sb = {0};
+        if (t != &bm_type_undefined) t->to_str(&sb, d + (size_t)i * es);
+        keys[i].key = bm_str_from_sb(&sb);
+        keys[i].idx = i;
+    }
+    bm_sort_key *tmpk = (bm_sort_key *)bm_alloc(((size_t)n / 2 + 1) * sizeof(bm_sort_key));
+    bm_merge_sort((unsigned char *)keys, (size_t)n, sizeof(bm_sort_key), bm_str_cmp_fn, NULL, (unsigned char *)tmpk);
+    free(tmpk);
+    unsigned char *out = (unsigned char *)bm_alloc((size_t)n * es);
+    for (int64_t i = 0; i < n; i++) {
+        memcpy(out + (size_t)i * es, d + (size_t)keys[i].idx * es, es);
+        bm_str_release(keys[i].key);
+    }
+    memcpy(d, out, (size_t)n * es);
+    free(out);
+    free(keys);
+}
+
+bm_int bm_arr_index_of(bm_arr a, const bm_type *t, const void *elem) {
+    int64_t n = bm_arr_len(a);
+    size_t es = t->size;
+    for (int64_t i = 0; i < n; i++)
+        if (t->eq(a.p->data + (size_t)i * es, elem)) return i;
+    return -1;
+}
+
+bm_int bm_arr_last_index_of(bm_arr a, const bm_type *t, const void *elem) {
+    size_t es = t->size;
+    for (int64_t i = bm_arr_len(a) - 1; i >= 0; i--)
+        if (t->eq(a.p->data + (size_t)i * es, elem)) return i;
+    return -1;
+}
+
+static void bm_join_into(bm_sb *sb, bm_arr a, const bm_type *t, const char *sep, size_t sep_len) {
+    int64_t n = bm_arr_len(a);
+    size_t es = t->size;
+    for (int64_t i = 0; i < n; i++) {
+        if (i) bm_sb_push(sb, sep, sep_len);
+        if (t != &bm_type_undefined) t->to_str(sb, a.p->data + (size_t)i * es);
+    }
+}
+
+bm_str bm_arr_join(bm_arr a, const bm_type *t, bm_str sep) {
+    if (bm_arr_len(a) == 1 && t == &bm_type_str) {
+        bm_str s = *(bm_str *)(void *)a.p->data;
+        bm_str_retain(s);
+        return s;
+    }
+    bm_sb sb = {0};
+    bm_join_into(&sb, a, t, sep.p->data, (size_t)sep.p->len);
+    return bm_str_from_sb(&sb);
+}
+
+void bm_to_str_arr(bm_sb *sb, bm_arr a, const bm_type *t) { bm_join_into(sb, a, t, ",", 1); }
+
+/* ================================================================== maps and sets */
+
+/* One allocation: header, `cap` entries in insertion order, then 2*cap index slots.
+ * Entry: uint64 hash (top bit set; 0 = deleted), key (padded to 8), value (padded to 8).
+ * Index slot: entry number + 1, 0 = empty. Open addressing, linear probing, backward-shift
+ * deletion (so the index never holds tombstones); deleted entries are compacted away when
+ * the entry array fills up. */
+struct bm_mapbuf {
+    int64_t rc;
+    int64_t count;    /* live entries */
+    int64_t used;     /* entries used, live or deleted */
+    int64_t cap;      /* entry capacity (power of two) */
+    uint64_t mask;    /* index slots - 1 */
+    uint32_t *index;
+    int64_t _pad[2];  /* header = 64 bytes, entries stay 16-byte aligned */
+    unsigned char entries[];
+};
+
+#define BM_LIVE_BIT ((uint64_t)1 << 63)
+#define BM_MAP_MIN_CAP 8
+
+typedef struct { size_t voff, stride; } bm_mlayout;
+
+static inline bm_mlayout bm_mlay(const bm_type *kt, const bm_type *vt) {
+    bm_mlayout L;
+    L.voff = 8 + ((kt->size + 7) & ~(size_t)7);
+    L.stride = L.voff + ((vt->size + 7) & ~(size_t)7);
+    return L;
+}
+
+static inline unsigned char *bm_entry(const bm_mapbuf *m, bm_mlayout L, int64_t i) {
+    return (unsigned char *)m->entries + (size_t)i * L.stride;
+}
+static inline uint64_t bm_entry_hash(const unsigned char *e) { uint64_t h; memcpy(&h, e, 8); return h; }
+static inline void bm_entry_set_hash(unsigned char *e, uint64_t h) { memcpy(e, &h, 8); }
+
+static inline double bm_canon_f64(double x) {
+    if (x == 0) return 0.0;  /* -0 → 0 */
+    if (x != x) return NAN;  /* one NaN */
+    return x;
+}
+
+static inline uint64_t bm_key_hash(const bm_type *kt, const void *key) { return kt->hash(key) | BM_LIVE_BIT; }
+
+/* Map keys use SameValueZero: like === except NaN equals NaN. */
+static inline bool bm_key_eq(const bm_type *kt, const void *a, const void *b) {
+    if (kt == &bm_type_f64) {
+        double x = *(const double *)a, y = *(const double *)b;
+        return x == y || (x != x && y != y);
+    }
+    if (kt == &bm_type_f32) {
+        float x = *(const float *)a, y = *(const float *)b;
+        return x == y || (x != x && y != y);
+    }
+    return kt->eq(a, b);
+}
+
+static bm_mapbuf *bm_mapbuf_new(int64_t cap, bm_mlayout L) {
+    if (cap > ((int64_t)1 << 31)) bm_trap("map too large", NULL);
+    size_t islots = (size_t)cap * 2;
+    size_t bytes = bm_size_mul_add((size_t)cap, L.stride, sizeof(bm_mapbuf));
+    bytes = bm_size_mul_add(islots, sizeof(uint32_t), bytes);
+    bm_mapbuf *m = (bm_mapbuf *)bm_alloc(bytes);
+    m->rc = 1;
+    m->count = m->used = 0;
+    m->cap = cap;
+    m->mask = islots - 1;
+    m->index = (uint32_t *)(void *)(m->entries + (size_t)cap * L.stride);
+    m->_pad[0] = m->_pad[1] = 0;
+    memset(m->index, 0, islots * sizeof(uint32_t));
+    return m;
+}
+
+/* New buffer with the live entries of `old` (compacted). retain: clone (retain keys and
+ * values) rather than move. */
+static bm_mapbuf *bm_map_rebuild(const bm_mapbuf *old, bm_mlayout L, int64_t cap, bool retain,
+                                 const bm_type *kt, const bm_type *vt) {
+    bm_mapbuf *m = bm_mapbuf_new(cap, L);
+    int64_t j = 0;
+    for (int64_t i = 0; i < old->used; i++) {
+        const unsigned char *src = bm_entry(old, L, i);
+        uint64_t h = bm_entry_hash(src);
+        if (!h) continue;
+        unsigned char *dst = bm_entry(m, L, j);
+        memcpy(dst, src, L.stride);
+        if (retain) {
+            if (kt->retain && kt->size) kt->retain(dst + 8);
+            if (vt->retain && vt->size) vt->retain(dst + L.voff);
+        }
+        uint64_t pos = h & m->mask;
+        while (m->index[pos]) pos = (pos + 1) & m->mask;
+        m->index[pos] = (uint32_t)(j + 1);
+        j++;
+    }
+    m->count = m->used = j;
+    return m;
+}
+
+static bm_mapbuf *bm_map_unique(bm_map *mp, const bm_type *kt, const bm_type *vt, bm_mlayout L) {
+    bm_mapbuf *m = mp->p;
+    if (!m) return mp->p = bm_mapbuf_new(BM_MAP_MIN_CAP, L);
+    if (m->rc == 1) return m;
+    bm_mapbuf *c = bm_map_rebuild(m, L, m->cap, true, kt, vt);
+    if (m->rc > 0) m->rc--;
+    return mp->p = c;
+}
+
+/* Index slot holding `key` (*found = true), or the empty slot where it would go. */
+static uint64_t bm_map_find(const bm_mapbuf *m, bm_mlayout L, const bm_type *kt, const void *key, uint64_t h,
+                            bool *found) {
+    uint64_t i = h & m->mask;
+    for (;;) {
+        uint32_t e = m->index[i];
+        if (!e) { *found = false; return i; }
+        const unsigned char *ent = bm_entry(m, L, e - 1);
+        if (bm_entry_hash(ent) == h && bm_key_eq(kt, ent + 8, key)) { *found = true; return i; }
+        i = (i + 1) & m->mask;
+    }
+}
+
+void bm_map_retain(bm_map m) {
+    if (m.p && m.p->rc >= 0) m.p->rc++;
+}
+
+static void bm_map_release_entries(bm_mapbuf *m, const bm_type *kt, const bm_type *vt, bm_mlayout L) {
+    bool rk = kt->release && kt->size, rv = vt->release && vt->size;
+    if (!rk && !rv) return;
+    for (int64_t i = 0; i < m->used; i++) {
+        unsigned char *e = bm_entry(m, L, i);
+        if (!bm_entry_hash(e)) continue;
+        if (rk) kt->release(e + 8);
+        if (rv) vt->release(e + L.voff);
+    }
+}
+
+void bm_map_release(bm_map m, const bm_type *kt, const bm_type *vt) {
+    if (!m.p || m.p->rc <= 0 || --m.p->rc > 0) return;
+    bm_map_release_entries(m.p, kt, vt, bm_mlay(kt, vt));
+    free(m.p);
+}
+
+bm_int bm_map_size(bm_map m) { return m.p ? m.p->count : 0; }
+
+void *bm_map_get(bm_map mm, const bm_type *kt, const bm_type *vt, const void *key) {
+    bm_mapbuf *m = mm.p;
+    if (!m || !m->count) return NULL;
+    bm_mlayout L = bm_mlay(kt, vt);
+    bool found;
+    uint64_t pos = bm_map_find(m, L, kt, key, bm_key_hash(kt, key), &found);
+    return found ? bm_entry(m, L, m->index[pos] - 1) + L.voff : NULL;
+}
+
+bool bm_map_has(bm_map m, const bm_type *kt, const bm_type *vt, const void *key) {
+    return bm_map_get(m, kt, vt, key) != NULL;
+}
+
+void bm_map_set(bm_map *mp, const bm_type *kt, const bm_type *vt, void *key, void *value) {
+    bm_mlayout L = bm_mlay(kt, vt);
+    bm_mapbuf *m = bm_map_unique(mp, kt, vt, L);
+    uint64_t h = bm_key_hash(kt, key);
+    bool found;
+    uint64_t pos = bm_map_find(m, L, kt, key, h, &found);
+    if (found) { /* replace the value in place; keep the original key */
+        unsigned char *e = bm_entry(m, L, m->index[pos] - 1);
+        if (vt->size) {
+            if (vt->release) vt->release(e + L.voff);
+            memcpy(e + L.voff, value, vt->size);
+        }
+        if (kt->release && kt->size) kt->release(key);
+        return;
+    }
+    if (m->used == m->cap) {
+        /* full: compact if at least half the entries are deleted, else double */
+        int64_t ncap = m->count * 2 <= m->cap ? m->cap : m->cap * 2;
+        bm_mapbuf *n = bm_map_rebuild(m, L, ncap, false, kt, vt);
+        free(m);
+        mp->p = m = n;
+        pos = h & m->mask;
+        while (m->index[pos]) pos = (pos + 1) & m->mask;
+    }
+    int64_t idx = m->used++;
+    unsigned char *e = bm_entry(m, L, idx);
+    bm_entry_set_hash(e, h);
+    if (kt->size) memcpy(e + 8, key, kt->size);
+    if (vt->size) memcpy(e + L.voff, value, vt->size);
+    m->index[pos] = (uint32_t)(idx + 1);
+    m->count++;
+}
+
+bool bm_map_delete(bm_map *mp, const bm_type *kt, const bm_type *vt, const void *key) {
+    bm_mapbuf *m = mp->p;
+    if (!m || !m->count) return false;
+    bm_mlayout L = bm_mlay(kt, vt);
+    uint64_t h = bm_key_hash(kt, key);
+    bool found;
+    uint64_t pos = bm_map_find(m, L, kt, key, h, &found);
+    if (!found) return false;
+    if (m->rc != 1) {
+        m = bm_map_unique(mp, kt, vt, L);
+        pos = bm_map_find(m, L, kt, key, h, &found);
+    }
+    unsigned char *e = bm_entry(m, L, m->index[pos] - 1);
+    bm_entry_set_hash(e, 0);
+    m->count--;
+    /* backward-shift deletion in the index */
+    uint64_t mask = m->mask, i = pos, j = pos;
+    for (;;) {
+        j = (j + 1) & mask;
+        uint32_t s = m->index[j];
+        if (!s) break;
+        uint64_t home = bm_entry_hash(bm_entry(m, L, s - 1)) & mask;
+        if (((j - home) & mask) >= ((j - i) & mask)) {
+            m->index[i] = s;
+            i = j;
+        }
+    }
+    m->index[i] = 0;
+    if (m->count == 0) m->used = 0; /* index is empty too */
+    /* release last: a release callback must see a consistent map */
+    if (kt->release && kt->size) kt->release(e + 8);
+    if (vt->release && vt->size) vt->release(e + L.voff);
+    return true;
+}
+
+void bm_map_clear(bm_map *m, const bm_type *kt, const bm_type *vt) {
+    bm_map_release(*m, kt, vt);
+    m->p = NULL;
+}
+
+static bm_arr bm_map_column(bm_map mm, const bm_type *kt, const bm_type *vt, bool values) {
+    bm_mapbuf *m = mm.p;
+    if (!m || !m->count) return BM_EMPTY_ARR;
+    bm_mlayout L = bm_mlay(kt, vt);
+    const bm_type *t = values ? vt : kt;
+    size_t off = values ? L.voff : 8, es = t->size;
+    bm_arrbuf *b = bm_arrbuf_new(es, m->count);
+    int64_t j = 0;
+    for (int64_t i = 0; i < m->used; i++) {
+        unsigned char *e = bm_entry(m, L, i);
+        if (!bm_entry_hash(e)) continue;
+        if (es) {
+            memcpy(b->data + (size_t)j * es, e + off, es);
+            if (t->retain) t->retain(b->data + (size_t)j * es);
+        }
+        j++;
+    }
+    return (bm_arr){b, j};
+}
+
+bm_arr bm_map_keys(bm_map m, const bm_type *kt, const bm_type *vt) { return bm_map_column(m, kt, vt, false); }
+bm_arr bm_map_values(bm_map m, const bm_type *kt, const bm_type *vt) { return bm_map_column(m, kt, vt, true); }
+
+bool bm_map_next(bm_map mm, const bm_type *kt, const bm_type *vt, bm_int *cursor, void **key, void **value) {
+    bm_mapbuf *m = mm.p;
+    if (!m) return false;
+    bm_mlayout L = bm_mlay(kt, vt);
+    for (int64_t i = *cursor; i < m->used; i++) {
+        unsigned char *e = bm_entry(m, L, i);
+        if (!bm_entry_hash(e)) continue;
+        if (key) *key = e + 8;
+        if (value) *value = e + L.voff;
+        *cursor = i + 1;
+        return true;
+    }
+    *cursor = m->used;
+    return false;
+}
+
+bool bm_map_eq(bm_map a, bm_map b, const bm_type *kt, const bm_type *vt) {
+    if (a.p == b.p) return true;
+    if (bm_map_size(a) != bm_map_size(b)) return false;
+    void *k, *v;
+    for (bm_int i = 0; bm_map_next(a, kt, vt, &i, &k, &v);) {
+        void *w = bm_map_get(b, kt, vt, k);
+        if (!w) return false;
+        if (vt->size && !vt->eq(v, w)) return false;
+    }
+    return true;
+}
+
+/* ================================================================== console formatting */
+
+/* A port of the layout rules of Node's util.inspect (lib/internal/util/inspect.js) with the
+ * options console.log uses: breakLength 80, compact 3, depth 2, maxArrayLength 100,
+ * maxStringLength 10000. A container formats each child into a list of pieces (Node's
+ * `output` array), then bm_reduce_to_single_string lays them out on one line or several.
+ * The `depth` argument of the inspect functions is Node's `recurseTimes`. */
+#define BM_BREAK_LENGTH 80
+#define BM_COMPACT 3
+#define BM_INSPECT_DEPTH 2
+#define BM_MAX_ARRAY_LENGTH 100
+#define BM_MAX_STRING_LENGTH 10000
+#define BM_MIN_LINE_LENGTH 16
+
+/* Node's ctx.indentationLvl and ctx.currentDepth (single-threaded, reset at depth 0). */
+static struct { int64_t indent, current_depth; } bm_ictx;
+
+typedef struct {
+    bm_sb text;    /* all pieces, back to back */
+    size_t *ends;  /* end offset of each piece */
+    size_t n, cap;
+} bm_pieces;
+
+static void bm_pieces_mark(bm_pieces *p) { /* ends the current piece */
+    if (p->n == p->cap) {
+        p->cap = p->cap ? p->cap * 2 : 8;
+        p->ends = (size_t *)bm_realloc(p->ends, p->cap * sizeof(size_t));
+    }
+    p->ends[p->n++] = p->text.len;
+}
+
+static const char *bm_piece(const bm_pieces *p, size_t i, size_t *len) {
+    size_t start = i ? p->ends[i - 1] : 0;
+    *len = p->ends[i] - start;
+    return p->text.data ? p->text.data + start : "";
+}
+
+static void bm_pieces_free(bm_pieces *p) {
+    bm_sb_free(&p->text);
+    free(p->ends);
+}
+
+static void bm_push_spaces(bm_sb *sb, int64_t n) {
+    if (n <= 0) return;
+    memset(bm_sb_reserve(sb, (size_t)n), ' ', (size_t)n);
+    sb->len += (size_t)n;
+}
+
+/* JavaScript string length (UTF-16 code units) of UTF-8 text. */
+static size_t bm_utf16_len(const char *s, size_t n) {
+    size_t u = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        u += (c & 0xC0) != 0x80;
+        u += c >= 0xF0; /* surrogate pair */
+    }
+    return u;
+}
+
+/* Code points Node's getStringWidth (ICU) reports as 2 columns wide, generated from Node. */
+static const uint32_t bm_wide_ranges[][2] = {
+    {0x1100, 0x115F}, {0x231A, 0x231B}, {0x2329, 0x232A}, {0x23E9, 0x23EC}, {0x23F0, 0x23F0},
+    {0x23F3, 0x23F3}, {0x25FD, 0x25FE}, {0x2614, 0x2615}, {0x2630, 0x2637}, {0x2648, 0x2653},
+    {0x267F, 0x267F}, {0x268A, 0x268F}, {0x2693, 0x2693}, {0x26A1, 0x26A1}, {0x26AA, 0x26AB},
+    {0x26BD, 0x26BE}, {0x26C4, 0x26C5}, {0x26CE, 0x26CE}, {0x26D4, 0x26D4}, {0x26EA, 0x26EA},
+    {0x26F2, 0x26F3}, {0x26F5, 0x26F5}, {0x26FA, 0x26FA}, {0x26FD, 0x26FD}, {0x2705, 0x2705},
+    {0x270A, 0x270B}, {0x2728, 0x2728}, {0x274C, 0x274C}, {0x274E, 0x274E}, {0x2753, 0x2755},
+    {0x2757, 0x2757}, {0x2795, 0x2797}, {0x27B0, 0x27B0}, {0x27BF, 0x27BF}, {0x2B1B, 0x2B1C},
+    {0x2B50, 0x2B50}, {0x2B55, 0x2B55}, {0x2E80, 0x2E99}, {0x2E9B, 0x2EF3}, {0x2F00, 0x2FD5},
+    {0x2FF0, 0x303E}, {0x3041, 0x3096}, {0x3099, 0x30FF}, {0x3105, 0x312F}, {0x3131, 0x318E},
+    {0x3190, 0x31E5}, {0x31EF, 0x321E}, {0x3220, 0x3247}, {0x3250, 0xA48C}, {0xA490, 0xA4C6},
+    {0xA960, 0xA97C}, {0xAC00, 0xD7A3}, {0xF900, 0xFAFF}, {0xFE10, 0xFE19}, {0xFE30, 0xFE52},
+    {0xFE54, 0xFE66}, {0xFE68, 0xFE6B}, {0xFF01, 0xFF60}, {0xFFE0, 0xFFE6}, {0x16FE0, 0x16FE4},
+    {0x16FF0, 0x16FF6}, {0x17000, 0x18CD5}, {0x18CFF, 0x18D1E}, {0x18D80, 0x18DF2}, {0x1AFF0, 0x1AFF3},
+    {0x1AFF5, 0x1AFFB}, {0x1AFFD, 0x1AFFE}, {0x1B000, 0x1B122}, {0x1B132, 0x1B132}, {0x1B150, 0x1B152},
+    {0x1B155, 0x1B155}, {0x1B164, 0x1B167}, {0x1B170, 0x1B2FB}, {0x1D15E, 0x1D164}, {0x1D1BB, 0x1D1C0},
+    {0x1D300, 0x1D356}, {0x1D360, 0x1D376}, {0x1F004, 0x1F004}, {0x1F0CF, 0x1F0CF}, {0x1F18E, 0x1F18E},
+    {0x1F191, 0x1F19A}, {0x1F1E6, 0x1F202}, {0x1F210, 0x1F23B}, {0x1F240, 0x1F248}, {0x1F250, 0x1F251},
+    {0x1F260, 0x1F265}, {0x1F300, 0x1F320}, {0x1F32D, 0x1F335}, {0x1F337, 0x1F37C}, {0x1F37E, 0x1F393},
+    {0x1F3A0, 0x1F3CA}, {0x1F3CF, 0x1F3D3}, {0x1F3E0, 0x1F3F0}, {0x1F3F4, 0x1F3F4}, {0x1F3F8, 0x1F43E},
+    {0x1F440, 0x1F440}, {0x1F442, 0x1F4FC}, {0x1F4FF, 0x1F53D}, {0x1F54B, 0x1F54E}, {0x1F550, 0x1F567},
+    {0x1F57A, 0x1F57A}, {0x1F595, 0x1F596}, {0x1F5A4, 0x1F5A4}, {0x1F5FB, 0x1F64F}, {0x1F680, 0x1F6C5},
+    {0x1F6CC, 0x1F6CC}, {0x1F6D0, 0x1F6D2}, {0x1F6D5, 0x1F6D8}, {0x1F6DC, 0x1F6DF}, {0x1F6EB, 0x1F6EC},
+    {0x1F6F4, 0x1F6FC}, {0x1F7E0, 0x1F7EB}, {0x1F7F0, 0x1F7F0}, {0x1F90C, 0x1F93A}, {0x1F93C, 0x1F945},
+    {0x1F947, 0x1F9FF}, {0x1FA70, 0x1FA7C}, {0x1FA80, 0x1FA8A}, {0x1FA8E, 0x1FAC6}, {0x1FAC8, 0x1FAC8},
+    {0x1FACD, 0x1FADC}, {0x1FADF, 0x1FAEA}, {0x1FAEF, 0x1FAF8}, {0x20000, 0x2FFFD}, {0x30000, 0x3FFFD},
+};
+
+static bool bm_is_wide(uint32_t c) {
+    size_t lo = 0, hi = sizeof bm_wide_ranges / sizeof *bm_wide_ranges;
+    while (lo < hi) {
+        size_t mid = (lo + hi) / 2;
+        if (c < bm_wide_ranges[mid][0]) hi = mid;
+        else if (c > bm_wide_ranges[mid][1]) lo = mid + 1;
+        else return true;
+    }
+    return false;
+}
+
+static bool bm_is_zero_width(uint32_t c) { /* Node's isZeroWidthCodePoint */
+    return c <= 0x1F || (c >= 0x7F && c <= 0x9F) || (c >= 0x300 && c <= 0x36F) || (c >= 0x200B && c <= 0x200F) ||
+           (c >= 0x20D0 && c <= 0x20FF) || (c >= 0xFE00 && c <= 0xFE0F) || (c >= 0xFE20 && c <= 0xFE2F) ||
+           (c >= 0xE0100 && c <= 0xE01EF);
+}
+
+/* Terminal columns (Node's getStringWidth). */
+static size_t bm_str_width(const char *s, size_t n) {
+    size_t w = 0, i = 0;
+    while (i < n) {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x80) {
+            w += c >= 32 && c != 0x7F;
+            i++;
+            continue;
+        }
+        uint32_t cp;
+        i += bm_utf8_decode((const unsigned char *)s + i, n - i, &cp);
+        w += bm_is_wide(cp) ? 2 : bm_is_zero_width(cp) ? 0 : 1;
+    }
+    return w;
+}
+
+static bool bm_has_newline(const char *s, size_t n) { return n && memchr(s, '\n', n) != NULL; }
+
+/* Node's strEscape: quote with ' unless the text contains ' (then " if possible, else `
+ * if the text has neither ` nor "${"); escape control characters and the backslash. */
+static void bm_push_quoted(bm_sb *sb, const char *d, size_t n) {
+    char q = '\'';
+    if (n && memchr(d, '\'', n)) {
+        if (!memchr(d, '"', n)) q = '"';
+        else if (!memchr(d, '`', n) && bm_find(d, n, "${", 2, 0) < 0) q = '`';
+    }
+    bm_sb_push_char(sb, q);
+    size_t run = 0; /* start of the pending unescaped run */
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)d[i];
+        bool c1 = c == 0xC2 && i + 1 < n && (unsigned char)d[i + 1] <= 0x9F; /* U+0080..U+009F */
+        if (c >= 0x20 && c != 0x7F && c != '\\' && !(c == '\'' && q == '\'') && !c1) continue;
+        bm_sb_push(sb, d + run, i - run);
+        char esc[8];
+        switch (c) {
+        case '\n': bm_sb_push(sb, "\\n", 2); break;
+        case '\t': bm_sb_push(sb, "\\t", 2); break;
+        case '\r': bm_sb_push(sb, "\\r", 2); break;
+        case '\b': bm_sb_push(sb, "\\b", 2); break;
+        case '\f': bm_sb_push(sb, "\\f", 2); break;
+        case '\\': bm_sb_push(sb, "\\\\", 2); break;
+        case '\'': bm_sb_push(sb, "\\'", 2); break;
+        default:
+            snprintf(esc, sizeof esc, "\\x%02X", c1 ? (unsigned char)d[i + 1] : c);
+            bm_sb_push(sb, esc, 4);
+            if (c1) i++;
+        }
+        run = i + 1;
+    }
+    bm_sb_push(sb, d + run, n - run);
+    bm_sb_push_char(sb, q);
+}
+
+void bm_inspect_str(bm_sb *sb, bm_str s, int depth) {
+    const char *d = s.p->data;
+    size_t n = (size_t)s.p->len;
+    if (depth == 0) { bm_sb_push(sb, d, n); return; }
+    /* formatPrimitive: truncate after maxStringLength code units ... */
+    size_t units = bm_utf16_len(d, n), remaining = 0;
+    if (units > BM_MAX_STRING_LENGTH) {
+        size_t i = 0, u = 0;
+        while (i < n) {
+            size_t l = bm_utf8_len((unsigned char)d[i]), w = l == 4 ? 2 : 1;
+            if (u + w > BM_MAX_STRING_LENGTH) break;
+            u += w;
+            i += l;
+        }
+        remaining = units - BM_MAX_STRING_LENGTH;
+        units = u;
+        n = i;
+    }
+    /* ... and split long strings after each newline into 'a\n' + 'b' */
+    if (units > BM_MIN_LINE_LENGTH && (int64_t)units > BM_BREAK_LENGTH - bm_ictx.indent - 4 && bm_has_newline(d, n)) {
+        size_t start = 0;
+        while (start < n) {
+            const char *nl = (const char *)memchr(d + start, '\n', n - start);
+            size_t end = nl ? (size_t)(nl - d) + 1 : n;
+            if (start) {
+                bm_sb_push(sb, " +\n", 3);
+                bm_push_spaces(sb, bm_ictx.indent + 2);
+            }
+            bm_push_quoted(sb, d + start, end - start);
+            start = end;
+        }
+    } else {
+        bm_push_quoted(sb, d, n);
+    }
+    if (remaining) {
+        bm_sb_push_cstr(sb, "... ");
+        bm_sb_push_int(sb, (bm_int)remaining);
+        bm_sb_push_cstr(sb, remaining > 1 ? " more characters" : " more character");
+    }
+}
+
+static void bm_push_more_items(bm_pieces *out, int64_t more) {
+    bm_sb_push_cstr(&out->text, "... ");
+    bm_sb_push_int(&out->text, more);
+    bm_sb_push_cstr(&out->text, more > 1 ? " more items" : " more item");
+    bm_pieces_mark(out);
+}
+
+/* Node's groupArrayElements: lays out > 6 array entries in aligned columns. Returns false
+ * (leaving `res` empty) when the entries should not be grouped. */
+static bool bm_group_array_elements(const bm_pieces *out, bm_pieces *res, bool numbers) {
+    size_t total = 0, max_len = 0, n = out->n, out_len = n, len;
+    if (n > BM_MAX_ARRAY_LENGTH) out_len--; /* leave "... more items" out */
+    size_t *width = (size_t *)bm_alloc(out_len * 2 * sizeof(size_t)), *units = width + out_len;
+    for (size_t i = 0; i < out_len; i++) {
+        const char *s = bm_piece(out, i, &len);
+        width[i] = bm_str_width(s, len);
+        units[i] = bm_utf16_len(s, len);
+        total += width[i] + 2;
+        if (max_len < width[i]) max_len = width[i];
+    }
+    int64_t actual_max = (int64_t)max_len + 2; /* + ", " */
+    bool grouped = false;
+    if (actual_max * 3 + bm_ictx.indent < BM_BREAK_LENGTH &&
+        ((double)total / (double)actual_max > 5 || max_len <= 6)) {
+        double average_bias = sqrt((double)actual_max - (double)total / (double)n);
+        double biased_max = fmax((double)actual_max - 3 - average_bias, 1);
+        double c = floor(sqrt(2.5 * biased_max * (double)out_len) / biased_max + 0.5); /* Math.round */
+        int64_t columns = (int64_t)c;
+        int64_t fit = (BM_BREAK_LENGTH - bm_ictx.indent) / actual_max;
+        if (fit < columns) columns = fit;
+        if (BM_COMPACT * 4 < columns) columns = BM_COMPACT * 4;
+        if (15 < columns) columns = 15;
+        if (columns > 1) {
+            grouped = true;
+            size_t cols = (size_t)columns;
+            size_t *line_max = (size_t *)bm_alloc(cols * sizeof(size_t));
+            for (size_t i = 0; i < cols; i++) {
+                size_t m = 0;
+                for (size_t j = i; j < out_len; j += cols)
+                    if (width[j] > m) m = width[j];
+                line_max[i] = m + 2;
+            }
+            for (size_t i = 0; i < out_len; i += cols) {
+                size_t max = i + cols < out_len ? i + cols : out_len, j = i;
+                for (; j < max - 1; j++) { /* "entry, " padded to the column width */
+                    const char *s = bm_piece(out, j, &len);
+                    int64_t pad = (int64_t)line_max[j - i] - (int64_t)width[j] - 2;
+                    if (numbers) bm_push_spaces(&res->text, pad);
+                    bm_sb_push(&res->text, s, len);
+                    bm_sb_push(&res->text, ", ", 2);
+                    if (!numbers) bm_push_spaces(&res->text, pad);
+                }
+                const char *s = bm_piece(out, j, &len);
+                if (numbers) bm_push_spaces(&res->text, (int64_t)line_max[j - i] - (int64_t)width[j] - 2);
+                bm_sb_push(&res->text, s, len);
+                bm_pieces_mark(res);
+            }
+            if (out_len < n) {
+                const char *s = bm_piece(out, out_len, &len);
+                bm_sb_push(&res->text, s, len);
+                bm_pieces_mark(res);
+            }
+            free(line_max);
+        }
+    }
+    free(width);
+    return grouped;
+}
+
+/* Node's isBelowBreakLength (lengths in UTF-16 code units, like JS .length). */
+static bool bm_is_below_break_length(const bm_pieces *out, size_t start) {
+    size_t total = out->n + start, len;
+    if (total + out->n > BM_BREAK_LENGTH) return false;
+    for (size_t i = 0; i < out->n; i++) {
+        const char *s = bm_piece(out, i, &len);
+        total += bm_utf16_len(s, len);
+        if (total > BM_BREAK_LENGTH) return false;
+    }
+    return true;
+}
+
+/* Node's reduceToSingleString (compact = 3, base = ""). Appends to sb and frees out.
+ * recurse_times is the container's depth + 1. */
+static void bm_reduce_to_single_string(bm_sb *sb, bm_pieces *out, const char *brace0, const char *brace1,
+                                       bool is_array, int64_t recurse_times, bool numbers) {
+    size_t entries = out->n, len;
+    bm_pieces grouped = {0};
+    const bm_pieces *o = out;
+    if (is_array && entries > 6 && bm_group_array_elements(out, &grouped, numbers)) o = &grouped;
+    size_t b0 = strlen(brace0);
+    if (bm_ictx.current_depth - recurse_times < BM_COMPACT && entries == o->n) {
+        size_t start = o->n + (size_t)bm_ictx.indent + b0 + 10;
+        if (bm_is_below_break_length(o, start)) {
+            bool newline = false;
+            for (size_t i = 0; i < o->n && !newline; i++) {
+                const char *s = bm_piece(o, i, &len);
+                newline = bm_has_newline(s, len);
+            }
+            if (!newline) { /* "{ a, b }" */
+                bm_sb_push(sb, brace0, b0);
+                bm_sb_push_char(sb, ' ');
+                for (size_t i = 0; i < o->n; i++) {
+                    if (i) bm_sb_push(sb, ", ", 2);
+                    const char *s = bm_piece(o, i, &len);
+                    bm_sb_push(sb, s, len);
+                }
+                bm_sb_push_char(sb, ' ');
+                bm_sb_push_cstr(sb, brace1);
+                goto done;
+            }
+        }
+    }
+    /* one entry per line */
+    bm_sb_push(sb, brace0, b0);
+    for (size_t i = 0; i < o->n; i++) {
+        bm_sb_push(sb, i ? ",\n" : "\n", i ? 2 : 1);
+        bm_push_spaces(sb, bm_ictx.indent + 2);
+        const char *s = bm_piece(o, i, &len);
+        bm_sb_push(sb, s, len);
+    }
+    bm_sb_push_char(sb, '\n');
+    bm_push_spaces(sb, bm_ictx.indent);
+    bm_sb_push_cstr(sb, brace1);
+done:
+    bm_pieces_free(&grouped);
+    bm_pieces_free(out);
+}
+
+/* Common prologue of formatRaw. Returns false when the container was printed as
+ * "[Array]"-style because it is deeper than the depth limit. */
+static bool bm_inspect_enter(bm_sb *sb, int depth, const char *too_deep) {
+    if (depth == 0) bm_ictx.indent = 0; /* top level: recover from an interrupted inspect */
+    if (depth > BM_INSPECT_DEPTH) {
+        bm_sb_push_cstr(sb, too_deep);
+        return false;
+    }
+    bm_ictx.current_depth = depth + 1;
+    return true;
+}
+
+static bool bm_is_number_type(const bm_type *t) {
+    return t == &bm_type_int || t == &bm_type_f64 || t == &bm_type_f32 || t == &bm_type_i8 || t == &bm_type_i16 ||
+           t == &bm_type_i32 || t == &bm_type_u8 || t == &bm_type_u16 || t == &bm_type_u32 || t == &bm_type_u64;
+}
+
+void bm_inspect_arr(bm_sb *sb, bm_arr a, const bm_type *t, int depth) {
+    int64_t n = bm_arr_len(a);
+    if (n == 0) { bm_sb_push(sb, "[]", 2); return; }
+    if (!bm_inspect_enter(sb, depth, "[Array]")) return;
+    bm_pieces out = {0};
+    int64_t shown = n < BM_MAX_ARRAY_LENGTH ? n : BM_MAX_ARRAY_LENGTH;
+    for (int64_t i = 0; i < shown; i++) { /* formatProperty: indentation + 2 per entry */
+        bm_ictx.indent += 2;
+        t->inspect(&out.text, a.p->data + (size_t)i * t->size, depth + 1);
+        bm_ictx.indent -= 2;
+        bm_pieces_mark(&out);
+    }
+    if (shown < n) bm_push_more_items(&out, n - shown);
+    bm_reduce_to_single_string(sb, &out, "[", "]", true, depth + 1, bm_is_number_type(t));
+}
+
+static void bm_inspect_map_impl(bm_sb *sb, bm_map m, const bm_type *kt, const bm_type *vt, int depth, bool is_set) {
+    int64_t n = bm_map_size(m);
+    char brace0[40];
+    snprintf(brace0, sizeof brace0, "%s(%lld) {", is_set ? "Set" : "Map", (long long)n);
+    if (n == 0) {
+        bm_sb_push(sb, brace0, strlen(brace0));
+        bm_sb_push_char(sb, '}');
+        return;
+    }
+    if (!bm_inspect_enter(sb, depth, is_set ? "[Set]" : "[Map]")) return;
+    bm_pieces out = {0};
+    void *k, *v;
+    int64_t shown = 0;
+    bm_ictx.indent += 2; /* formatSet / formatMap */
+    for (bm_int i = 0; shown < BM_MAX_ARRAY_LENGTH && bm_map_next(m, kt, vt, &i, &k, &v); shown++) {
+        kt->inspect(&out.text, k, depth + 1);
+        if (!is_set) {
+            bm_sb_push(&out.text, " => ", 4);
+            vt->inspect(&out.text, v, depth + 1);
+        }
+        bm_pieces_mark(&out);
+    }
+    bm_ictx.indent -= 2;
+    if (shown < n) bm_push_more_items(&out, n - shown);
+    bm_reduce_to_single_string(sb, &out, brace0, "}", false, depth + 1, false);
+}
+
+void bm_map_inspect(bm_sb *sb, bm_map m, const bm_type *kt, const bm_type *vt, int depth) {
+    bm_inspect_map_impl(sb, m, kt, vt, depth, false);
+}
+
+void bm_set_inspect(bm_sb *sb, bm_map m, const bm_type *kt, int depth) {
+    bm_inspect_map_impl(sb, m, kt, &bm_type_undefined, depth, true);
+}
+
+static bool bm_is_plain_key(const char *s) { /* /^[a-zA-Z_][a-zA-Z_0-9]*$/ */
+    if (!((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') || *s == '_')) return false;
+    for (s++; *s; s++)
+        if (!((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') || *s == '_' || (*s >= '0' && *s <= '9')))
+            return false;
+    return true;
+}
+
+void bm_inspect_record(bm_sb *sb, int depth, size_t n, const char *const *names, const bm_type *const *types,
+                       const void *const *fields) {
+    if (n == 0) { bm_sb_push(sb, "{}", 2); return; }
+    if (!bm_inspect_enter(sb, depth, "[Object]")) return;
+    bm_pieces out = {0};
+    for (size_t i = 0; i < n; i++) { /* formatProperty */
+        if (bm_is_plain_key(names[i])) bm_sb_push_cstr(&out.text, names[i]);
+        else bm_push_quoted(&out.text, names[i], strlen(names[i]));
+        bm_sb_push(&out.text, ": ", 2);
+        bm_ictx.indent += 2;
+        types[i]->inspect(&out.text, fields[i], depth + 1);
+        bm_ictx.indent -= 2;
+        bm_pieces_mark(&out);
+    }
+    bm_reduce_to_single_string(sb, &out, "{", "}", false, depth + 1, false);
+}
+
+/* ================================================================== primitive type descriptors */
+
+#define BM_DEFINE_INT_TYPE(name, ctype, is_unsigned)                                              \
+    static bool bm_##name##_eq(const void *a, const void *b) { return *(const ctype *)a == *(const ctype *)b; } \
+    static uint64_t bm_##name##_hash(const void *p) { return bm_mix64((uint64_t)*(const ctype *)p); } \
+    static void bm_##name##_to_str(bm_sb *sb, const void *p) {                                    \
+        if (is_unsigned) bm_sb_push_u64(sb, (uint64_t)*(const ctype *)p);                          \
+        else bm_sb_push_int(sb, (bm_int)*(const ctype *)p);                                        \
+    }                                                                                             \
+    static void bm_##name##_inspect(bm_sb *sb, const void *p, int depth) {                        \
+        (void)depth;                                                                              \
+        bm_##name##_to_str(sb, p);                                                                \
+    }                                                                                             \
+    const bm_type bm_type_##name = {sizeof(ctype), NULL, NULL, bm_##name##_eq, bm_##name##_hash,   \
+                                    bm_##name##_to_str, bm_##name##_inspect};
+
+BM_DEFINE_INT_TYPE(int, int64_t, 0)
+BM_DEFINE_INT_TYPE(i8, int8_t, 0)
+BM_DEFINE_INT_TYPE(i16, int16_t, 0)
+BM_DEFINE_INT_TYPE(i32, int32_t, 0)
+BM_DEFINE_INT_TYPE(u8, uint8_t, 1)
+BM_DEFINE_INT_TYPE(u16, uint16_t, 1)
+BM_DEFINE_INT_TYPE(u32, uint32_t, 1)
+BM_DEFINE_INT_TYPE(u64, uint64_t, 1)
+#undef BM_DEFINE_INT_TYPE
+
+static bool bm_f64_eq(const void *a, const void *b) { return *(const double *)a == *(const double *)b; }
+static uint64_t bm_f64_hash(const void *p) {
+    double x = bm_canon_f64(*(const double *)p);
+    uint64_t bits;
+    memcpy(&bits, &x, 8);
+    return bm_mix64(bits);
+}
+static void bm_f64_to_str(bm_sb *sb, const void *p) { bm_sb_push_f64(sb, *(const double *)p); }
+static void bm_f64_inspect(bm_sb *sb, const void *p, int depth) {
+    (void)depth;
+    double x = *(const double *)p;
+    if (x == 0 && signbit(x)) bm_sb_push(sb, "-0", 2); /* Node shows -0 */
+    else bm_sb_push_f64(sb, x);
+}
+const bm_type bm_type_f64 = {sizeof(double), NULL, NULL, bm_f64_eq, bm_f64_hash, bm_f64_to_str, bm_f64_inspect};
+
+static bool bm_f32_eq(const void *a, const void *b) { return *(const float *)a == *(const float *)b; }
+static uint64_t bm_f32_hash(const void *p) { return bm_f64_hash(&(double){(double)*(const float *)p}); }
+static void bm_f32_to_str(bm_sb *sb, const void *p) {
+    char buf[40];
+    bm_sb_push(sb, buf, bm_fmt_number(buf, (double)*(const float *)p, true));
+}
+static void bm_f32_inspect(bm_sb *sb, const void *p, int depth) {
+    (void)depth;
+    float x = *(const float *)p;
+    if (x == 0 && signbit(x)) bm_sb_push(sb, "-0", 2);
+    else bm_f32_to_str(sb, p);
+}
+const bm_type bm_type_f32 = {sizeof(float), NULL, NULL, bm_f32_eq, bm_f32_hash, bm_f32_to_str, bm_f32_inspect};
+
+static bool bm_bool_eq(const void *a, const void *b) { return *(const bool *)a == *(const bool *)b; }
+static uint64_t bm_bool_hash(const void *p) { return *(const bool *)p ? 0x9e3779b97f4a7c15ULL : 0x2545f4914f6cdd1dULL; }
+static void bm_bool_to_str(bm_sb *sb, const void *p) { bm_sb_push_cstr(sb, *(const bool *)p ? "true" : "false"); }
+static void bm_bool_inspect(bm_sb *sb, const void *p, int depth) { (void)depth; bm_bool_to_str(sb, p); }
+const bm_type bm_type_bool = {sizeof(bool), NULL, NULL, bm_bool_eq, bm_bool_hash, bm_bool_to_str, bm_bool_inspect};
+
+static void bm_strp_retain(void *p) { bm_str_retain(*(bm_str *)p); }
+static void bm_strp_release(void *p) { bm_str_release(*(bm_str *)p); }
+static bool bm_strp_eq(const void *a, const void *b) { return bm_str_eq(*(const bm_str *)a, *(const bm_str *)b); }
+static uint64_t bm_strp_hash(const void *p) { return bm_str_hash(*(const bm_str *)p); }
+static void bm_strp_to_str(bm_sb *sb, const void *p) { bm_sb_push_str(sb, *(const bm_str *)p); }
+static void bm_strp_inspect(bm_sb *sb, const void *p, int depth) { bm_inspect_str(sb, *(const bm_str *)p, depth); }
+const bm_type bm_type_str = {sizeof(bm_str), bm_strp_retain, bm_strp_release, bm_strp_eq, bm_strp_hash,
+                             bm_strp_to_str, bm_strp_inspect};
+
+static bool bm_undef_eq(const void *a, const void *b) { (void)a; (void)b; return true; }
+static uint64_t bm_undef_hash(const void *p) { (void)p; return 0x6a09e667f3bcc909ULL; }
+static void bm_undef_to_str(bm_sb *sb, const void *p) { (void)p; bm_sb_push(sb, "undefined", 9); }
+static void bm_undef_inspect(bm_sb *sb, const void *p, int depth) { (void)depth; bm_undef_to_str(sb, p); }
+const bm_type bm_type_undefined = {0, NULL, NULL, bm_undef_eq, bm_undef_hash, bm_undef_to_str, bm_undef_inspect};
+
+/* ================================================================== output */
+
+#define BM_OUT_CAP 65536
+static char bm_out_buf[BM_OUT_CAP];
+static size_t bm_out_len;
+static bool bm_out_tty; /* stdout is a terminal: flush after every line */
+
+void bm_out_flush(void) {
+    if (bm_out_len) {
+        fwrite(bm_out_buf, 1, bm_out_len, stdout);
+        bm_out_len = 0;
+    }
+    fflush(stdout);
+}
+
+void bm_out_write(const char *s, size_t n) {
+    if (!n) return;
+    if (n > BM_OUT_CAP - bm_out_len) {
+        bm_out_flush();
+        if (n >= BM_OUT_CAP) {
+            fwrite(s, 1, n, stdout);
+            return;
+        }
+    }
+    memcpy(bm_out_buf + bm_out_len, s, n);
+    bm_out_len += n;
+}
+
+void bm_out_sb_line(bm_sb *sb) {
+    bm_sb_push_char(sb, '\n');
+    bm_out_write(sb->data, sb->len);
+    bm_sb_free(sb);
+    if (bm_out_tty) bm_out_flush();
+}
+
+void bm_err_sb_line(bm_sb *sb) {
+    bm_out_flush(); /* keep stdout/stderr ordering */
+    bm_sb_push_char(sb, '\n');
+    fwrite(sb->data, 1, sb->len, stderr);
+    fflush(stderr);
+    bm_sb_free(sb);
+}
+
+/* ================================================================== math */
+
+double bm_math_round(double x) {
+    if (!isfinite(x)) return x;
+    double r = floor(x);
+    if (x - r >= 0.5) r += 1.0;
+    return r == 0 ? copysign(0.0, x) : r; /* Math.round(-0.4) is -0 */
+}
+
+bm_int bm_f64_to_int(double x, const char *what, const char *loc) {
+    if (BM_LIKELY(x >= -9223372036854775808.0 && x < 9223372036854775808.0)) return (bm_int)x;
+    char num[40], msg[160];
+    num[bm_fmt_number(num, x, false)] = 0;
+    snprintf(msg, sizeof msg, "%s(%s) is %s", what ? what : "int", num,
+             x != x ? "not an integer" : "out of the int range");
+    bm_trap(msg, loc);
+}
+
+static uint64_t bm_rng_state = 0x9e3779b97f4a7c15ULL;
+
+static void bm_random_seed(uint64_t seed) {
+    bm_rng_state = bm_mix64(seed + 0x9e3779b97f4a7c15ULL);
+    if (!bm_rng_state) bm_rng_state = 0x9e3779b97f4a7c15ULL;
+}
+
+double bm_random(void) { /* xorshift64* */
+    uint64_t x = bm_rng_state;
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    bm_rng_state = x;
+    return (double)((x * 0x2545f4914f6cdd1dULL) >> 11) * 0x1.0p-53;
+}
+
+/* ================================================================== closures */
+
+void bm_env_release_slow(bm_env *e) {
+    if (e->drop) e->drop(e);
+    free(e);
+}
+
+/* ================================================================== tests */
+
+void bm_test_run(const char *name, void (*fn)(void)) {
+    jmp_buf jb;
+    bm_test_jmp = &jb;
+    bm_sb sb = {0};
+    if (setjmp(jb) == 0) {
+        fn();
+        bm_test_jmp = NULL;
+        bm_tests_passed++;
+        bm_sb_push_cstr(&sb, "ok   ");
+        bm_sb_push_cstr(&sb, name);
+    } else {
+        bm_test_jmp = NULL;
+        bm_tests_failed++;
+        bm_sb_push_cstr(&sb, "FAIL ");
+        bm_sb_push_cstr(&sb, name);
+        bm_sb_push_cstr(&sb, "\n  ");
+        bm_sb_push(&sb, bm_test_msg.data, bm_test_msg.len);
+        if (bm_test_loc && *bm_test_loc) {
+            bm_sb_push_cstr(&sb, "\n  at ");
+            bm_sb_push_cstr(&sb, bm_test_loc);
+        }
+        bm_sb_free(&bm_test_msg);
+        bm_test_loc = NULL;
+    }
+    bm_out_sb_line(&sb);
+}
+
+_Noreturn void bm_expect_fail(bm_sb *message, const char *loc) {
+    bm_sb msg = {0};
+    if (message) {
+        msg = *message;
+        *message = (bm_sb){0};
+    }
+    if (!msg.len) bm_sb_push_cstr(&msg, "expectation failed");
+    if (bm_test_jmp) {
+        bm_sb_free(&bm_test_msg);
+        bm_test_msg = msg;
+        bm_test_loc = loc;
+        longjmp(*bm_test_jmp, 1);
+    }
+    bm_sb_push_char(&msg, 0);
+    bm_trap(msg.data, loc);
+}
+
+int bm_test_summary(void) {
+    bm_sb sb = {0};
+    bm_sb_push_int(&sb, bm_tests_passed);
+    bm_sb_push_cstr(&sb, " passed, ");
+    bm_sb_push_int(&sb, bm_tests_failed);
+    bm_sb_push_cstr(&sb, " failed");
+    bm_out_sb_line(&sb);
+    return bm_tests_failed ? 1 : 0;
+}
+
+/* ================================================================== init */
+
+void bm_init(int argc, char **argv) {
+    static bool initialized;
+    bm_argc = argc;
+    bm_argv = argv;
+    if (initialized) return;
+    initialized = true;
+    atexit(bm_out_flush);
+#ifdef BM_HAVE_ISATTY
+    bm_out_tty = isatty(1) != 0;
+#endif
+    const char *seed = getenv("BARM_SEED");
+    if (seed) {
+        char *end;
+        unsigned long long v = strtoull(seed, &end, 0);
+        if (end != seed && *end == 0) bm_random_seed(v);
+        else bm_random_seed((uint64_t)time(NULL) ^ ((uint64_t)clock() << 32) ^ (uint64_t)(uintptr_t)&seed);
+    } else {
+        bm_random_seed(0);
+    }
+}
