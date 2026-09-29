@@ -1,0 +1,41 @@
+type Point = { x: f64, y: f64 }
+
+function arrays(): int {
+  const a: int[] = [1, 2]
+  const b = a
+  b.push(3)
+  return a.length
+}
+
+function records(): f64 {
+  let p: Point = { x: 1, y: 2 }
+  let q = p
+  p.x = 10
+  return q.x
+}
+
+function fine(): int {
+  const a: int[] = [1, 2]
+  let b = a.slice()
+  b.push(3)
+  const c = a
+  return a.length + c.length + b.length
+}
+
+function onlyCopyUsed(): int {
+  const a: int[] = [1]
+  let b = a
+  b.push(2)
+  return b.length
+}
+
+function fill(inout xs: int[]) {
+  xs[0] = 7
+}
+
+function inoutCall(): int {
+  let a: int[] = [1]
+  const b = a
+  fill(&a)
+  return b[0]!
+}

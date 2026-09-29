@@ -1,0 +1,32 @@
+error[N0102] imports/main.barm:1:16: `imports/lib.barm` has no export named `secret`
+    1 | import { area, secret, voluem } from "./lib"
+  note: `secret` is declared there but not exported; add `export` to its declaration
+  exports: area, volume
+
+error[N0102] imports/main.barm:1:24: `imports/lib.barm` has no export named `voluem`
+    1 | import { area, secret, voluem } from "./lib"
+  did you mean: volume
+  exports: area, volume
+  fix[maybe]: import `volume`
+
+error[N0101] imports/main.barm:2:23: can't find module "./libz"
+    2 | import { thing } from "./libz"
+  did you mean: "./lib"
+  fix[maybe]: use "./lib"
+
+error[N0105] imports/main.barm:3:23: imports name Barm modules without an extension, found "./lib.ts"
+    3 | import { other } from "./lib.ts"
+  fix[safe]: use "./lib"
+
+error[N0103] imports/main.barm:4:21: the standard library module "std/fs" is not available yet (planned for M3)
+    4 | import * as fs from "std/fs"
+
+error[X0011] imports/main.barm:5:8: default imports are not supported
+    5 | import lodash from "lodash"
+  instead: import named exports: `import { lodash } from ...` or `import * as lodash from ...`
+
+error[N0104] imports/main.barm:5:20: "lodash" is not a relative path; npm packages are not supported
+    5 | import lodash from "lodash"
+  instead: import local modules with a relative path: `"./file"`
+
+7 error(s)

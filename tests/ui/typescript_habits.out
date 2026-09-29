@@ -1,0 +1,53 @@
+error[X0011] typescript_habits.barm:3:1: default exports are not supported
+    3 | export default function helper(x: any): number {
+  instead: export the declaration by name and import it with `import { name }`
+  fix[maybe]: remove `default`
+
+error[X0001] typescript_habits.barm:3:35: `any` is not supported
+    3 | export default function helper(x: any): number {
+  instead: use the precise type, a union, a generic `<T>`, or `unknown` with narrowing
+  fix[maybe]: use `unknown`
+
+error[X0005] typescript_habits.barm:7:1: `enum` is not supported
+    7 | enum Color { Red, Green }
+  instead: use a union of string literals: `type Color = "red" | "green"`
+
+error[X0002] typescript_habits.barm:9:64: `null` is not supported; Barm has one "absent" value, `undefined`
+    9 | function habits(items: string[], count: number, name: string | null) {
+  fix[safe]: use `undefined`
+
+error[X0004] typescript_habits.barm:10:3: `var` is not supported
+   10 |   var total = 0
+  fix[safe]: use `let`
+
+error[X0003] typescript_habits.barm:11:13: `==` is not supported
+   11 |   if (count == 0) return
+  why: Barm has no type coercion; equality is always strict
+  fix[safe]: use `===`
+
+error[T0401] typescript_habits.barm:12:7: condition must be `bool`, found `f64`
+   12 |   if (count) console.log("nonzero")
+  why: no implicit truthiness: `0`, `""` and `undefined` are not `false`
+  fix[maybe]: `count !== 0`
+
+error[T0401] typescript_habits.barm:13:17: `||` needs `bool` operands, found `string | undefined`
+   13 |   const label = name || "anonymous"
+  why: no implicit truthiness: `0`, `""` and `undefined` are not `false`
+  fix[maybe]: for a default value, use `??`
+
+error[X0007] typescript_habits.barm:14:16: `for...in` is not supported
+   14 |   for (const k in items) console.log(k)
+  instead: iterate keys with `for (const k of map.keys())`, or values with `for...of`
+
+error[T0120] typescript_habits.barm:15:15: `items[0]` may be `undefined`
+   15 |   console.log(items[0].length)
+  narrow first: `if (items[0] !== undefined) { ... }`
+  fix[maybe]: optional chaining: `items[0]?.length`
+  fix[maybe]: assert defined (traps if not): `items[0]!.length`
+
+error[X0010] typescript_habits.barm:15:24: strings have no `.length`: it is ambiguous for UTF-8 text
+   15 |   console.log(items[0].length)
+  instead: `s.byteLength` for bytes, `s.chars().length` for characters
+  fix[maybe]: use `byteLength`
+
+11 error(s)

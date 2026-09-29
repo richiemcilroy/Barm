@@ -1,0 +1,19 @@
+error[T0001] numbers.barm:8:10: expected `int`, found `f64`
+    8 |   return n / 2
+  context: return type of `half`
+  why: floats never convert to integers implicitly
+  fix[maybe]: round toward zero: `Math.trunc(n / 2)`
+  fix[maybe]: round to nearest: `Math.round(n / 2)`
+
+error[T0111] numbers.barm:12:13: array index must be an integer, found `f64`
+   12 |   return xs[f]
+  fix[maybe]: use `Math.floor(f)`
+
+error[T0020] numbers.barm:16:17: 300 doesn't fit in `u8` (range 0..=255)
+   16 |   const b: u8 = 300
+
+error[T0501] numbers.barm:21:10: `|` needs integers, found `f64` and `f64`
+   21 |   return x | 0
+  instead: convert floats first with `Math.trunc(x)`
+
+4 error(s)

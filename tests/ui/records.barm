@@ -1,0 +1,17 @@
+type User = { id: int, name: string, email?: string }
+
+function make(): User {
+  return { id: 1, nme: "ada" }
+}
+
+function missing(): User {
+  return { id: 1 }
+}
+
+function read(u: User): string {
+  return u.username
+}
+
+function email(u: User): string {
+  return u.email.toLowerCase()
+}

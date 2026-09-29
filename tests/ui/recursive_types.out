@@ -1,0 +1,14 @@
+error[N0007] recursive_types.barm:1:6: type `Bad` refers to itself without a record or array in between
+    1 | type Bad = Bad | int
+  example: `type Tree = { kind: "leaf" } | { kind: "node", children: Tree[] }` is fine; `type A = A | int` is not
+
+error[N0007] recursive_types.barm:2:6: type `Ping` refers to itself without a record or array in between
+    2 | type Ping = Pong | string
+  example: `type Tree = { kind: "leaf" } | { kind: "node", children: Tree[] }` is fine; `type A = A | int` is not
+
+error[T0108] recursive_types.barm:17:12: not every variant of `Tree` has field `value`
+   17 |   return t.value
+  missing on: "node"
+  narrow first: `switch (t.kind)` or `if (t.kind === ...)`
+
+3 error(s)

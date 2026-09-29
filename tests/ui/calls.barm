@@ -1,0 +1,18 @@
+function add(a: int, b: int): int {
+  return a + b
+}
+
+function first<T>(xs: T[]): T | undefined {
+  return xs[0]
+}
+
+function main() {
+  add(1)
+  ad(1, 2)
+  const n: int = first([1, 2, 3]) ?? 0
+  const s: string = first([1, 2, 3]) ?? ""
+  const doubled = [1, 2, 3].map(x => x * 2)
+  const bad: string[] = doubled
+  const words = ["a", "b"].filter(w => w.startWith("a"))
+  n()
+}

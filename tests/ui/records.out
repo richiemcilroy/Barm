@@ -1,0 +1,20 @@
+error[T0102] records.barm:4:19: `User` has no field `nme`
+    4 |   return { id: 1, nme: "ada" }
+  fields: id, name, email
+  fix[maybe]: rename to `name`
+
+error[T0101] records.barm:8:10: missing field `name` for `User`
+    8 |   return { id: 1 }
+  fix[placeholder]: add name: <string>
+
+error[T0107] records.barm:12:12: `User` has no field `username`
+   12 |   return u.username
+  available: email, id, name
+
+error[T0120] records.barm:16:10: `u.email` may be `undefined`
+   16 |   return u.email.toLowerCase()
+  narrow first: `if (u.email !== undefined) { ... }`
+  fix[maybe]: optional chaining: `u.email?.toLowerCase()`
+  fix[maybe]: assert defined (traps if not): `u.email!.toLowerCase()`
+
+4 error(s)

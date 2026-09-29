@@ -1,0 +1,11 @@
+export function area(r: f64): f64 {
+  return Math.PI * r * r
+}
+
+export function volume(r: f64): f64 {
+  return 4.0 / 3.0 * Math.PI * r * r * r
+}
+
+function secret(): int {
+  return 42
+}

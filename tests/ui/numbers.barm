@@ -1,0 +1,28 @@
+function average(xs: f64[]): f64 {
+  let sum = 0
+  for (const x of xs) sum += x
+  return sum / xs.length
+}
+
+function half(n: int): int {
+  return n / 2
+}
+
+function index(xs: string[], f: f64): string | undefined {
+  return xs[f]
+}
+
+function bytes(): u8 {
+  const b: u8 = 300
+  return b
+}
+
+function bits(x: f64): int {
+  return x | 0
+}
+
+function counter(): int {
+  let n = 0
+  n += 1
+  return n
+}

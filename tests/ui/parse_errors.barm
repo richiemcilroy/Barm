@@ -1,0 +1,9 @@
+function broken(x: int {
+  return x +
+}
+
+function fine(): int {
+  return 1
+}
+
+const x = 1 2

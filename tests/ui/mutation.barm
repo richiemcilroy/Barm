@@ -1,0 +1,26 @@
+let counter = 0
+
+type Point = { x: f64, y: f64 }
+
+function nudge(p: Point) {
+  p.x += 1
+}
+
+function grow(xs: int[]) {
+  xs.push(1)
+}
+
+function fill(inout xs: int[]) {
+  xs.push(2)
+}
+
+function main() {
+  const limit = 10
+  limit = 20
+  const items: int[] = []
+  fill(items)
+  const pts: Point[] = [{ x: 0, y: 0 }]
+  for (const p of pts) {
+    p.x = 5
+  }
+}
