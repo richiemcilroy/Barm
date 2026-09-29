@@ -1,0 +1,595 @@
+//! Built-in types, globals, namespaces and methods.
+
+use super::expr::CallSig;
+use super::*;
+use crate::ast::Arg;
+
+pub(super) const BUILTIN_TYPES: &[&str] = &[
+    "int", "i64", "f64", "number", "f32", "i8", "i16", "i32", "u8", "u16", "u32", "u64", "bool", "boolean", "string", "never", "unknown", "undefined", "void", "Array", "Map",
+    "Set",
+];
+
+pub(super) const GLOBAL_NAMES: &[&str] = &[
+    "Math", "console", "expect", "String", "Number", "parseInt", "parseFloat", "isNaN", "int", "f64", "f32", "i8", "i16", "i32", "u8", "u16", "u32", "u64",
+];
+
+const CONVERSIONS: &[&str] = &["int", "i64", "f64", "f32", "i8", "i16", "i32", "u8", "u16", "u32", "u64"];
+
+pub(super) fn is_builtin_type(name: &str) -> bool {
+    BUILTIN_TYPES.contains(&name)
+}
+
+pub(super) fn is_builtin_ns(name: &str) -> bool {
+    matches!(name, "Math" | "console" | "JSON")
+}
+
+pub(super) fn is_builtin_fn(name: &str) -> bool {
+    matches!(name, "expect" | "String" | "Number" | "parseInt" | "parseFloat" | "isNaN" | "test") || CONVERSIONS.contains(&name)
+}
+
+pub(super) fn removed_global(name: &str) -> Option<String> {
+    Some(match name {
+        "arguments" => "`arguments` is not supported; declare the parameters".to_string(),
+        "eval" | "Function" => format!("`{name}` is not supported: there is no runtime code evaluation"),
+        "globalThis" | "window" | "document" | "global" => format!("`{name}` is not available; Barm compiles to native programs"),
+        "require" | "module" | "exports" => "CommonJS is not supported; use `import { name } from \"./file\"`".to_string(),
+        "process" => "`process` is not available yet; the `std/process` module is planned for M3".to_string(),
+        "setTimeout" | "setInterval" | "fetch" | "Promise" => format!("`{name}` is not supported yet (async is planned for M6)"),
+        "Date" => "`Date` is not supported yet; the `std/time` module is planned for M3".to_string(),
+        "Symbol" | "Proxy" | "Reflect" | "WeakMap" | "WeakSet" | "BigInt" => format!("`{name}` is not supported"),
+        "Object" => "`Object` is not supported: records have fixed fields; use `Map` for dynamic keys".to_string(),
+        "Array" => "`Array.from`/`Array.isArray` are not supported; use array literals and `map`".to_string(),
+        "Error" => "`Error` is not supported yet (errors are planned for M3)".to_string(),
+        _ => return None,
+    })
+}
+
+pub(super) struct Hint {
+    code: &'static str,
+    msg: String,
+    note: Option<(&'static str, String)>,
+    fix: Option<(String, String)>,
+}
+
+impl Hint {
+    pub(super) fn into_diag(self, span: Span) -> Diagnostic {
+        let mut d = Diagnostic::new(self.code, span, self.msg);
+        if let Some((l, t)) = self.note {
+            d = d.note(l, t);
+        }
+        if let Some((label, text)) = self.fix {
+            d = d.fix(Applicability::Maybe, label, span, text);
+        }
+        d
+    }
+}
+
+/// Explanations for members that exist in TypeScript but not (or differently) in Barm.
+pub(super) fn member_hint(types: &Types, base: TyId, name: &str) -> Option<Hint> {
+    let ty = types.get(base);
+    match (ty, name) {
+        (Ty::Str | Ty::StrLit(_), "length") => Some(Hint {
+            code: "X0010",
+            msg: "strings have no `.length`: it is ambiguous for UTF-8 text".to_string(),
+            note: Some(("instead", "`s.byteLength` for bytes, `s.chars().length` for characters".to_string())),
+            fix: Some(("use `byteLength`".to_string(), "byteLength".to_string())),
+        }),
+        (Ty::Array(_), "size") => Some(Hint { code: "T0107", msg: "arrays have `length`, not `size`".to_string(), note: None, fix: Some(("use `length`".to_string(), "length".to_string())) }),
+        (Ty::Map(..) | Ty::Set(_), "length") => Some(Hint { code: "T0107", msg: "maps and sets have `size`, not `length`".to_string(), note: None, fix: Some(("use `size`".to_string(), "size".to_string())) }),
+        _ => None,
+    }
+}
+
+pub(super) fn property(types: &Types, ty: TyId, name: &str) -> Option<TyId> {
+    match (types.get(ty), name) {
+        (Ty::Array(_), "length") => Some(INT),
+        (Ty::Str | Ty::StrLit(_), "byteLength") => Some(INT),
+        (Ty::Map(..) | Ty::Set(_), "size") => Some(INT),
+        _ => None,
+    }
+}
+
+const ARRAY_METHODS: &[&str] = &[
+    "push", "pop", "shift", "unshift", "map", "filter", "forEach", "reduce", "some", "every", "find", "findIndex", "indexOf", "lastIndexOf", "includes", "join", "slice", "concat",
+    "reverse", "sort", "at", "flatMap",
+];
+const STRING_METHODS: &[&str] = &[
+    "chars", "slice", "includes", "startsWith", "endsWith", "indexOf", "split", "trim", "trimStart", "trimEnd", "toUpperCase", "toLowerCase", "replace", "replaceAll", "repeat",
+    "padStart", "padEnd", "toString",
+];
+const MAP_METHODS: &[&str] = &["get", "set", "has", "delete", "clear", "keys", "values", "forEach"];
+const SET_METHODS: &[&str] = &["add", "has", "delete", "clear", "values", "forEach"];
+const NUMBER_METHODS: &[&str] = &["toFixed", "toString"];
+
+fn methods_of(types: &Types, ty: TyId) -> &'static [&'static str] {
+    match types.get(ty) {
+        Ty::Array(_) => ARRAY_METHODS,
+        Ty::Str | Ty::StrLit(_) => STRING_METHODS,
+        Ty::Map(..) => MAP_METHODS,
+        Ty::Set(_) => SET_METHODS,
+        _ if types.is_numeric(ty) => NUMBER_METHODS,
+        Ty::Bool => &["toString"],
+        _ => &[],
+    }
+}
+
+pub(super) fn is_method(c: &mut Checker, base: TyId, name: &str) -> bool {
+    let members = c.flat_members(base);
+    members.len() == 1 && methods_of(&c.types, members[0]).contains(&name)
+}
+
+pub(super) fn property_names(c: &mut Checker, ty: TyId) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = match c.types.get(ty) {
+        Ty::Array(_) => vec!["length"],
+        Ty::Str | Ty::StrLit(_) => vec!["byteLength"],
+        Ty::Map(..) | Ty::Set(_) => vec!["size"],
+        _ => Vec::new(),
+    };
+    out.extend(methods_of(&c.types, ty).iter().copied());
+    out
+}
+
+/// Short receiver name for call descriptions (`Array.map`), computed without formatting types.
+pub(super) fn type_label(types: &Types, ty: TyId) -> &'static str {
+    match types.get(ty) {
+        Ty::Array(_) => "Array",
+        Ty::Str | Ty::StrLit(_) => "string",
+        Ty::Map(..) => "Map",
+        Ty::Set(_) => "Set",
+        Ty::Bool => "bool",
+        _ => "number",
+    }
+}
+
+pub(super) struct MethodSig {
+    pub sig: CallSig,
+    pub mutates: bool,
+}
+
+fn p(ty: TyId) -> FnParam {
+    FnParam { ty, inout: false, optional: false }
+}
+
+fn opt(c: &mut Checker, ty: TyId) -> FnParam {
+    let ty = c.types.optional(ty);
+    FnParam { ty, inout: false, optional: true }
+}
+
+fn sig(params: Vec<(FnParam, &str)>, ret: TyId) -> CallSig {
+    let (params, names) = params.into_iter().map(|(p, n)| (p, n.to_string())).unzip();
+    CallSig { tparams: Vec::new(), params, names, rest: None, ret }
+}
+
+pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSig> {
+    let members = c.flat_members(base);
+    if members.len() != 1 {
+        return None;
+    }
+    let ty = members[0];
+    let mk = |sig: CallSig, mutates: bool| Some(MethodSig { sig, mutates });
+    match *c.types.get(ty) {
+        Ty::Array(e) => {
+            let arr = ty;
+            let opt_e = c.types.optional(e);
+            let pred = c.types.func(vec![p(e), FnParam { ty: INT, inout: false, optional: true }], BOOL);
+            match name {
+                "push" | "unshift" => mk(CallSig { tparams: Vec::new(), params: Vec::new(), names: Vec::new(), rest: Some(e), ret: INT }, true),
+                "pop" | "shift" => mk(sig(vec![], opt_e), true),
+                "map" | "flatMap" => {
+                    let u_name = c.syms.u;
+                    let u = c.new_gparam(u_name, None);
+                    let ut = c.types.intern(Ty::Param(u));
+                    let ret_elem = if name == "map" { ut } else { c.types.array(ut) };
+                    let f = c.types.func(vec![p(e), FnParam { ty: INT, inout: false, optional: true }], ret_elem);
+                    let ret = c.types.array(ut);
+                    mk(CallSig { tparams: vec![u], params: vec![p(f)], names: vec!["fn".into()], rest: None, ret }, false)
+                }
+                "filter" => mk(sig(vec![(p(pred), "predicate")], arr), false),
+                "forEach" => {
+                    let f = c.types.func(vec![p(e), FnParam { ty: INT, inout: false, optional: true }], VOID);
+                    mk(sig(vec![(p(f), "fn")], VOID), false)
+                }
+                "reduce" => {
+                    let u_name = c.syms.u;
+                    let u = c.new_gparam(u_name, None);
+                    let ut = c.types.intern(Ty::Param(u));
+                    let f = c.types.func(vec![p(ut), p(e), FnParam { ty: INT, inout: false, optional: true }], ut);
+                    mk(CallSig { tparams: vec![u], params: vec![p(f), p(ut)], names: vec!["fn".into(), "initial".into()], rest: None, ret: ut }, false)
+                }
+                "some" | "every" => mk(sig(vec![(p(pred), "predicate")], BOOL), false),
+                "find" => mk(sig(vec![(p(pred), "predicate")], opt_e), false),
+                "findIndex" => mk(sig(vec![(p(pred), "predicate")], INT), false),
+                "indexOf" | "lastIndexOf" => mk(sig(vec![(p(e), "value")], INT), false),
+                "includes" => mk(sig(vec![(p(e), "value")], BOOL), false),
+                "join" => {
+                    let sep = opt(c, STR);
+                    mk(sig(vec![(sep, "separator")], STR), false)
+                }
+                "slice" => {
+                    let (a, b) = (opt(c, INT), opt(c, INT));
+                    mk(sig(vec![(a, "start"), (b, "end")], arr), false)
+                }
+                "concat" => mk(sig(vec![(p(arr), "other")], arr), false),
+                "reverse" => mk(sig(vec![], arr), true),
+                "sort" => {
+                    let cmp = c.types.func(vec![p(e), p(e)], F64);
+                    let cmp = opt(c, cmp);
+                    mk(sig(vec![(cmp, "compare")], arr), true)
+                }
+                "at" => mk(sig(vec![(p(INT), "index")], opt_e), false),
+                _ => None,
+            }
+        }
+        Ty::Str | Ty::StrLit(_) => {
+            let str_arr = c.types.array(STR);
+            match name {
+                "chars" => mk(sig(vec![], str_arr), false),
+                "slice" => {
+                    let end = opt(c, INT);
+                    mk(sig(vec![(p(INT), "start"), (end, "end")], STR), false)
+                }
+                "includes" | "startsWith" | "endsWith" => mk(sig(vec![(p(STR), "search")], BOOL), false),
+                "indexOf" => mk(sig(vec![(p(STR), "search")], INT), false),
+                "split" => mk(sig(vec![(p(STR), "separator")], str_arr), false),
+                "trim" | "trimStart" | "trimEnd" | "toUpperCase" | "toLowerCase" | "toString" => mk(sig(vec![], STR), false),
+                "replace" | "replaceAll" => mk(sig(vec![(p(STR), "search"), (p(STR), "replacement")], STR), false),
+                "repeat" => mk(sig(vec![(p(INT), "count")], STR), false),
+                "padStart" | "padEnd" => {
+                    let fill = opt(c, STR);
+                    mk(sig(vec![(p(INT), "length"), (fill, "fill")], STR), false)
+                }
+                _ => None,
+            }
+        }
+        Ty::Map(k, v) => {
+            let opt_v = c.types.optional(v);
+            match name {
+                "get" => mk(sig(vec![(p(k), "key")], opt_v), false),
+                "set" => mk(sig(vec![(p(k), "key"), (p(v), "value")], VOID), true),
+                "has" => mk(sig(vec![(p(k), "key")], BOOL), false),
+                "delete" => mk(sig(vec![(p(k), "key")], BOOL), true),
+                "clear" => mk(sig(vec![], VOID), true),
+                "keys" => {
+                    let a = c.types.array(k);
+                    mk(sig(vec![], a), false)
+                }
+                "values" => {
+                    let a = c.types.array(v);
+                    mk(sig(vec![], a), false)
+                }
+                "forEach" => {
+                    let f = c.types.func(vec![p(v), FnParam { ty: k, inout: false, optional: true }], VOID);
+                    mk(sig(vec![(p(f), "fn")], VOID), false)
+                }
+                _ => None,
+            }
+        }
+        Ty::Set(e) => match name {
+            "add" => mk(sig(vec![(p(e), "value")], VOID), true),
+            "has" => mk(sig(vec![(p(e), "value")], BOOL), false),
+            "delete" => mk(sig(vec![(p(e), "value")], BOOL), true),
+            "clear" => mk(sig(vec![], VOID), true),
+            "values" => {
+                let a = c.types.array(e);
+                mk(sig(vec![], a), false)
+            }
+            "forEach" => {
+                let f = c.types.func(vec![p(e)], VOID);
+                mk(sig(vec![(p(f), "fn")], VOID), false)
+            }
+            _ => None,
+        },
+        Ty::Bool if name == "toString" => mk(sig(vec![], STR), false),
+        _ if c.types.is_numeric(ty) => match name {
+            "toFixed" => mk(sig(vec![(p(INT), "digits")], STR), false),
+            "toString" => mk(sig(vec![], STR), false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+const MATH_CONSTS: &[&str] = &["PI", "E", "LN2", "LN10", "LOG2E", "LOG10E", "SQRT2", "SQRT1_2"];
+const MATH_F64_FNS: &[(&str, usize)] = &[
+    ("sqrt", 1),
+    ("cbrt", 1),
+    ("sin", 1),
+    ("cos", 1),
+    ("tan", 1),
+    ("asin", 1),
+    ("acos", 1),
+    ("atan", 1),
+    ("atan2", 2),
+    ("sinh", 1),
+    ("cosh", 1),
+    ("tanh", 1),
+    ("exp", 1),
+    ("expm1", 1),
+    ("log", 1),
+    ("log2", 1),
+    ("log10", 1),
+    ("log1p", 1),
+    ("pow", 2),
+    ("hypot", 2),
+    ("sign", 1),
+    ("random", 0),
+];
+const MATH_INT_FNS: &[&str] = &["floor", "ceil", "round", "trunc"];
+
+impl<'a> Checker<'a> {
+    fn check_args_loose(&mut self, args: &[Arg]) {
+        for a in args {
+            self.expr(a.expr, None);
+        }
+    }
+
+    pub(super) fn builtin_ns_member(&mut self, ns: &str, name: Sym, name_span: Span) -> TyId {
+        let n = self.name(name).to_string();
+        if ns == "Math" && MATH_CONSTS.contains(&n.as_str()) {
+            return F64;
+        }
+        if ns == "JSON" {
+            self.report(Diagnostic::new("U0017", name_span, "`JSON` is not supported yet; the `std/json` module is planned for M3"));
+            return ERROR;
+        }
+        let known: Vec<&str> = match ns {
+            "Math" => MATH_CONSTS.iter().copied().chain(MATH_F64_FNS.iter().map(|f| f.0)).chain(MATH_INT_FNS.iter().copied()).chain(["abs", "min", "max"]).collect(),
+            _ => vec!["log", "error", "warn", "info"],
+        };
+        if known.contains(&n.as_str()) {
+            self.report(Diagnostic::new("T0203", name_span, format!("`{ns}.{n}` must be called")));
+            return ERROR;
+        }
+        self.unknown_ns_member(ns, &n, &known, name_span);
+        ERROR
+    }
+
+    fn unknown_ns_member(&mut self, ns: &str, n: &str, known: &[&str], span: Span) {
+        let mut d = Diagnostic::new("T0107", span, format!("`{ns}` has no member `{n}`"));
+        let sug = similar(n, known.iter().copied());
+        if let Some(first) = sug.first() {
+            d = d.note("did you mean", sug.join(", ")).fix(Applicability::Maybe, format!("use `{first}`"), span, first.to_string());
+        }
+        self.report(d);
+    }
+
+    pub(super) fn builtin_ns_call(&mut self, ns: &str, name: &str, name_span: Span, args: &[Arg], exp: Option<TyId>, span: Span) -> TyId {
+        match ns {
+            "console" => {
+                let known = ["log", "error", "warn", "info"];
+                if !known.contains(&name) {
+                    self.unknown_ns_member(ns, name, &known, name_span);
+                }
+                for a in args {
+                    let t = self.expr(a.expr, None);
+                    if !self.printable(t) {
+                        let msg = format!("a value of type `{}` can't be printed", self.show(t));
+                        let s = self.ast().expr(a.expr).span;
+                        self.report(Diagnostic::new("T0510", s, msg));
+                    }
+                }
+                VOID
+            }
+            "JSON" => {
+                self.check_args_loose(args);
+                self.report(Diagnostic::new("U0017", span, "`JSON` is not supported yet; the `std/json` module is planned for M3"));
+                ERROR
+            }
+            _ => self.math_call(name, name_span, args, exp, span),
+        }
+    }
+
+    fn math_call(&mut self, name: &str, name_span: Span, args: &[Arg], exp: Option<TyId>, span: Span) -> TyId {
+        let desc = format!("Math.{name}");
+        if let Some(&(_, arity)) = MATH_F64_FNS.iter().find(|f| f.0 == name) {
+            let names = ["x", "y"];
+            let cs = CallSig { tparams: Vec::new(), params: (0..arity).map(|_| p(F64)).collect(), names: names[..arity].iter().map(|s| s.to_string()).collect(), rest: None, ret: F64 };
+            return self.call_sig(&cs, &desc, &[], args, exp, span);
+        }
+        if MATH_INT_FNS.contains(&name) {
+            let cs = CallSig { tparams: Vec::new(), params: vec![p(F64)], names: vec!["x".into()], rest: None, ret: INT };
+            return self.call_sig(&cs, &desc, &[], args, exp, span);
+        }
+        match name {
+            "abs" => {
+                if args.len() != 1 {
+                    self.report(Diagnostic::new("T0201", span, format!("`{desc}` takes 1 argument, found {}", args.len())));
+                    self.check_args_loose(args);
+                    return ERROR;
+                }
+                let t = self.expr(args[0].expr, exp);
+                if t != ERROR && !self.types.is_numeric(t) {
+                    let msg = format!("`{desc}` needs a number, found `{}`", self.show(t));
+                    let s = self.ast().expr(args[0].expr).span;
+                    self.report(Diagnostic::new("T0001", s, msg));
+                    return ERROR;
+                }
+                t
+            }
+            "min" | "max" => {
+                if args.is_empty() {
+                    self.report(Diagnostic::new("T0201", span, format!("`{desc}` takes at least 1 argument")));
+                    return ERROR;
+                }
+                let mut tys = Vec::new();
+                for a in args {
+                    let t = self.expr(a.expr, exp);
+                    if t != ERROR && !self.types.is_numeric(t) {
+                        let msg = format!("`{desc}` needs numbers, found `{}`", self.show(t));
+                        let s = self.ast().expr(a.expr).span;
+                        let mut d = Diagnostic::new("T0001", s, msg);
+                        if matches!(self.types.get(t), Ty::Array(_)) {
+                            d = d.note("note", "spread is not supported; use `xs.reduce((a, b) => Math.max(a, b), xs[0]!)`");
+                        }
+                        self.report(d);
+                        return ERROR;
+                    }
+                    tys.push(t);
+                }
+                if tys.iter().all(|&t| t == tys[0]) {
+                    tys[0]
+                } else if tys.iter().all(|&t| t == INT || t == F64) {
+                    F64
+                } else {
+                    self.report(Diagnostic::new("T0504", span, format!("`{desc}` arguments mix integer types")));
+                    ERROR
+                }
+            }
+            _ => {
+                self.check_args_loose(args);
+                let known: Vec<&str> = MATH_CONSTS.iter().copied().chain(MATH_F64_FNS.iter().map(|f| f.0)).chain(MATH_INT_FNS.iter().copied()).chain(["abs", "min", "max"]).collect();
+                self.unknown_ns_member("Math", name, &known, name_span);
+                ERROR
+            }
+        }
+    }
+
+    /// Calls to built-in global functions; `None` if `name` isn't one.
+    pub(super) fn global_call(&mut self, name: &str, callee_span: Span, type_args: &[crate::ast::TypeId], args: &[Arg], _exp: Option<TyId>, span: Span) -> Option<TyId> {
+        let _ = type_args;
+        let one = |c: &mut Self| -> Option<TyId> {
+            if args.len() != 1 {
+                c.report(Diagnostic::new("T0201", span, format!("`{name}` takes 1 argument, found {}", args.len())));
+                c.check_args_loose(args);
+                return None;
+            }
+            Some(c.expr(args[0].expr, None))
+        };
+        let result = match name {
+            "expect" => match one(self) {
+                Some(t) => self.types.intern(Ty::Expect(t)),
+                None => ERROR,
+            },
+            "String" => {
+                if let Some(t) = one(self)
+                    && !self.printable(t) {
+                        let msg = format!("a value of type `{}` can't be converted to a string", self.show(t));
+                        self.report(Diagnostic::new("T0510", span, msg));
+                    }
+                STR
+            }
+            "Number" | "parseFloat" | "parseInt" => {
+                let ret = if name == "parseInt" { INT } else { F64 };
+                if args.is_empty() || args.len() > 1 + usize::from(name == "parseInt") {
+                    self.report(Diagnostic::new("T0201", span, format!("`{name}` takes 1 argument, found {}", args.len())));
+                    self.check_args_loose(args);
+                } else {
+                    let t = self.expr(args[0].expr, Some(STR));
+                    if t != ERROR && !self.types.is_string(t) {
+                        let msg = format!("`{name}` parses a `string`, found `{}`", self.show(t));
+                        let s = self.ast().expr(args[0].expr).span;
+                        let mut d = Diagnostic::new("T0001", s, msg);
+                        if self.types.is_numeric(t) {
+                            d = d.note("instead", "numbers convert with `f64(x)`, `int(x)` or `Math.trunc(x)`");
+                        }
+                        self.report(d);
+                    }
+                    if let Some(radix) = args.get(1) {
+                        let t = self.expr(radix.expr, Some(INT));
+                        let s = self.ast().expr(radix.expr).span;
+                        self.expect_assignable(t, INT, s, None);
+                    }
+                }
+                self.types.optional(ret)
+            }
+            "isNaN" => {
+                if let Some(t) = one(self) {
+                    let s = self.ast().expr(args[0].expr).span;
+                    self.expect_assignable(t, F64, s, None);
+                }
+                BOOL
+            }
+            "test" => {
+                self.check_args_loose(args);
+                self.report(Diagnostic::new("P0202", callee_span, "`test(...)` is only allowed at the top level of a module"));
+                VOID
+            }
+            _ if CONVERSIONS.contains(&name) => {
+                let target = match name {
+                    "int" | "i64" => INT,
+                    "f64" => F64,
+                    "f32" => F32,
+                    "i8" => I8,
+                    "i16" => I16,
+                    "i32" => I32,
+                    "u8" => U8,
+                    "u16" => U16,
+                    "u32" => U32,
+                    _ => U64,
+                };
+                if args.len() != 1 {
+                    self.report(Diagnostic::new("T0201", span, format!("`{name}(...)` takes 1 argument, found {}", args.len())));
+                    self.check_args_loose(args);
+                    return Some(target);
+                }
+                let t = self.expr(args[0].expr, Some(target));
+                if t != ERROR && !self.types.is_numeric(t) {
+                    let s = self.ast().expr(args[0].expr).span;
+                    let mut d = Diagnostic::new("T0001", s, format!("`{name}(...)` converts numbers, found `{}`", self.show(t)));
+                    if self.types.is_string(t) {
+                        d = d.note("to parse text", if self.types.is_int(target) { "`parseInt(s)`" } else { "`parseFloat(s)`" });
+                    }
+                    self.report(d);
+                } else if self.types.is_float(t) && self.types.is_int(target) {
+                    let text = self.src(self.ast().expr(args[0].expr).span).to_string();
+                    self.report(
+                        Diagnostic::new("T0001", span, format!("`{name}(...)` doesn't round floats"))
+                            .note("instead", "choose the rounding explicitly")
+                            .fix(Applicability::Maybe, format!("`Math.trunc({text})`"), span, format!("Math.trunc({text})"))
+                            .fix(Applicability::Maybe, format!("`Math.round({text})`"), span, format!("Math.round({text})")),
+                    );
+                }
+                target
+            }
+            _ => return None,
+        };
+        Some(result)
+    }
+
+    pub(super) fn expect_matcher(&mut self, subject: TyId, name: &str, name_span: Span, args: &[Arg], span: Span) -> TyId {
+        match name {
+            "toBe" | "toEqual" => {
+                if args.len() != 1 {
+                    self.report(Diagnostic::new("T0201", span, format!("`{name}` takes 1 argument, found {}", args.len())));
+                    self.check_args_loose(args);
+                    return VOID;
+                }
+                let t = self.expr(args[0].expr, Some(subject));
+                if !self.comparable(t, subject) {
+                    let msg = format!("expected value of type `{}` can never equal a `{}`", self.show(t), self.show(subject));
+                    let s = self.ast().expr(args[0].expr).span;
+                    self.report(Diagnostic::new("T0502", s, msg));
+                }
+            }
+            "toBeCloseTo" => {
+                let cs = CallSig { tparams: Vec::new(), params: vec![p(F64), opt(self, INT)], names: vec!["expected".into(), "digits".into()], rest: None, ret: VOID };
+                self.call_sig(&cs, "toBeCloseTo", &[], args, None, span);
+                if subject != ERROR && !self.types.is_numeric(subject) {
+                    let msg = format!("`toBeCloseTo` needs a number, found `{}`", self.show(subject));
+                    self.report(Diagnostic::new("T0001", name_span, msg));
+                }
+            }
+            "toBeUndefined" | "toBeDefined" | "toBeTruthy" | "toBeFalsy" => {
+                self.check_args_loose(args);
+                if matches!(name, "toBeTruthy" | "toBeFalsy") {
+                    let alt = if name == "toBeTruthy" { "toBe(true)" } else { "toBe(false)" };
+                    self.report(Diagnostic::new("X0039", name_span, format!("`{name}` relies on truthiness")).fix(Applicability::Maybe, format!("use `{alt}`"), name_span.to(span.empty_at_end()), alt));
+                } else if !self.types.has_undefined(subject) && subject != ERROR {
+                    let msg = format!("`{}` is never `undefined`", self.show(subject));
+                    self.report(Diagnostic::new("T0503", name_span, msg));
+                }
+            }
+            _ => {
+                self.check_args_loose(args);
+                let known = ["toBe", "toEqual", "toBeCloseTo", "toBeUndefined", "toBeDefined"];
+                let mut d = Diagnostic::new("T0107", name_span, format!("unknown matcher `{name}`")).note("available", known.join(", "));
+                let sug = similar(name, known.iter().copied());
+                if let Some(first) = sug.first() {
+                    d = d.fix(Applicability::Maybe, format!("use `{first}`"), name_span, first.to_string());
+                }
+                self.report(d);
+            }
+        }
+        VOID
+    }
+}
