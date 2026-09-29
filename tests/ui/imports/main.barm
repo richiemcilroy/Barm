@@ -1,0 +1,9 @@
+import { area, secret, voluem } from "./lib"
+import { thing } from "./libz"
+import { other } from "./lib.ts"
+import * as fs from "std/fs"
+import lodash from "lodash"
+
+function main() {
+  console.log(area(2.0))
+}

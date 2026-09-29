@@ -1,0 +1,27 @@
+error[F0301] unions.barm:7:11: `switch` is not exhaustive: missing "triangle"
+    7 |   switch (s.kind) {
+  fix[placeholder]: add case "triangle"
+
+error[T0502] unions.barm:16:7: this comparison is always false: `"circle" | "square" | "triangle"` and `"circel"` have no values in common
+   16 |   if (s.kind === "circel") return 0.0
+  valid values: "circle", "square", "triangle"
+  fix[maybe]: use "circle"
+
+error[T0108] unions.barm:17:12: not every variant of `Shape` has field `side`
+   17 |   return s.side * 4
+  missing on: "circle", "triangle"
+  narrow first: `switch (s.kind)` or `if (s.kind === ...)`
+
+error[T0103] unions.barm:21:18: `kind: "triangel"` is not a variant of `Shape`
+   21 |   return { kind: "triangel", base: 1, height: 2 }
+  valid values: "circle", "square", "triangle"
+  fix[maybe]: use "triangle"
+
+error[T0001] unions.barm:31:15: expected `Shape`, found `Shape | undefined`
+   31 |   return area(s)
+  context: argument `s` of `area`
+  why: the value may be `undefined`
+  fix[placeholder]: provide a default: `?? <default>`
+  fix[maybe]: assert it is defined (traps if not): `!`
+
+5 error(s)

@@ -1,0 +1,16 @@
+// Things TypeScript-trained agents write out of habit.
+
+export default function helper(x: any): number {
+  return x
+}
+
+enum Color { Red, Green }
+
+function habits(items: string[], count: number, name: string | null) {
+  var total = 0
+  if (count == 0) return
+  if (count) console.log("nonzero")
+  const label = name || "anonymous"
+  for (const k in items) console.log(k)
+  console.log(items[0].length)
+}

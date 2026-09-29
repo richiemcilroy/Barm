@@ -1,0 +1,22 @@
+type Bad = Bad | int
+type Ping = Pong | string
+type Pong = Ping | bool
+
+type Tree = { kind: "leaf", value: int } | { kind: "node", children: Tree[] }
+
+function sum(t: Tree): int {
+  switch (t.kind) {
+    case "leaf":
+      return t.value
+    case "node":
+      return t.children.reduce((acc, c) => acc + sum(c), 0)
+  }
+}
+
+function wrong(t: Tree): int {
+  return t.value
+}
+
+function bad(b: Bad): Bad {
+  return b
+}

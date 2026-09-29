@@ -1,0 +1,32 @@
+type Shape =
+  | { kind: "circle", r: f64 }
+  | { kind: "square", side: f64 }
+  | { kind: "triangle", base: f64, height: f64 }
+
+function area(s: Shape): f64 {
+  switch (s.kind) {
+    case "circle":
+      return Math.PI * s.r * s.r
+    case "square":
+      return s.side * s.side
+  }
+}
+
+function perimeter(s: Shape): f64 {
+  if (s.kind === "circel") return 0.0
+  return s.side * 4
+}
+
+function make(): Shape {
+  return { kind: "triangel", base: 1, height: 2 }
+}
+
+function radius(s: Shape | undefined): f64 {
+  if (s === undefined) return 0.0
+  if (s.kind !== "circle") return 0.0
+  return s.r
+}
+
+function maybe(s: Shape | undefined): f64 {
+  return area(s)
+}

@@ -1,0 +1,37 @@
+type Tree = { value: int, left: Tree | undefined, right: Tree | undefined }
+type Config = { name: string, limits: { max: int | undefined } }
+
+function depth(t: Tree): int {
+  if (t.left === undefined || t.right === undefined) return 1
+  return 1 + Math.max(depth(t.left), depth(t.right))
+}
+
+function leftValue(t: Tree): int {
+  if (t.left !== undefined) {
+    return t.left.value
+  }
+  return 0
+}
+
+function nested(c: Config): int {
+  if (c.limits.max === undefined) return 0
+  return c.limits.max + 1
+}
+
+function invalidated(t: Tree): int {
+  let u = t
+  if (u.left !== undefined) {
+    u.left = undefined
+    return u.left.value
+  }
+  return 0
+}
+
+function closures(t: Tree): int {
+  let u = t
+  if (u.left !== undefined) {
+    const f = () => u.left.value
+    return f()
+  }
+  return 0
+}

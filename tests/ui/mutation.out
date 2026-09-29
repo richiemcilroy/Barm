@@ -1,0 +1,31 @@
+error[V0201] mutation.barm:1:1: mutable module-level state is not allowed
+    1 | let counter = 0
+  instead: use `const` for module constants, and keep mutable state inside functions
+  fix[maybe]: use `const`
+
+error[V0101] mutation.barm:6:3: can't modify parameter `p`: parameters are read-only
+    6 |   p.x += 1
+  to change the caller's value: declare `inout p` and call with `&arg`
+  to change a local copy: `let copy = p` and modify `copy`
+  fix[maybe]: make `p` an `inout` parameter
+
+error[V0101] mutation.barm:10:3: can't modify parameter `xs`: parameters are read-only
+   10 |   xs.push(1)
+  to change the caller's value: declare `inout xs` and call with `&arg`
+  to change a local copy: `let copy = xs` and modify `copy`
+  fix[maybe]: make `xs` an `inout` parameter
+
+error[V0001] mutation.barm:19:3: can't reassign constant `limit`
+   19 |   limit = 20
+  fix[safe]: declare `limit` with `let`
+
+error[V0110] mutation.barm:21:8: parameter `xs` of `fill` is `inout`; pass the argument with `&`
+   21 |   fill(items)
+  fix[safe]: pass `&items`
+
+error[V0104] mutation.barm:24:5: can't modify loop variable `p`: it is a copy of the element
+   24 |     p.x = 5
+  why: changes to the copy would not reach the collection (Barm collections hold values)
+  instead: loop over indices and assign `xs[i] = ...`, or build a new array with `map`
+
+6 error(s)
