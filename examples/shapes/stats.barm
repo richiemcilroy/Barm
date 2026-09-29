@@ -1,0 +1,32 @@
+export function sum(xs: f64[]): f64 {
+  return xs.reduce((acc, x) => acc + x, 0.0)
+}
+
+export function median(xs: f64[]): f64 | undefined {
+  if (xs.length === 0) return undefined
+  const sorted = xs.slice().sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  if (sorted.length % 2 === 0) {
+    return (sorted[mid - 1]! + sorted[mid]!) / 2
+  }
+  return sorted[mid]
+}
+
+export function histogram(words: string[]): Map<string, int> {
+  const counts = new Map<string, int>()
+  for (const w of words) {
+    const key = w.trim().toLowerCase()
+    if (key === "") continue
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  return counts
+}
+
+test("median of even length", () => {
+  expect(median([4.0, 1.0, 3.0, 2.0])).toBe(2.5)
+})
+
+test("histogram ignores case", () => {
+  const h = histogram(["A", "a", "b"])
+  expect(h.get("a")).toBe(2)
+})

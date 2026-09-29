@@ -1,0 +1,73 @@
+// Geometry helpers: records, discriminated unions, exhaustive switches.
+
+export type Point = { x: f64, y: f64 }
+
+export type Shape =
+  | { kind: "circle", center: Point, r: f64 }
+  | { kind: "rect", min: Point, max: Point }
+  | { kind: "polygon", points: Point[] }
+
+export function area(s: Shape): f64 {
+  switch (s.kind) {
+    case "circle":
+      return Math.PI * s.r * s.r
+    case "rect":
+      return (s.max.x - s.min.x) * (s.max.y - s.min.y)
+    case "polygon": {
+      let sum = 0
+      for (let i = 0; i < s.points.length; i++) {
+        const a = s.points[i]!
+        const b = s.points[(i + 1) % s.points.length]!
+        sum += a.x * b.y - b.x * a.y
+      }
+      return Math.abs(sum) / 2
+    }
+  }
+}
+
+export function describe(s: Shape): string {
+  if (s.kind === "circle") {
+    return `circle of radius ${s.r}`
+  }
+  return `${s.kind} with area ${area(s).toFixed(2)}`
+}
+
+export function largest(shapes: Shape[]): Shape | undefined {
+  let best: Shape | undefined = undefined
+  for (const s of shapes) {
+    if (best === undefined || area(s) > area(best)) {
+      best = s
+    }
+  }
+  return best
+}
+
+export function translate(inout shapes: Shape[], dx: f64, dy: f64) {
+  for (let i = 0; i < shapes.length; i++) {
+    const s = shapes[i]!
+    switch (s.kind) {
+      case "circle":
+        shapes[i] = { kind: "circle", center: { x: s.center.x + dx, y: s.center.y + dy }, r: s.r }
+        break
+      case "rect":
+        shapes[i] = {
+          kind: "rect",
+          min: { x: s.min.x + dx, y: s.min.y + dy },
+          max: { x: s.max.x + dx, y: s.max.y + dy },
+        }
+        break
+      case "polygon":
+        shapes[i] = { kind: "polygon", points: s.points.map(p => ({ x: p.x + dx, y: p.y + dy })) }
+        break
+    }
+  }
+}
+
+test("unit circle area", () => {
+  expect(area({ kind: "circle", center: { x: 0, y: 0 }, r: 1 })).toBeCloseTo(Math.PI)
+})
+
+test("triangle area", () => {
+  const tri: Shape = { kind: "polygon", points: [{ x: 0, y: 0 }, { x: 4, y: 0 }, { x: 0, y: 3 }] }
+  expect(area(tri)).toBe(6.0)
+})

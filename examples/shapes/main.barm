@@ -1,0 +1,27 @@
+import { Shape, area, describe, largest, translate } from "./geometry"
+import * as stats from "./stats"
+
+function main() {
+  let shapes: Shape[] = [
+    { kind: "circle", center: { x: 0, y: 0 }, r: 2 },
+    { kind: "rect", min: { x: 0, y: 0 }, max: { x: 3, y: 4 } },
+  ]
+  translate(&shapes, 1, 1)
+
+  const areas = shapes.map(area)
+  console.log(`total area: ${stats.sum(areas)}`)
+  console.log(`median: ${stats.median(areas) ?? 0}`)
+
+  const big = largest(shapes)
+  if (big !== undefined) {
+    console.log(describe(big))
+  }
+
+  const counts = new Map<string, int>()
+  for (const s of shapes) {
+    counts.set(s.kind, (counts.get(s.kind) ?? 0) + 1)
+  }
+  for (const k of counts.keys()) {
+    console.log(k, counts.get(k)!)
+  }
+}
