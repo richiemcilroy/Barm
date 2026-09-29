@@ -1,0 +1,498 @@
+{
+  "started": "2026-09-29T23:38:33",
+  "machine": {
+    "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+    "machine": "arm64",
+    "processor": "arm",
+    "cpu_count": 16,
+    "load_average": [
+      6.68896484375,
+      6.234375,
+      6.21142578125
+    ]
+  },
+  "settings": {
+    "runs": 5,
+    "warmup": 0,
+    "timeout_s": 60.0,
+    "scriptc_cache": false
+  },
+  "toolchains": {
+    "c": "Apple clang version 17.0.0 (clang-1700.6.3.2)",
+    "rust": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "node": "v26.3.0",
+    "bun": "1.4.0",
+    "scriptc": "0.1.7",
+    "barm": "barm 0.0.1"
+  },
+  "results": [
+    {
+      "bench": "array_push",
+      "lang": "c",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.05436299997381866,
+      "binary_bytes": 33600,
+      "stripped_bytes": 33608,
+      "source_lines": 33,
+      "times_s": [
+        0.25602474994957447,
+        0.06537333398591727,
+        0.06598574999952689,
+        0.057241834001615644,
+        0.058196416997816414
+      ],
+      "rss_bytes": [
+        244056064,
+        244088832,
+        244072448,
+        244056064,
+        244072448
+      ],
+      "median_s": 0.06537333398591727,
+      "min_s": 0.057241834001615644,
+      "peak_rss_bytes": 244088832,
+      "output_matches": true,
+      "stdout": "30000000 224999992500000.0 224999992500000.0\n",
+      "note": ""
+    },
+    {
+      "bench": "array_push",
+      "lang": "barm",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.2838959170039743,
+      "binary_bytes": 92328,
+      "stripped_bytes": 86360,
+      "source_lines": 16,
+      "times_s": [
+        0.2064807090209797,
+        0.08099524996941909,
+        0.08156170800793916,
+        0.07994016702286899,
+        0.08041704201605171
+      ],
+      "rss_bytes": [
+        243056640,
+        243056640,
+        243056640,
+        243056640,
+        243056640
+      ],
+      "median_s": 0.08099524996941909,
+      "min_s": 0.07994016702286899,
+      "peak_rss_bytes": 243056640,
+      "output_matches": true,
+      "stdout": "30000000 224999992500000.0 224999992500000.0\n",
+      "note": ""
+    },
+    {
+      "bench": "binary_trees",
+      "lang": "c",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.060577374999411404,
+      "binary_bytes": 33616,
+      "stripped_bytes": 33560,
+      "source_lines": 50,
+      "times_s": [
+        0.8714482499635778,
+        0.747098374995403,
+        0.742986541998107,
+        0.7364623750327155,
+        0.7433301249984652
+      ],
+      "rss_bytes": [
+        18743296,
+        18743296,
+        18743296,
+        18743296,
+        18743296
+      ],
+      "median_s": 0.7433301249984652,
+      "min_s": 0.7364623750327155,
+      "peak_rss_bytes": 18743296,
+      "output_matches": true,
+      "stdout": "stretch tree of depth 19\t check: 1048575\n262144\t trees of depth 4\t check: 8126464\n65536\t trees of depth 6\t check: 8323072\n16384\t trees of depth 8\t check: 8372224\n4096\t trees of depth 10\t check: 8384512\n1024\t trees of depth 12\t check: 8387584\n256\t trees of depth 14\t check: 8388352\n64\t trees of depth 16\t check: 8388544\n16\t trees of depth 18\t check: 8388592\nlong lived tree of depth 18\t check: 524287\n",
+      "note": ""
+    },
+    {
+      "bench": "binary_trees",
+      "lang": "barm",
+      "status": "build failed",
+      "reason": "thread 'main' (14863318) has overflowed its stack\nfatal runtime error: stack overflow, aborting",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 28,
+      "times_s": [],
+      "rss_bytes": [],
+      "median_s": null,
+      "min_s": null,
+      "peak_rss_bytes": null,
+      "output_matches": null,
+      "stdout": "",
+      "note": ""
+    },
+    {
+      "bench": "fib",
+      "lang": "c",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.05123854102566838,
+      "binary_bytes": 33440,
+      "stripped_bytes": 33432,
+      "source_lines": 10,
+      "times_s": [
+        0.7618898749933578,
+        0.531306000018958,
+        0.5342884159763344,
+        0.5320422090007924,
+        0.536279083986301
+      ],
+      "rss_bytes": [
+        1851392,
+        1851392,
+        1851392,
+        1851392,
+        1851392
+      ],
+      "median_s": 0.5342884159763344,
+      "min_s": 0.531306000018958,
+      "peak_rss_bytes": 1851392,
+      "output_matches": true,
+      "stdout": "267914296\n",
+      "note": ""
+    },
+    {
+      "bench": "fib",
+      "lang": "barm",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.27946337504545227,
+      "binary_bytes": 92344,
+      "stripped_bytes": 86360,
+      "source_lines": 7,
+      "times_s": [
+        0.7958789169788361,
+        0.6273983330465853,
+        0.6252213749685325,
+        0.6226848340011202,
+        0.6283593329717405
+      ],
+      "rss_bytes": [
+        1867776,
+        1867776,
+        1867776,
+        1867776,
+        1867776
+      ],
+      "median_s": 0.6273983330465853,
+      "min_s": 0.6226848340011202,
+      "peak_rss_bytes": 1867776,
+      "output_matches": true,
+      "stdout": "267914296\n",
+      "note": ""
+    },
+    {
+      "bench": "map_insert",
+      "lang": "c",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.06289320799987763,
+      "binary_bytes": 33808,
+      "stripped_bytes": 33832,
+      "source_lines": 81,
+      "times_s": [
+        0.8783353330218233,
+        0.6801551670068875,
+        0.6705548750469461,
+        0.6786661670194007,
+        0.6759438750450499
+      ],
+      "rss_bytes": [
+        235470848,
+        235487232,
+        235470848,
+        235470848,
+        235470848
+      ],
+      "median_s": 0.6786661670194007,
+      "min_s": 0.6705548750469461,
+      "peak_rss_bytes": 235487232,
+      "output_matches": true,
+      "stdout": "2000000 1999999000000\n",
+      "note": ""
+    },
+    {
+      "bench": "map_insert",
+      "lang": "barm",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.28586841601645574,
+      "binary_bytes": 92328,
+      "stripped_bytes": 86360,
+      "source_lines": 12,
+      "times_s": [
+        0.5483409169828519,
+        0.422140791954007,
+        0.4218407919979654,
+        0.3929256250266917,
+        0.41815045796101913
+      ],
+      "rss_bytes": [
+        262668288,
+        262684672,
+        262701056,
+        262684672,
+        262684672
+      ],
+      "median_s": 0.4218407919979654,
+      "min_s": 0.3929256250266917,
+      "peak_rss_bytes": 262701056,
+      "output_matches": true,
+      "stdout": "2000000 1999999000000\n",
+      "note": ""
+    },
+    {
+      "bench": "nbody",
+      "lang": "c",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.061913040990475565,
+      "binary_bytes": 33552,
+      "stripped_bytes": 33576,
+      "source_lines": 90,
+      "times_s": [
+        0.45272366603603587,
+        0.3387387089896947,
+        0.3319052919978276,
+        0.32772616599686444,
+        0.33132800000021234
+      ],
+      "rss_bytes": [
+        1835008,
+        1835008,
+        1835008,
+        1835008,
+        1835008
+      ],
+      "median_s": 0.3319052919978276,
+      "min_s": 0.32772616599686444,
+      "peak_rss_bytes": 1835008,
+      "output_matches": true,
+      "stdout": "-0.169075164\n-0.169077842\n",
+      "note": ""
+    },
+    {
+      "bench": "nbody",
+      "lang": "barm",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.31604150001658127,
+      "binary_bytes": 92952,
+      "stripped_bytes": 86360,
+      "source_lines": 119,
+      "times_s": [
+        1.2504070000140928,
+        1.1288548749871552,
+        1.1163211249513552,
+        1.1197819579974748,
+        1.1274923339951783
+      ],
+      "rss_bytes": [
+        1900544,
+        1900544,
+        1900544,
+        1900544,
+        1900544
+      ],
+      "median_s": 1.1274923339951783,
+      "min_s": 1.1163211249513552,
+      "peak_rss_bytes": 1900544,
+      "output_matches": true,
+      "stdout": "-0.169075164\n-0.169077842\n",
+      "note": ""
+    },
+    {
+      "bench": "points",
+      "lang": "c",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.05231770797399804,
+      "binary_bytes": 33424,
+      "stripped_bytes": 33432,
+      "source_lines": 17,
+      "times_s": [
+        0.4810570830013603,
+        0.3343647500150837,
+        0.3366585409967229,
+        0.3309078330057673,
+        0.3327650830033235
+      ],
+      "rss_bytes": [
+        1851392,
+        1851392,
+        1851392,
+        1851392,
+        1851392
+      ],
+      "median_s": 0.3343647500150837,
+      "min_s": 0.3309078330057673,
+      "peak_rss_bytes": 1851392,
+      "output_matches": true,
+      "stdout": "600000000.0 300000000.0\n",
+      "note": ""
+    },
+    {
+      "bench": "points",
+      "lang": "barm",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.28504937497200444,
+      "binary_bytes": 92328,
+      "stripped_bytes": 86360,
+      "source_lines": 13,
+      "times_s": [
+        0.46461404202273116,
+        0.3371089999563992,
+        0.33681945904390886,
+        0.33550187497166917,
+        0.3401111249695532
+      ],
+      "rss_bytes": [
+        1884160,
+        1884160,
+        1884160,
+        1884160,
+        1884160
+      ],
+      "median_s": 0.3371089999563992,
+      "min_s": 0.33550187497166917,
+      "peak_rss_bytes": 1884160,
+      "output_matches": true,
+      "stdout": "600000000.0 300000000.0\n",
+      "note": ""
+    },
+    {
+      "bench": "sort",
+      "lang": "c",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.05523804196855053,
+      "binary_bytes": 33632,
+      "stripped_bytes": 33608,
+      "source_lines": 26,
+      "times_s": [
+        0.3737572910031304,
+        0.29509012500056997,
+        0.29951783403521404,
+        0.29930266697192565,
+        0.2994293749798089
+      ],
+      "rss_bytes": [
+        25853952,
+        25853952,
+        25853952,
+        25853952,
+        25853952
+      ],
+      "median_s": 0.2994293749798089,
+      "min_s": 0.29509012500056997,
+      "peak_rss_bytes": 25853952,
+      "output_matches": true,
+      "stdout": "0.000000033 0.999999667 1499.559101\n",
+      "note": ""
+    },
+    {
+      "bench": "sort",
+      "lang": "barm",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.2907918749842793,
+      "binary_bytes": 92408,
+      "stripped_bytes": 86360,
+      "source_lines": 15,
+      "times_s": [
+        0.5202558749588206,
+        0.3926957080257125,
+        0.3880599999683909,
+        0.37492095795460045,
+        0.3729255420039408
+      ],
+      "rss_bytes": [
+        39092224,
+        39092224,
+        39092224,
+        39075840,
+        39092224
+      ],
+      "median_s": 0.3880599999683909,
+      "min_s": 0.3729255420039408,
+      "peak_rss_bytes": 39092224,
+      "output_matches": true,
+      "stdout": "0.000000033 0.999999667 1499.559101\n",
+      "note": ""
+    },
+    {
+      "bench": "strings",
+      "lang": "c",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.05576058296719566,
+      "binary_bytes": 33904,
+      "stripped_bytes": 33928,
+      "source_lines": 64,
+      "times_s": [
+        0.39458112500142306,
+        0.2749857080052607,
+        0.2608350830269046,
+        0.2630668749916367,
+        0.25624787498963997
+      ],
+      "rss_bytes": [
+        216432640,
+        216449024,
+        216449024,
+        216432640,
+        216449024
+      ],
+      "median_s": 0.2630668749916367,
+      "min_s": 0.25624787498963997,
+      "peak_rss_bytes": 216449024,
+      "output_matches": true,
+      "stdout": "3000000 43888889 40888890 428571\n",
+      "note": ""
+    },
+    {
+      "bench": "strings",
+      "lang": "barm",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.0038862089859321713,
+      "binary_bytes": 92408,
+      "stripped_bytes": 86360,
+      "source_lines": 16,
+      "times_s": [
+        0.2057431669672951,
+        0.17090045800432563,
+        0.17572370800189674,
+        0.17095291696023196,
+        0.172136583016254
+      ],
+      "rss_bytes": [
+        384286720,
+        384319488,
+        384253952,
+        384237568,
+        384303104
+      ],
+      "median_s": 0.172136583016254,
+      "min_s": 0.17090045800432563,
+      "peak_rss_bytes": 384319488,
+      "output_matches": true,
+      "stdout": "3000000 43888889 40888890 428571\n",
+      "note": ""
+    }
+  ]
+}
