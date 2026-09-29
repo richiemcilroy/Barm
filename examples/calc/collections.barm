@@ -1,0 +1,61 @@
+// Generic helpers over arrays and maps.
+
+export function groupBy<T>(xs: T[], key: (x: T) => string): Map<string, T[]> {
+  const groups = new Map<string, T[]>()
+  for (const x of xs) {
+    const k = key(x)
+    let bucket = groups.get(k) ?? []
+    bucket.push(x)
+    groups.set(k, bucket)
+  }
+  return groups
+}
+
+export function unique<T>(xs: T[]): T[] {
+  const out: T[] = []
+  for (const x of xs) {
+    if (!out.includes(x)) out.push(x)
+  }
+  return out
+}
+
+export function chunk<T>(xs: T[], size: int): T[][] {
+  const out: T[][] = []
+  for (let i = 0; i < xs.length; i += size) {
+    out.push(xs.slice(i, i + size))
+  }
+  return out
+}
+
+export function zipWith<A, B, C>(as: A[], bs: B[], f: (a: A, b: B) => C): C[] {
+  const n = Math.min(as.length, bs.length)
+  const out: C[] = []
+  for (let i = 0; i < n; i++) {
+    out.push(f(as[i]!, bs[i]!))
+  }
+  return out
+}
+
+export interface Named {
+  name: string
+}
+
+export function names<T extends Named>(xs: T[]): string[] {
+  return xs.map(x => x.name)
+}
+
+type Person = { name: string, age: int }
+
+test("groupBy", () => {
+  const people: Person[] = [{ name: "a", age: 30 }, { name: "b", age: 30 }, { name: "c", age: 41 }]
+  const byAge = groupBy(people, p => String(p.age))
+  expect(byAge.size).toBe(2)
+  expect(names(people).join(",")).toBe("a,b,c")
+})
+
+test("chunk and zip", () => {
+  expect(chunk([1, 2, 3, 4, 5], 2).length).toBe(3)
+  const sums = zipWith([1, 2], [10, 20], (a, b) => a + b)
+  expect(sums).toEqual([11, 22])
+  expect(unique(["x", "y", "x"])).toEqual(["x", "y"])
+})

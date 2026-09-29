@@ -1,0 +1,73 @@
+// Groups timed words into captions and renders WebVTT.
+
+export type Word = { text: string, startMs: int, endMs: int }
+export type Cue = { startMs: int, endMs: int, text: string }
+
+export type Options = {
+  maxChars: int,
+  maxGapMs: int,
+  maxDurationMs?: int,
+}
+
+function pad(n: int, width: int): string {
+  return String(n).padStart(width, "0")
+}
+
+export function timestamp(ms: int): string {
+  const hours = Math.floor(ms / 3_600_000)
+  const minutes = Math.floor((ms % 3_600_000) / 60_000)
+  const seconds = Math.floor((ms % 60_000) / 1000)
+  const millis = ms % 1000
+  return `${pad(hours, 2)}:${pad(minutes, 2)}:${pad(seconds, 2)}.${pad(millis, 3)}`
+}
+
+export function groupWords(words: Word[], opts: Options): Cue[] {
+  const cues: Cue[] = []
+  let current: Cue | undefined = undefined
+  const maxDuration = opts.maxDurationMs ?? 7000
+  for (const w of words) {
+    const text = w.text.trim()
+    if (text === "") continue
+    if (current !== undefined) {
+      const gap = w.startMs - current.endMs
+      const joined = `${current.text} ${text}`
+      const tooLong = joined.chars().length > opts.maxChars
+      const tooSlow = w.endMs - current.startMs > maxDuration
+      if (gap <= opts.maxGapMs && !tooLong && !tooSlow) {
+        current = { startMs: current.startMs, endMs: w.endMs, text: joined }
+        continue
+      }
+      cues.push(current)
+    }
+    current = { startMs: w.startMs, endMs: w.endMs, text }
+  }
+  if (current !== undefined) cues.push(current)
+  return cues
+}
+
+export function renderVtt(cues: Cue[]): string {
+  const lines: string[] = ["WEBVTT", ""]
+  for (let i = 0; i < cues.length; i++) {
+    const c = cues[i]!
+    lines.push(String(i + 1))
+    lines.push(`${timestamp(c.startMs)} --> ${timestamp(c.endMs)}`)
+    lines.push(c.text)
+    lines.push("")
+  }
+  return lines.join("\n")
+}
+
+test("timestamp", () => {
+  expect(timestamp(3_723_004)).toBe("01:02:03.004")
+})
+
+test("groups words by gap", () => {
+  const words: Word[] = [
+    { text: "hello", startMs: 0, endMs: 400 },
+    { text: "world", startMs: 450, endMs: 900 },
+    { text: "again", startMs: 3000, endMs: 3400 },
+  ]
+  const cues = groupWords(words, { maxChars: 42, maxGapMs: 1000 })
+  expect(cues.length).toBe(2)
+  expect(cues[0]!.text).toBe("hello world")
+})

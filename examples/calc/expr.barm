@@ -1,0 +1,108 @@
+// A tiny expression language: recursive union types, a tokenizer and an evaluator.
+
+export type Expr =
+  | { kind: "num", value: f64 }
+  | { kind: "var", name: string }
+  | { kind: "binary", op: "+" | "-" | "*" | "/", left: Expr, right: Expr }
+  | { kind: "neg", operand: Expr }
+
+export type Token =
+  | { kind: "number", value: f64 }
+  | { kind: "ident", name: string }
+  | { kind: "op", op: string }
+  | { kind: "lparen" }
+  | { kind: "rparen" }
+
+function isDigit(c: string): bool {
+  return c >= "0" && c <= "9"
+}
+
+function isAlpha(c: string): bool {
+  return (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || c === "_"
+}
+
+export function tokenize(src: string): Token[] {
+  const chars = src.chars()
+  const out: Token[] = []
+  let i = 0
+  while (i < chars.length) {
+    const c = chars[i]!
+    if (c === " ") {
+      i++
+      continue
+    }
+    if (isDigit(c)) {
+      let text = ""
+      while (i < chars.length && (isDigit(chars[i]!) || chars[i] === ".")) {
+        text += chars[i]!
+        i++
+      }
+      out.push({ kind: "number", value: parseFloat(text) ?? 0.0 })
+      continue
+    }
+    if (isAlpha(c)) {
+      let name = ""
+      while (i < chars.length && isAlpha(chars[i]!)) {
+        name += chars[i]!
+        i++
+      }
+      out.push({ kind: "ident", name })
+      continue
+    }
+    if (c === "(") out.push({ kind: "lparen" })
+    else if (c === ")") out.push({ kind: "rparen" })
+    else out.push({ kind: "op", op: c })
+    i++
+  }
+  return out
+}
+
+export function evaluate(e: Expr, env: Map<string, f64>): f64 | undefined {
+  switch (e.kind) {
+    case "num":
+      return e.value
+    case "var":
+      return env.get(e.name)
+    case "neg": {
+      const v = evaluate(e.operand, env)
+      return v === undefined ? undefined : -v
+    }
+    case "binary": {
+      const l = evaluate(e.left, env)
+      const r = evaluate(e.right, env)
+      if (l === undefined || r === undefined) return undefined
+      switch (e.op) {
+        case "+": return l + r
+        case "-": return l - r
+        case "*": return l * r
+        case "/": return r === 0.0 ? undefined : l / r
+      }
+    }
+  }
+}
+
+export function show(e: Expr): string {
+  switch (e.kind) {
+    case "num": return String(e.value)
+    case "var": return e.name
+    case "neg": return `-${show(e.operand)}`
+    case "binary": return `(${show(e.left)} ${e.op} ${show(e.right)})`
+  }
+}
+
+test("evaluates nested expressions", () => {
+  const e: Expr = {
+    kind: "binary",
+    op: "*",
+    left: { kind: "num", value: 2 },
+    right: { kind: "binary", op: "+", left: { kind: "var", name: "x" }, right: { kind: "num", value: 1 } },
+  }
+  const env = new Map<string, f64>()
+  env.set("x", 4)
+  expect(evaluate(e, env)).toBe(10.0)
+  expect(show(e)).toBe("(2 * (x + 1))")
+})
+
+test("tokenizes", () => {
+  expect(tokenize("x + 12.5").length).toBe(3)
+})
