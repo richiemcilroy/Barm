@@ -279,6 +279,9 @@ fn main() {
         let opts = barm::build::Options { mode: barm::codegen::Mode::Run, unchecked: false, opt: "-O1".into(), emit_c: None };
         match barm::build::build(std::slice::from_ref(case), &root, &opts) {
             Ok(built) => {
+                if !built.tls {
+                    failed.push(format!("{name}: fetches, but doesn't link TLS"));
+                }
                 let started = std::time::Instant::now();
                 let out = Command::new(&built.binary).current_dir(&root).envs(env.iter().map(|(k, v)| (*k, v.as_str()))).output().expect("run binary");
                 let actual = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -294,6 +297,16 @@ fn main() {
             Err(barm::build::BuildError::Message(m)) => failed.push(format!("{name}: {m}")),
         }
     }
+    // Only programs that fetch link TLS.
+    let opts = barm::build::Options { mode: barm::codegen::Mode::Run, unchecked: false, opt: "-O1".into(), emit_c: None };
+    let hello = std::env::temp_dir().join(format!("barm-no-tls-{}.barm", std::process::id()));
+    std::fs::write(&hello, "console.log(\"hi\")\n").unwrap();
+    match barm::build::build(std::slice::from_ref(&hello), &root, &opts) {
+        Ok(b) if b.tls => failed.push("a program that doesn't fetch links TLS".into()),
+        Ok(_) => {}
+        Err(_) => failed.push("hello-world didn't build".into()),
+    }
+    let _ = std::fs::remove_file(&hello);
     stop.store(true, Ordering::Relaxed);
     let _ = TcpStream::connect(("127.0.0.1", port));
     for f in &failed {

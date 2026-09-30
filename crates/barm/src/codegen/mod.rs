@@ -86,8 +86,15 @@ pub enum Mode {
     Test,
 }
 
+/// A generated C program.
+pub struct Program {
+    pub c: String,
+    /// It calls fetch(), so it links TLS (see build.rs).
+    pub uses_tls: bool,
+}
+
 /// Generates the C program, or diagnostics for constructs the backend doesn't support yet.
-pub fn generate(c: &mut Checker, mode: Mode) -> Result<String, Vec<Diagnostic>> {
+pub fn generate(c: &mut Checker, mode: Mode) -> Result<Program, Vec<Diagnostic>> {
     let mut g = Gen::new(c);
     g.program(mode);
     for msg in std::mem::take(&mut g.internal) {
@@ -99,7 +106,7 @@ pub fn generate(c: &mut Checker, mode: Mode) -> Result<String, Vec<Diagnostic>> 
         g.errors.dedup_by(|a, b| a.span == b.span && a.message == b.message);
         return Err(g.errors);
     }
-    Ok(g.assemble())
+    Ok(Program { c: g.assemble(), uses_tls: g.uses_tls })
 }
 
 /// A value produced by an expression.
@@ -213,6 +220,8 @@ pub(crate) struct Gen<'c, 'a> {
     /// Frame structs of async functions.
     /// The accumulator loop for the function `function_body` emits next (see `tre_candidate`).
     pub(crate) pending_tre: Option<body::Tre>,
+    /// The program calls fetch(): main installs TLS (and the build links it).
+    uses_tls: bool,
     pub(crate) frame_defs: Vec<asyncfn::FrameDef>,
 }
 
@@ -287,6 +296,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             pending_async: None,
             last_children: Vec::new(),
             pending_tre: None,
+            uses_tls: false,
             frame_defs: Vec::new(),
         }
     }
@@ -473,6 +483,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         // is what pulls it in.
         if self.funcs.contains("bm_native_fetchStart(") {
             init.insert_str(0, "    bm_tls_install();\n");
+            self.uses_tls = true;
         }
         if self.uses_event_loop() || main_body.contains("bm_task_") {
             init.insert_str(0, "    bm_async_init(bmg_async_retain, bmg_async_release, bmg_async_report);\n");

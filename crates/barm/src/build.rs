@@ -25,6 +25,8 @@ pub enum BuildError {
 
 pub struct Built {
     pub binary: PathBuf,
+    /// It links TLS (the program calls fetch()).
+    pub tls: bool,
     pub cached: bool,
     /// The program's source files on disk (the entry and everything it imports).
     pub sources: Vec<PathBuf>,
@@ -137,14 +139,15 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         return Err(BuildError::Diagnostics(sm, diags));
     }
     let t1 = Instant::now();
-    let c_src = match codegen::generate(&mut checker, opts.mode) {
-        Ok(c) => c,
+    let program = match codegen::generate(&mut checker, opts.mode) {
+        Ok(p) => p,
         Err(d) => {
             drop(checker);
             return Err(BuildError::Diagnostics(sm, d));
         }
     };
     drop(checker);
+    let codegen::Program { c: c_src, uses_tls } = program;
     let t2 = Instant::now();
     if let Some(p) = &opts.emit_c {
         std::fs::write(p, codegen::standalone(&c_src)).map_err(|e| BuildError::Message(format!("can't write {}: {e}", p.display())))?;
@@ -173,7 +176,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     let flag_text = flags.join(" ");
     let rt_key = hash_hex(&[codegen::RUNTIME_H.as_bytes(), codegen::RUNTIME_C.as_bytes(), cc.as_bytes(), flag_text.as_bytes(), env!("CARGO_PKG_VERSION").as_bytes()]);
     // A program that fetches links TLS (its code calls bm_tls_install).
-    let tls = c_src.contains("bm_tls_install();").then(|| TlsArchive::new(&cc, sysroot.as_deref(), &extra));
+    let tls = uses_tls.then(|| TlsArchive::new(&cc, sysroot.as_deref(), &extra));
     // Link flags (see below) are part of what a cached binary was built with.
     let tls_key = tls.as_ref().map(|t| t.key.clone()).unwrap_or_default();
     let key = hash_hex(&[c_src.as_bytes(), rt_key.as_bytes(), LINK_FLAGS.as_bytes(), tls_key.as_bytes()]);
@@ -181,7 +184,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     let bin_dir = dir.join("bin");
     let binary = bin_dir.join(&key);
     if binary.is_file() {
-        return Ok(Built { binary, cached: true, sources, timings: (t1 - t0, t2 - t1, Duration::ZERO) });
+        return Ok(Built { binary, tls: uses_tls, cached: true, sources, timings: (t1 - t0, t2 - t1, Duration::ZERO) });
     }
     let c_dir = dir.join("c");
     for d in [&bin_dir, &c_dir] {
@@ -256,7 +259,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     linked?;
     std::fs::rename(&tmp, &binary).map_err(|e| BuildError::Message(format!("can't move the binary into the cache: {e}")))?;
     let t3 = Instant::now();
-    Ok(Built { binary, cached: false, sources, timings: (t1 - t0, t2 - t1, t3 - t2) })
+    Ok(Built { binary, tls: uses_tls, cached: false, sources, timings: (t1 - t0, t2 - t1, t3 - t2) })
 }
 
 /// macOS: the main thread's stack size (the most arm64 allows).
@@ -378,7 +381,10 @@ impl TlsArchive {
         if !out.status.success() {
             return Err(fail(format!("`{ar}` failed: {}", String::from_utf8_lossy(&out.stderr))));
         }
-        std::fs::rename(&tmp, &archive).map_err(|e| fail(format!("can't move it into the cache: {e}")))?;
+        std::fs::rename(&tmp, &archive).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            fail(format!("can't move it into the cache: {e}"))
+        })?;
         Ok(archive)
     }
 }
