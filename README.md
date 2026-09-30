@@ -142,7 +142,7 @@ scripts/sanitize.sh run file.barm # run under ASan/UBSan in a Linux container
 ## Project layout
 
 - `crates/barm/`: the compiler (Rust, no dependencies)
-- `vendor/mbedtls/`: Mbed TLS 3.6 LTS (Apache-2.0), for `fetch()` over `https:`. It's compiled once, and only programs that call `fetch()` link it (see [vendor/mbedtls/BARM.md](vendor/mbedtls/BARM.md)).
+- `vendor/boringssl/`: BoringSSL (Apache-2.0), for `fetch()` over `https:`. It's compiled once, and only programs that call `fetch()` link it (see [vendor/boringssl/BARM.md](vendor/boringssl/BARM.md)).
 - `runtime/`: the C runtime linked into every program
 - `examples/`: sample programs
 - `tests/`: checker snapshots, run tests and fuzzing

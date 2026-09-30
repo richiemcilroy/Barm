@@ -1,14 +1,14 @@
-/* tls.c — TLS for the fetch client, on the vendored mbedTLS (vendor/mbedtls).
+/* tls.c — TLS for the fetch client, on the vendored BoringSSL (vendor/boringssl).
  *
- * The build compiles this file with mbedTLS into an archive that only programs calling fetch()
- * link: their generated code calls bm_tls_install(), which points the runtime's `bm_tls_impl` at
- * the operations below. The runtime never names anything here directly.
+ * The build compiles this file with BoringSSL into an archive that only programs calling fetch()
+ * link: their generated code calls bm_tls_install(), which points the runtime's `bm_tls_impl`
+ * at the operations below. The runtime never names anything here directly.
  *
- * Certificates are verified against the system's CA bundle (loaded once, on first use):
+ * Certificates are verified against the system's CA bundle (loaded once per configuration):
  * SSL_CERT_FILE, else the first of the usual locations; NODE_EXTRA_CA_CERTS adds more, and a
  * request's own `tls.ca` more still. NODE_TLS_REJECT_UNAUTHORIZED=0 turns verification off, as
  * in Node and Bun. Sessions are remembered per origin, so pooled and later connections resume
- * (TLS 1.2 tickets or IDs, TLS 1.3 tickets) instead of repeating the full handshake. */
+ * (TLS 1.3 tickets, TLS 1.2 tickets or IDs) instead of repeating the full handshake. */
 
 #include "barm.h"
 
@@ -16,335 +16,249 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <unistd.h>
 
-#include "mbedtls/ctr_drbg.h"
-#include "mbedtls/entropy.h"
-#include "mbedtls/error.h"
-#include "mbedtls/net_sockets.h"
-#include "mbedtls/ssl.h"
-#include "mbedtls/x509_crt.h"
-#include "psa/crypto.h"
+#include <openssl/err.h>
+#include <openssl/pem.h>
+#include <openssl/ssl.h>
+#include <openssl/x509.h>
 
 struct bm_tls {
-    mbedtls_ssl_context ssl;
-    int fd;
+    SSL *ssl;
     struct bm_tls_conf *conf;
     char key[256];            /* the session cache key (origin + configuration) */
-    bool self_signed;         /* the server's certificate signs itself */
-    bool chain_self_signed;   /* a certificate above it does (an untrusted root) */
-    int depth;                /* certificates the server sent, less one */
-    bool verified;
-    int last;                 /* the last mbedTLS error */
+    char code[64];            /* the last failure's code (ERR_SSL_...), see bm_tls_why */
 };
 
-/* A configuration per (verify, extra CA): few in a program. */
+/* A context per (verify, extra CA): few in a program. */
 typedef struct bm_tls_conf {
     struct bm_tls_conf *next;
     bool verify;
     char *ca;                 /* extra PEM, or NULL */
     size_t ca_len;
-    mbedtls_ssl_config cfg;
-    mbedtls_x509_crt chain;   /* the roots plus `ca` */
+    SSL_CTX *ctx;
 } bm_tls_conf;
 
 static bool bm_tls_ready;
-static mbedtls_entropy_context bm_tls_entropy;
-static mbedtls_ctr_drbg_context bm_tls_drbg;
-static mbedtls_x509_crt bm_tls_roots;
+static const char *bm_tls_bundle;   /* the CA bundle file */
 static bm_tls_conf *bm_tls_confs;
-static const char *bm_tls_alpn[] = {"http/1.1", NULL};
-/* AES-GCM first (the CPU's AES instructions make it ~3x ChaCha20's speed here), as BoringSSL
- * orders them on such hardware; ECDSA before RSA; CBC last, for old servers. */
-static const int bm_tls_suites[] = {
-    MBEDTLS_TLS1_3_AES_128_GCM_SHA256,
-    MBEDTLS_TLS1_3_AES_256_GCM_SHA384,
-    MBEDTLS_TLS1_3_CHACHA20_POLY1305_SHA256,
-    MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-    MBEDTLS_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-    MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-    MBEDTLS_TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-    MBEDTLS_TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
-    MBEDTLS_TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-    MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,
-    MBEDTLS_TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256,
-    MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384,
-    MBEDTLS_TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384,
-    MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
-    MBEDTLS_TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
-    MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
-    MBEDTLS_TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
-    0,
-};
+static int bm_tls_index;            /* SSL ex_data slot holding the bm_tls */
 
 /* ---- remembered sessions (most recent per key) */
 
 #define BM_TLS_SESSIONS 64
-typedef struct { char key[256]; mbedtls_ssl_session s; bool used; unsigned long stamp; } bm_tls_saved;
+typedef struct { char key[256]; SSL_SESSION *s; unsigned long stamp; } bm_tls_saved;
 static bm_tls_saved bm_tls_sessions[BM_TLS_SESSIONS];
 static unsigned long bm_tls_clock;
 
 static bm_tls_saved *bm_tls_find(const char *key) {
     for (int i = 0; i < BM_TLS_SESSIONS; i++)
-        if (bm_tls_sessions[i].used && strcmp(bm_tls_sessions[i].key, key) == 0) return &bm_tls_sessions[i];
+        if (bm_tls_sessions[i].s && strcmp(bm_tls_sessions[i].key, key) == 0) return &bm_tls_sessions[i];
     return NULL;
 }
 
-static void bm_tls_save(bm_tls *t) {
+/* BoringSSL hands over new sessions (after a handshake, or tickets that arrive later). */
+static int bm_tls_new_session(SSL *ssl, SSL_SESSION *s) {
+    bm_tls *t = SSL_get_ex_data(ssl, bm_tls_index);
+    if (!t) return 0;
     bm_tls_saved *e = bm_tls_find(t->key);
     if (!e) {
         e = &bm_tls_sessions[0];
         for (int i = 0; i < BM_TLS_SESSIONS; i++) {
-            if (!bm_tls_sessions[i].used) { e = &bm_tls_sessions[i]; break; }
+            if (!bm_tls_sessions[i].s) { e = &bm_tls_sessions[i]; break; }
             if (bm_tls_sessions[i].stamp < e->stamp) e = &bm_tls_sessions[i];
         }
     }
-    if (e->used) mbedtls_ssl_session_free(&e->s);
-    mbedtls_ssl_session_init(&e->s);
-    if (mbedtls_ssl_get_session(&t->ssl, &e->s) != 0) {
-        mbedtls_ssl_session_free(&e->s);
-        e->used = false;
-        return;
-    }
+    if (e->s) SSL_SESSION_free(e->s);
+    e->s = s; /* ours now (returning 1 keeps the reference) */
     snprintf(e->key, sizeof e->key, "%s", t->key);
-    e->used = true;
     e->stamp = ++bm_tls_clock;
+    return 1;
 }
 
 /* ---- roots */
 
-static char *bm_tls_read_file(const char *path, size_t *len) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    size_t cap = 1 << 16, n = 0;
-    char *buf = malloc(cap);
-    for (;;) {
-        if (cap - n < 4096) { cap *= 2; buf = realloc(buf, cap); }
-        size_t r = fread(buf + n, 1, cap - n - 1, f);
-        if (r == 0) break;
-        n += r;
-    }
-    fclose(f);
-    buf[n] = 0;
-    *len = n + 1; /* mbedTLS wants PEM's terminating NUL counted */
-    return buf;
-}
-
-static void bm_tls_add_pem_file(mbedtls_x509_crt *chain, const char *path) {
-    size_t len;
-    char *pem = bm_tls_read_file(path, &len);
-    if (!pem) return;
-    mbedtls_x509_crt_parse(chain, (const unsigned char *)pem, len); /* keeps the certificates it can parse */
-    free(pem);
-}
-
-static bool bm_tls_init(void) {
-    if (bm_tls_ready) return true;
-    if (psa_crypto_init() != PSA_SUCCESS) return false;
-    mbedtls_entropy_init(&bm_tls_entropy);
-    mbedtls_ctr_drbg_init(&bm_tls_drbg);
-    if (mbedtls_ctr_drbg_seed(&bm_tls_drbg, mbedtls_entropy_func, &bm_tls_entropy, (const unsigned char *)"barm", 4) != 0) return false;
-    mbedtls_x509_crt_init(&bm_tls_roots);
-    const char *file = getenv("SSL_CERT_FILE");
-    if (file && *file) {
-        bm_tls_add_pem_file(&bm_tls_roots, file);
-    } else {
-        static const char *const bundles[] = {
-            "/etc/ssl/cert.pem",                                  /* macOS, Alpine, BSDs */
-            "/etc/ssl/certs/ca-certificates.crt",                 /* Debian, Ubuntu, Arch */
-            "/etc/pki/tls/certs/ca-bundle.crt",                   /* Fedora, RHEL */
-            "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",  /* newer RHEL */
-            "/etc/ssl/ca-bundle.pem",                             /* openSUSE */
-        };
-        for (size_t i = 0; i < sizeof bundles / sizeof *bundles; i++) {
-            if (access(bundles[i], R_OK) == 0) { bm_tls_add_pem_file(&bm_tls_roots, bundles[i]); break; }
-        }
-    }
-    const char *extra = getenv("NODE_EXTRA_CA_CERTS");
-    if (extra && *extra) bm_tls_add_pem_file(&bm_tls_roots, extra);
+static void bm_tls_init(void) {
+    if (bm_tls_ready) return;
     bm_tls_ready = true;
-    return true;
+    bm_tls_index = SSL_get_ex_new_index(0, NULL, NULL, NULL, NULL);
+    const char *file = getenv("SSL_CERT_FILE");
+    if (file && *file) { bm_tls_bundle = file; return; }
+    static const char *const bundles[] = {
+        "/etc/ssl/cert.pem",                                  /* macOS, Alpine, BSDs */
+        "/etc/ssl/certs/ca-certificates.crt",                 /* Debian, Ubuntu, Arch */
+        "/etc/pki/tls/certs/ca-bundle.crt",                   /* Fedora, RHEL */
+        "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",  /* newer RHEL */
+        "/etc/ssl/ca-bundle.pem",                             /* openSUSE */
+    };
+    for (size_t i = 0; i < sizeof bundles / sizeof *bundles; i++)
+        if (access(bundles[i], R_OK) == 0) { bm_tls_bundle = bundles[i]; return; }
 }
 
-/* Records whether the server's own certificate is self-signed (for the error message). */
-static int bm_tls_verify_cb(void *ctx, mbedtls_x509_crt *crt, int depth, uint32_t *flags) {
-    bm_tls *t = ctx;
-    (void)flags;
-    bool self = crt->issuer_raw.len == crt->subject_raw.len && memcmp(crt->issuer_raw.p, crt->subject_raw.p, crt->subject_raw.len) == 0;
-    if (depth > t->depth) t->depth = depth;
-    if (depth == 0) t->self_signed = self;
-    else if (self) t->chain_self_signed = true;
-    return 0;
+/* Adds every certificate in PEM text to the store. */
+static void bm_tls_add_pem(X509_STORE *store, const char *pem, size_t len) {
+    BIO *bio = BIO_new_mem_buf(pem, (ptrdiff_t)len);
+    if (!bio) return;
+    X509 *x;
+    while ((x = PEM_read_bio_X509(bio, NULL, NULL, NULL)) != NULL) {
+        X509_STORE_add_cert(store, x);
+        X509_free(x);
+    }
+    ERR_clear_error(); /* the read that found no more certificates */
+    BIO_free(bio);
 }
 
 static bm_tls_conf *bm_tls_conf_for(bool verify, const char *ca, size_t ca_len) {
     for (bm_tls_conf *c = bm_tls_confs; c; c = c->next)
         if (c->verify == verify && c->ca_len == ca_len && (ca_len == 0 || memcmp(c->ca, ca, ca_len) == 0)) return c;
+    SSL_CTX *ctx = SSL_CTX_new(TLS_method());
+    if (!ctx) return NULL;
     bm_tls_conf *c = calloc(1, sizeof *c);
     c->verify = verify;
-    mbedtls_ssl_config_init(&c->cfg);
-    if (mbedtls_ssl_config_defaults(&c->cfg, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT) != 0) {
-        free(c);
-        return NULL;
+    c->ctx = ctx;
+    SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+    SSL_CTX_set_mode(ctx, SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
+    static const uint8_t alpn[] = "\x08http/1.1";
+    SSL_CTX_set_alpn_protos(ctx, alpn, sizeof alpn - 1);
+    SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_CLIENT | SSL_SESS_CACHE_NO_INTERNAL);
+    SSL_CTX_sess_set_new_cb(ctx, bm_tls_new_session);
+    SSL_CTX_set_verify(ctx, verify ? SSL_VERIFY_PEER : SSL_VERIFY_NONE, NULL);
+    if (verify) {
+        X509_STORE *store = SSL_CTX_get_cert_store(ctx);
+        if (bm_tls_bundle) X509_STORE_load_locations(store, bm_tls_bundle, NULL);
+        const char *extra = getenv("NODE_EXTRA_CA_CERTS");
+        if (extra && *extra) X509_STORE_load_locations(store, extra, NULL);
+        if (ca_len) bm_tls_add_pem(store, ca, ca_len);
+        ERR_clear_error();
     }
-    mbedtls_ssl_conf_rng(&c->cfg, mbedtls_ctr_drbg_random, &bm_tls_drbg);
-    mbedtls_ssl_conf_alpn_protocols(&c->cfg, bm_tls_alpn);
-    mbedtls_ssl_conf_ciphersuites(&c->cfg, bm_tls_suites);
-    mbedtls_ssl_conf_session_tickets(&c->cfg, MBEDTLS_SSL_SESSION_TICKETS_ENABLED);
-    mbedtls_ssl_conf_tls13_enable_signal_new_session_tickets(&c->cfg, MBEDTLS_SSL_TLS1_3_SIGNAL_NEW_SESSION_TICKETS_ENABLED);
-    mbedtls_ssl_conf_authmode(&c->cfg, verify ? MBEDTLS_SSL_VERIFY_REQUIRED : MBEDTLS_SSL_VERIFY_NONE);
-    mbedtls_x509_crt_init(&c->chain);
     if (ca_len) {
-        c->ca = malloc(ca_len + 1);
+        c->ca = malloc(ca_len);
         memcpy(c->ca, ca, ca_len);
-        c->ca[ca_len] = 0;
         c->ca_len = ca_len;
-        mbedtls_x509_crt_parse(&c->chain, (const unsigned char *)c->ca, ca_len + 1);
-        /* the system roots too: a request's `ca` adds to them */
-        for (mbedtls_x509_crt *r = &bm_tls_roots; r && r->raw.len; r = r->next) mbedtls_x509_crt_parse_der(&c->chain, r->raw.p, r->raw.len);
-        mbedtls_ssl_conf_ca_chain(&c->cfg, &c->chain, NULL);
-    } else {
-        mbedtls_ssl_conf_ca_chain(&c->cfg, &bm_tls_roots, NULL);
     }
     c->next = bm_tls_confs;
     bm_tls_confs = c;
     return c;
 }
 
-/* ---- I/O on the socket (non-blocking) */
-
-static int bm_tls_send(void *ctx, const unsigned char *buf, size_t len) {
-    bm_tls *t = ctx;
-#ifdef MSG_NOSIGNAL
-    ssize_t n = send(t->fd, buf, len, MSG_NOSIGNAL);
-#else
-    ssize_t n = send(t->fd, buf, len, 0);
-#endif
-    if (n >= 0) return (int)n;
-    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return MBEDTLS_ERR_SSL_WANT_WRITE;
-    return MBEDTLS_ERR_NET_SEND_FAILED;
-}
-
-static int bm_tls_recv(void *ctx, unsigned char *buf, size_t len) {
-    bm_tls *t = ctx;
-    ssize_t n = recv(t->fd, buf, len, 0);
-    if (n >= 0) return (int)n; /* 0: the peer closed the connection */
-    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return MBEDTLS_ERR_SSL_WANT_READ;
-    return MBEDTLS_ERR_NET_RECV_FAILED;
-}
-
 /* ---- operations */
 
 static bm_tls *bm_tls_open(int fd, const char *host, const char *key, bool verify, const char *ca, size_t ca_len) {
-    if (!bm_tls_init()) return NULL;
+    bm_tls_init();
     const char *off = getenv("NODE_TLS_REJECT_UNAUTHORIZED");
     if (off && strcmp(off, "0") == 0) verify = false;
     bm_tls_conf *conf = bm_tls_conf_for(verify, ca, ca_len);
     if (!conf) return NULL;
+    SSL *ssl = SSL_new(conf->ctx);
+    if (!ssl) return NULL;
     bm_tls *t = calloc(1, sizeof *t);
-    t->fd = fd;
+    t->ssl = ssl;
     t->conf = conf;
     snprintf(t->key, sizeof t->key, "%s|%d|%p", key, verify, (void *)conf);
-    mbedtls_ssl_init(&t->ssl);
-    if (mbedtls_ssl_setup(&t->ssl, &conf->cfg) != 0) {
-        mbedtls_ssl_free(&t->ssl);
-        free(t);
-        return NULL;
-    }
-    /* SNI and the name the certificate must match: an IP address literal needs no SNI */
+    SSL_set_ex_data(ssl, bm_tls_index, t);
+    SSL_set_fd(ssl, fd);
+    SSL_set_connect_state(ssl);
+    /* the name the certificate must match; SNI unless it's an IP address */
     char name[256];
     size_t hl = strlen(host);
-    if (hl >= 2 && host[0] == '[' && hl - 2 < sizeof name) { memcpy(name, host + 1, hl - 2); name[hl - 2] = 0; }
+    bool ip6 = hl >= 2 && host[0] == '[';
+    if (ip6 && hl - 2 < sizeof name) { memcpy(name, host + 1, hl - 2); name[hl - 2] = 0; }
     else snprintf(name, sizeof name, "%s", host);
-    mbedtls_ssl_set_hostname(&t->ssl, name);
-    mbedtls_ssl_set_verify(&t->ssl, bm_tls_verify_cb, t);
-    mbedtls_ssl_set_bio(&t->ssl, t, bm_tls_send, bm_tls_recv, NULL);
+    X509_VERIFY_PARAM *param = SSL_get0_param(ssl);
+    if (X509_VERIFY_PARAM_set1_ip_asc(param, name) != 1) {
+        SSL_set_tlsext_host_name(ssl, name);
+        X509_VERIFY_PARAM_set1_host(param, name, strlen(name));
+    }
+    ERR_clear_error();
     bm_tls_saved *s = bm_tls_find(t->key);
-    if (s) mbedtls_ssl_set_session(&t->ssl, &s->s);
+    if (s) SSL_set_session(ssl, s->s);
     return t;
 }
 
-enum { BM_TLS_OK = 0, BM_TLS_WANT_READ = 1, BM_TLS_WANT_WRITE = 2, BM_TLS_FAILED = -1 };
-
-static int bm_tls_handshake(bm_tls *t) {
-    for (;;) {
-        int rc = mbedtls_ssl_handshake(&t->ssl);
-        if (rc == 0) {
-            t->verified = true;
-            bm_tls_save(t);
-            return BM_TLS_OK;
-        }
-        if (rc == MBEDTLS_ERR_SSL_WANT_READ) return BM_TLS_WANT_READ;
-        if (rc == MBEDTLS_ERR_SSL_WANT_WRITE) return BM_TLS_WANT_WRITE;
-        if (rc == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET) { bm_tls_save(t); continue; }
-        t->last = rc;
-        return BM_TLS_FAILED;
+/* An SSL call's result: > 0 as is; else -1 wants read, -2 wants write, -3 failed, or 0 when
+ * the connection ended (close_notify, or the peer closed the socket). */
+static long bm_tls_result(bm_tls *t, int rc) {
+    if (rc > 0) return rc;
+    int err = SSL_get_error(t->ssl, rc);
+    switch (err) {
+    case SSL_ERROR_WANT_READ: return -1;
+    case SSL_ERROR_WANT_WRITE: return -2;
+    case SSL_ERROR_ZERO_RETURN: return 0;
+    case SSL_ERROR_SYSCALL: return ERR_peek_error() == 0 && (rc == 0 || errno == 0) ? 0 : -3;
+    default: return -3;
     }
 }
 
-/* > 0 bytes; 0 the connection ended; -1 wants to read, -2 to write, -3 failed. */
+static int bm_tls_handshake(bm_tls *t) {
+    int rc = SSL_do_handshake(t->ssl);
+    if (rc == 1) return 0;
+    long r = bm_tls_result(t, rc);
+    return r == -1 ? 1 : r == -2 ? 2 : -1;
+}
+
 static long bm_tls_read(bm_tls *t, void *buf, size_t n) {
-    for (;;) {
-        int rc = mbedtls_ssl_read(&t->ssl, buf, n);
-        if (rc > 0) return rc;
-        if (rc == 0 || rc == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) return 0;
-        if (rc == MBEDTLS_ERR_SSL_WANT_READ) return -1;
-        if (rc == MBEDTLS_ERR_SSL_WANT_WRITE) return -2;
-        if (rc == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET) { bm_tls_save(t); continue; }
-        t->last = rc;
-        return -3;
-    }
+    return bm_tls_result(t, SSL_read(t->ssl, buf, n > INT32_MAX ? INT32_MAX : (int)n));
 }
 
 static long bm_tls_write(bm_tls *t, const void *buf, size_t n) {
-    int rc = mbedtls_ssl_write(&t->ssl, buf, n);
-    if (rc >= 0) return rc;
-    if (rc == MBEDTLS_ERR_SSL_WANT_READ) return -1;
-    if (rc == MBEDTLS_ERR_SSL_WANT_WRITE) return -2;
-    t->last = rc;
-    return -3;
+    return bm_tls_result(t, SSL_write(t->ssl, buf, n > INT32_MAX ? INT32_MAX : (int)n));
 }
 
 static size_t bm_tls_pending(bm_tls *t) {
-    return mbedtls_ssl_get_bytes_avail(&t->ssl);
+    return (size_t)SSL_pending(t->ssl);
 }
 
-/* Why the handshake or a read failed, as Node/Bun report it: (code, message). */
+/* Why the handshake or a read failed, as Node and Bun report it: (code, message). */
 static void bm_tls_why(bm_tls *t, const char *url, const char **code, char *msg, size_t n) {
-    uint32_t flags = mbedtls_ssl_get_verify_result(&t->ssl);
-    if (t->last == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED && flags != (uint32_t)-1 && flags) {
-        if (flags & MBEDTLS_X509_BADCERT_EXPIRED) { *code = "CERT_HAS_EXPIRED"; snprintf(msg, n, "certificate has expired"); return; }
-        if (flags & MBEDTLS_X509_BADCERT_FUTURE) { *code = "CERT_NOT_YET_VALID"; snprintf(msg, n, "certificate is not yet valid"); return; }
-        if (flags & MBEDTLS_X509_BADCERT_NOT_TRUSTED) {
-            if (t->self_signed) { *code = "DEPTH_ZERO_SELF_SIGNED_CERT"; snprintf(msg, n, "self signed certificate"); }
-            else if (t->chain_self_signed) { *code = "SELF_SIGNED_CERT_IN_CHAIN"; snprintf(msg, n, "self signed certificate in certificate chain"); }
-            else if (t->depth == 0) { *code = "UNABLE_TO_VERIFY_LEAF_SIGNATURE"; snprintf(msg, n, "unable to verify the first certificate"); }
-            else { *code = "UNABLE_TO_GET_ISSUER_CERT_LOCALLY"; snprintf(msg, n, "unable to get local issuer certificate"); }
-            return;
-        }
-        if (flags & MBEDTLS_X509_BADCERT_CN_MISMATCH) {
+    long vr = SSL_get_verify_result(t->ssl);
+    static const char verb[] = "For more information, pass `verbose: true` in the second argument to fetch()";
+    if (vr != X509_V_OK) {
+        static const struct { long v; const char *code, *msg; } known[] = {
+            {X509_V_ERR_CERT_HAS_EXPIRED, "CERT_HAS_EXPIRED", "certificate has expired"},
+            {X509_V_ERR_CERT_NOT_YET_VALID, "CERT_NOT_YET_VALID", "certificate is not yet valid"},
+            {X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT, "DEPTH_ZERO_SELF_SIGNED_CERT", "self signed certificate"},
+            {X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN, "SELF_SIGNED_CERT_IN_CHAIN", "self signed certificate in certificate chain"},
+            {X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY, "UNABLE_TO_GET_ISSUER_CERT_LOCALLY", "unable to get local issuer certificate"},
+            {X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE, "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "unable to verify the first certificate"},
+            {X509_V_ERR_CERT_REVOKED, "CERT_REVOKED", "certificate revoked"},
+            {X509_V_ERR_INVALID_PURPOSE, "INVALID_PURPOSE", "unsupported certificate purpose"},
+            {X509_V_ERR_CERT_SIGNATURE_FAILURE, "CERT_SIGNATURE_FAILURE", "certificate signature failure"},
+        };
+        /* as OpenSSL (and so Node and Bun) say it: a lone certificate whose issuer is unknown */
+        STACK_OF(X509) *chain = SSL_get_peer_cert_chain(t->ssl);
+        if (vr == X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY && chain && sk_X509_num(chain) <= 1) vr = X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE;
+        if (vr == X509_V_ERR_HOSTNAME_MISMATCH || vr == X509_V_ERR_IP_ADDRESS_MISMATCH) {
             *code = "ERR_TLS_CERT_ALTNAME_INVALID";
-            snprintf(msg, n, "ERR_TLS_CERT_ALTNAME_INVALID fetching \"%s\". For more information, pass `verbose: true` in the second argument to fetch()", url);
+            snprintf(msg, n, "ERR_TLS_CERT_ALTNAME_INVALID fetching \"%s\". %s", url, verb);
             return;
         }
-        char info[256];
-        mbedtls_x509_crt_verify_info(info, sizeof info, "", flags);
-        size_t l = strlen(info);
-        while (l && (info[l - 1] == '\n' || info[l - 1] == ' ')) info[--l] = 0;
-        *code = "UNABLE_TO_VERIFY_LEAF_SIGNATURE";
-        snprintf(msg, n, "certificate verification failed: %s", info);
+        for (size_t i = 0; i < sizeof known / sizeof *known; i++) {
+            if (known[i].v == vr) { *code = known[i].code; snprintf(msg, n, "%s", known[i].msg); return; }
+        }
+        *code = "CERT_VERIFY_FAILED";
+        snprintf(msg, n, "%s", X509_verify_cert_error_string(vr));
         return;
     }
-    char err[160];
-    mbedtls_strerror(t->last, err, sizeof err);
-    *code = "ERR_SSL";
-    snprintf(msg, n, "TLS connection failed: %s", err);
+    /* anything else: OpenSSL's reason, as Node's ERR_SSL_<REASON> codes */
+    uint32_t e = ERR_peek_last_error();
+    const char *reason = e ? ERR_reason_error_string(e) : NULL;
+    if (reason) {
+        size_t k = (size_t)snprintf(t->code, sizeof t->code, "ERR_SSL_");
+        for (const char *p = reason; *p && k + 1 < sizeof t->code; p++) t->code[k++] = (char)(*p >= 'a' && *p <= 'z' ? *p - 32 : *p == ' ' ? '_' : *p);
+        t->code[k] = 0;
+        *code = t->code;
+        snprintf(msg, n, "%s fetching \"%s\". %s", t->code, url, verb);
+    } else {
+        *code = "ECONNRESET";
+        snprintf(msg, n, "The socket connection was closed unexpectedly. %s", verb);
+    }
+    ERR_clear_error();
 }
 
 static void bm_tls_close(bm_tls *t, bool notify) {
-    if (notify && t->verified) mbedtls_ssl_close_notify(&t->ssl); /* best effort: the socket may be gone */
-    mbedtls_ssl_free(&t->ssl);
+    if (notify) SSL_shutdown(t->ssl); /* best effort: the socket may be gone */
+    SSL_free(t->ssl);
+    ERR_clear_error();
     free(t);
 }
 

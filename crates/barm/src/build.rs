@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-/// runtime/tls.c and the vendored mbedTLS, embedded by the Cargo build script (../build.rs).
+/// runtime/tls.c and the vendored BoringSSL, embedded by the Cargo build script (../build.rs).
 mod tls_files {
     include!(concat!(env!("OUT_DIR"), "/tls_files.rs"));
 }
@@ -237,6 +237,8 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     cmd.arg(&rt_obj);
     if let Some(t) = &tls {
         cmd.arg(t.build(&cc, &c_dir)?);
+        // BoringSSL is C++ (no exceptions or RTTI): a few libc++/libstdc++ helpers
+        cmd.arg(if cfg!(target_vendor = "apple") { "-lc++" } else { "-lstdc++" });
     }
     cmd.arg("-lm");
     if !cfg!(target_vendor = "apple") && !cfg!(windows) {
@@ -309,17 +311,20 @@ fn run_cc(mut cmd: Command, cc: &str, c_path: &Path) -> Result<(), BuildError> {
     Ok(())
 }
 
-/// The TLS archive: runtime/tls.c and mbedTLS (vendor/mbedtls), compiled once per compiler,
+/// The TLS archive: runtime/tls.c and BoringSSL (vendor/boringssl), compiled once per compiler,
 /// SDK and sanitizer flags. Its flags are fixed (-O2 whatever the program's -O, and no
 /// --unchecked), so other builds share it; only fetch() programs link it.
 struct TlsArchive {
     key: String,
+    /// flags for C, assembly and C++ alike
     flags: Vec<String>,
 }
 
 impl TlsArchive {
     fn new(cc: &str, sysroot: Option<&str>, extra: &str) -> TlsArchive {
-        let mut flags: Vec<String> = ["-O2", "-std=gnu11", "-w", "-fno-stack-protector", "-U_FORTIFY_SOURCE", "-D_FORTIFY_SOURCE=0", "-ffunction-sections", "-fdata-sections"].map(String::from).to_vec();
+        let mut flags: Vec<String> = ["-O2", "-w", "-fno-stack-protector", "-U_FORTIFY_SOURCE", "-D_FORTIFY_SOURCE=0", "-ffunction-sections", "-fdata-sections", "-fno-strict-aliasing", "-fvisibility=hidden"]
+            .map(String::from)
+            .to_vec();
         if let Some(sdk) = sysroot {
             flags.push("-isysroot".into());
             flags.push(sdk.into());
@@ -331,12 +336,33 @@ impl TlsArchive {
         TlsArchive { key, flags }
     }
 
+    /// The C++ compiler that goes with `cc` (CXX overrides it).
+    fn cxx(cc: &str) -> String {
+        if let Ok(cxx) = std::env::var("CXX") {
+            return cxx;
+        }
+        let path = Path::new(cc);
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let sibling = |n: String| path.with_file_name(n).to_string_lossy().into_owned();
+        if let Some(rest) = name.strip_prefix("clang") {
+            return sibling(format!("clang++{rest}"));
+        }
+        if let Some(rest) = name.strip_prefix("gcc") {
+            return sibling(format!("g++{rest}"));
+        }
+        if name == "cc" {
+            return sibling("c++".into());
+        }
+        "c++".into()
+    }
+
     /// The archive, compiling it first if it isn't cached.
     fn build(&self, cc: &str, c_dir: &Path) -> Result<PathBuf, BuildError> {
         let archive = c_dir.join(format!("tls-{}.a", self.key));
         if archive.is_file() {
             return Ok(archive);
         }
+        eprintln!("barm: compiling the TLS library (BoringSSL); this happens once");
         let fail = |what: String| BuildError::Message(format!("can't build the TLS library: {what}"));
         let dir = c_dir.join(format!("tls-{}.tmp{}", self.key, std::process::id()));
         for (rel, bytes) in tls_files::TLS_FILES.iter().copied().chain([("runtime/barm.h", codegen::RUNTIME_H.as_bytes())]) {
@@ -344,13 +370,10 @@ impl TlsArchive {
             std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| fail(format!("{e}")))?;
             std::fs::write(&path, bytes).map_err(|e| fail(format!("{e}")))?;
         }
-        let sources: Vec<&str> = tls_files::TLS_FILES.iter().map(|f| f.0).filter(|p| p.ends_with(".c")).collect();
-        let mut args: Vec<String> = self.flags.clone();
-        for inc in ["vendor/mbedtls/include", "vendor/mbedtls/library", "vendor/mbedtls", "runtime"] {
-            args.push(format!("-I{}", dir.join(inc).display()));
-        }
-        args.push("-DMBEDTLS_CONFIG_FILE=\"barm_config.h\"".into());
-        // compile in parallel: ~70 files, once
+        let sources: Vec<&str> = tls_files::TLS_FILES.iter().map(|f| f.0).filter(|p| p.ends_with(".cc") || p.ends_with(".S") || p.ends_with(".c")).collect();
+        let cxx = Self::cxx(cc);
+        let include = [format!("-I{}", dir.join("vendor/boringssl/include").display()), format!("-I{}", dir.join("runtime").display())];
+        // compile in parallel: ~400 files, once
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(sources.len());
         let next = std::sync::atomic::AtomicUsize::new(0);
         let errors = std::sync::Mutex::new(Vec::new());
@@ -359,11 +382,18 @@ impl TlsArchive {
                 s.spawn(|| loop {
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let Some(src) = sources.get(i) else { break };
-                    let out = Command::new(cc).args(&args).arg("-c").arg(dir.join(src)).arg("-o").arg(dir.join(format!("{i}.o"))).output();
+                    let (compiler, lang): (&str, &[&str]) = if src.ends_with(".cc") {
+                        (&cxx, &["-std=c++17", "-fno-exceptions", "-fno-rtti"])
+                    } else if src.ends_with(".c") {
+                        (cc, &["-std=gnu11"])
+                    } else {
+                        (cc, &[])
+                    };
+                    let out = Command::new(compiler).args(&self.flags).args(lang).args(&include).arg("-c").arg(dir.join(src)).arg("-o").arg(dir.join(format!("{i}.o"))).output();
                     match out {
                         Ok(o) if o.status.success() => {}
                         Ok(o) => errors.lock().unwrap().push(format!("{src}: {}", String::from_utf8_lossy(&o.stderr).lines().take(5).collect::<Vec<_>>().join("\n"))),
-                        Err(e) => errors.lock().unwrap().push(format!("{src}: can't run `{cc}`: {e}")),
+                        Err(e) => errors.lock().unwrap().push(format!("{src}: can't run `{compiler}`: {e}")),
                     }
                 });
             }
@@ -379,6 +409,7 @@ impl TlsArchive {
         let out = Command::new(&ar).arg("rcs").arg(&tmp).args(&objs).output().map_err(|e| fail(format!("can't run `{ar}`: {e}")))?;
         let _ = std::fs::remove_dir_all(&dir);
         if !out.status.success() {
+            let _ = std::fs::remove_file(&tmp);
             return Err(fail(format!("`{ar}` failed: {}", String::from_utf8_lossy(&out.stderr))));
         }
         std::fs::rename(&tmp, &archive).map_err(|e| {
