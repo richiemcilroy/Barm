@@ -194,6 +194,8 @@ pub(crate) struct Gen<'c, 'a> {
     pub(crate) rc_helper_depth: u32,
     pub(crate) rec_boxes: Vec<(TyId, String)>,
     box_defs: String,
+    /// Classes whose objects' class id some code reads (`instanceof`).
+    pub(crate) cid_decls: FxSet<u32>,
     /// Helper functions whose prototypes are in `protos`, emitted with the helpers.
     pub(crate) helpers_after_decl: String,
     /// Box types whose struct bodies are still to be defined.
@@ -276,6 +278,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             rc_helper_depth: 0,
             rec_boxes: Vec::new(),
             box_defs: String::new(),
+            cid_decls: FxSet::default(),
             helpers_after_decl: String::new(),
             pending_boxes: Vec::new(),
             itabs: FxMap::default(),
@@ -448,6 +451,15 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let _ = writeln!(self.box_defs, "#define RCF_{name} int64_t rc;\n#define RC_{name}(b) ((b)->rc)");
             } else {
                 let _ = writeln!(self.box_defs, "#define RCF_{name}\n#define RC_{name}(b) ((int64_t){{1}})");
+            }
+        }
+        let bare = self.bare_classes(&shared);
+        for t in self.class_list.clone() {
+            let name = self.class_insts[&t].name.clone();
+            if bare.contains(&t) {
+                let _ = writeln!(self.box_defs, "#define BMG_HDR_{name}\n#define BMG_INIT_{name}(o, cid) ((void)0)\n#define BMG_DEC_{name}(p) 0");
+            } else {
+                let _ = writeln!(self.box_defs, "#define BMG_HDR_{name} bmg_obj h;\n#define BMG_INIT_{name}(o, cid) bmg_obj_init(o, cid)\n#define BMG_DEC_{name}(p) (--((bmg_obj *)(p))->rc)");
             }
         }
         let dispatch = std::mem::take(&mut self.dispatch_bodies);
@@ -1195,7 +1207,9 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// A `const bm_type *` expression describing `t` (for containers and printing).
     pub(crate) fn desc(&mut self, t: TyId) -> String {
         // Containers retain through descriptors.
-        self.rc_roots.insert(t);
+        if self.rc_helper_depth == 0 {
+            self.rc_roots.insert(t);
+        }
         match self.tget(t) {
             Ty::Int => return "&bm_type_int".into(),
             Ty::F64 => return "&bm_type_f64".into(),
