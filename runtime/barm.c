@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <time.h>
 #if defined(__unix__) || defined(__APPLE__)
+#include <sys/mman.h>
 #include <unistd.h>
 #define BM_HAVE_ISATTY 1
 #endif
@@ -210,23 +211,62 @@ BM_STR_LIT(bm_lit_false, "false");
 
 static inline bm_str bm_ascii_str(unsigned char c) { return (bm_str){(bm_strbuf *)&bm_ascii_strs[c]}; }
 
-/* Small strings (header + bytes + NUL <= BM_SMALL_MAX) come from per-size free lists refilled
- * from 64 KiB slabs; larger ones from malloc. The class follows from the length alone, so
- * freeing needs no flag. (Plain malloc under AddressSanitizer, so it sees every string.) */
-enum { BM_SMALL_MAX = 256, BM_SMALL_CLASSES = BM_SMALL_MAX / 8 + 1 }; /* 8-byte classes */
+/* Small strings (header + bytes + NUL <= BM_SMALL_MAX) come from the small-object free lists;
+ * larger ones from malloc. The class follows from the length alone, so freeing needs no flag.
+ * (Plain malloc under AddressSanitizer, so it sees every string.) */
+enum { BM_SMALL_MAX = 256 };
 #if defined(__SANITIZE_ADDRESS__) || (defined(__has_feature) && __has_feature(address_sanitizer))
 #define BM_PLAIN_ALLOC 1
 #endif
-static void *bm_small_bins[BM_SMALL_CLASSES];
-static __attribute__((noinline)) void *bm_small_refill(size_t c) {
-    size_t sz = c * 8, n = 65536 / sz;
-    char *slab = bm_alloc(n * sz);
-    for (size_t i = n - 1; i >= 1; i--) {
-        void **f = (void **)(void *)(slab + i * sz);
-        *f = bm_small_bins[c];
-        bm_small_bins[c] = f;
+void *bm_small_bins[BM_SMALL_CLASSES];
+static uint8_t bm_small_grow[BM_SMALL_CLASSES];
+
+/* 64 KiB slabs, page-aligned, cut from address space reserved 64 MiB at a time: a page no object
+ * has used yet is never touched, so it isn't resident. */
+static char *bm_arena_cur, *bm_arena_end;
+static char *bm_slab(void) {
+#if defined(__unix__) || defined(__APPLE__)
+    if (bm_arena_cur == bm_arena_end) {
+        size_t reserve = (size_t)64 << 20;
+        void *p = mmap(NULL, reserve, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (p == MAP_FAILED) return bm_alloc(65536);
+        bm_arena_cur = p;
+        bm_arena_end = bm_arena_cur + reserve;
     }
+    char *slab = bm_arena_cur;
+    bm_arena_cur += 65536;
     return slab;
+#else
+    return bm_alloc(65536);
+#endif
+}
+
+/* A size class's free list (`*bin`) is empty: carve blocks of `sz` bytes into it from memory
+ * all classes share, and return one more. Chunks start at 1 KiB and double with each refill
+ * (up to 16 KiB), so a class that holds a few objects takes a few hundred bytes, not a page. */
+static char *bm_bump, *bm_bump_end;
+static void *bm_carve(void **bin, uint8_t *grow, size_t sz) {
+    size_t chunk = (size_t)1024 << *grow;
+    if (chunk >= 16384) chunk = 16384;
+    else (*grow)++;
+    size_t n = chunk / sz;
+    if (n == 0) n = 1;
+    size_t bytes = n * sz;
+    if ((size_t)(bm_bump_end - bm_bump) < bytes) {
+        bm_bump = bm_slab();
+        bm_bump_end = bm_bump + 65536;
+    }
+    char *p = bm_bump;
+    bm_bump += bytes;
+    for (char *q = p + bytes - sz; q > p; q -= sz) {
+        *(void **)(void *)q = *bin;
+        *bin = q;
+    }
+    return p;
+}
+
+__attribute__((noinline)) void *bm_small_refill(size_t c) {
+    return bm_carve(&bm_small_bins[c], &bm_small_grow[c], c * 8);
 }
 static inline void *bm_small_alloc(size_t size) {
 #ifdef BM_PLAIN_ALLOC
@@ -2658,6 +2698,7 @@ static void (*bm_err_release)(void *);
  * (32-byte classes up to 2 KiB) refilled from 64 KiB slabs; bigger ones from malloc. */
 enum { BM_ASYNC_STEP = 32, BM_ASYNC_MAX = 2048, BM_ASYNC_CLASSES = BM_ASYNC_MAX / BM_ASYNC_STEP + 1 };
 static void *bm_async_bins[BM_ASYNC_CLASSES];
+static uint8_t bm_async_grow[BM_ASYNC_CLASSES];
 
 static void *bm_async_alloc(size_t size) {
 #ifdef BM_PLAIN_ALLOC
@@ -2670,14 +2711,7 @@ static void *bm_async_alloc(size_t size) {
         bm_async_bins[c] = *f;
         return f;
     }
-    size_t sz = c * BM_ASYNC_STEP, n = 65536 / sz;
-    char *slab = bm_alloc(n * sz);
-    for (size_t i = n - 1; i >= 1; i--) {
-        void **g = (void **)(void *)(slab + i * sz);
-        *g = bm_async_bins[c];
-        bm_async_bins[c] = g;
-    }
-    return slab;
+    return bm_carve(&bm_async_bins[c], &bm_async_grow[c], c * BM_ASYNC_STEP);
 }
 
 static void bm_async_free(void *p, size_t size) {
@@ -3220,6 +3254,11 @@ void bm_async_run(void) {
 #include <sys/socket.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
+#if defined(__APPLE__)
+#include <malloc/malloc.h>
+#elif defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #ifdef __linux__
 #include <sys/prctl.h>
 #endif
@@ -4076,6 +4115,12 @@ static pid_t bm_http_spawn(bm_int w) {
     prctl(PR_SET_PDEATHSIG, SIGTERM);
 #endif
     if (getppid() != bm_http_parent) _exit(0); /* the supervisor died before prctl */
+    /* Give back the free malloc pages inherited from the program's setup. */
+#if defined(__APPLE__)
+    malloc_zone_pressure_relief(NULL, 0);
+#elif defined(__GLIBC__)
+    malloc_trim(0);
+#endif
     bm_http_refresh_date();
     bm_http_loop();
     bm_out_flush();

@@ -112,12 +112,17 @@ def rss_mb(pgid):
     return sum(int(x) for x in out.split()) / 1024
 
 
+RATE = 0  # --rate: open loop at this many requests/s (latency at a fixed load)
+
+
 def load(route, conns, threads, secs, pipeline, pgid):
     _, method, path, body = route
     warm = 1.0
     cmd = [os.path.join(OUT, "load"), "-j", "-c", str(conns), "-t", str(threads), "-d", str(secs), "-w", str(warm), "-P", str(pipeline), "-m", method]
     if body:
         cmd += ["-b", body]
+    if RATE:
+        cmd += ["-R", str(RATE)]
     cmd.append(f"http://127.0.0.1:{PORT}{path}")
     if BIN:
         cmd[0] = os.path.join(BIN, "load")
@@ -143,6 +148,7 @@ def main():
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--secs", type=float, default=5)
     ap.add_argument("--pipeline", type=int, default=1)
+    ap.add_argument("--rate", type=int, default=0, help="open loop: fixed requests/s (compare latency at equal load)")
     ap.add_argument("--repeat", type=int, default=3, help="repetitions (servers interleaved); the median is reported")
     # rust-tpc needs SO_REUSEPORT load balancing, which only Linux has.
     default = [n for n in SERVERS if n != "rust-tpc" or os.uname().sysname == "Linux"]
@@ -150,6 +156,8 @@ def main():
     ap.add_argument("--routes", default=",".join(r[0] for r in ROUTES))
     ap.add_argument("--no-build", action="store_true")
     a = ap.parse_args()
+    global RATE
+    RATE = a.rate
     if not a.no_build:
         build()
     names = a.only.split(",")
@@ -173,14 +181,15 @@ def main():
                     proc.wait()
                     time.sleep(0.5)
             print(f"  [{workers} workers] repetition {rep + 1}/{a.repeat} done", file=sys.stderr, flush=True)
-        print(f"\n== {workers} worker{'s' if workers > 1 else ''}, {a.conns} connections, pipeline {a.pipeline} ==")
+        mode = f"open loop at {a.rate:,} req/s" if a.rate else f"pipeline {a.pipeline}"
+        print(f"\n== {workers} worker{'s' if workers > 1 else ''}, {a.conns} connections, {mode} ==")
         print(f"{'server':<8} {'route':<6} {'req/s':>10} {'avg':>8} {'p50':>8} {'p99':>8} {'p99.9':>8} {'cores':>6} {'cpu/req':>8} {'rss':>7} {'mem':>7}")
         for route in routes:
             for name in names:
                 runs = sorted(samples[(name, route[0])], key=lambda x: x["rps"])
                 r = dict(runs[len(runs) // 2])
                 r["rps_all"] = [round(x["rps"]) for x in runs]
-                r.update(server=name, route=route[0], workers=workers, conns=a.conns, pipeline=a.pipeline)
+                r.update(server=name, route=route[0], workers=workers, conns=a.conns, pipeline=a.pipeline, rate=a.rate)
                 results.append(r)
                 print(f"{name:<8} {route[0]:<6} {r['rps']:>10,.0f} {r['avg_us']:>6.0f}us {r['p50_us']:>6}us {r['p99_us']:>6}us {r['p999_us']:>6}us {r['cpu_cores']:>6.2f} {r['cpu_us_per_req']:>6.2f}us {r['rss_mb']:>5.1f}MB {r['pss_mb']:>5.1f}MB", flush=True)
     os.makedirs(os.path.join(HERE, "../results"), exist_ok=True)
