@@ -903,7 +903,7 @@ impl<'a> Checker<'a> {
                 c.fcx.last_mut().unwrap().scopes.push(Vec::new());
                 let mut frame = Frame::new(None, None, script, None);
                 frame.module_init = true;
-                frame.is_async = script && crate::async_enabled() && c.ast().script.is_some_and(|si| matches!(&c.ast().items[si as usize].kind, ItemKind::Function(f) if f.is_async));
+                frame.is_async = script && c.ast().script.is_some_and(|si| matches!(&c.ast().items[si as usize].kind, ItemKind::Function(f) if f.is_async));
                 c.fcx.last_mut().unwrap().frames.push(frame);
                 let t = match ty {
                     Some(te) => {
@@ -1017,7 +1017,7 @@ impl<'a> Checker<'a> {
                 let ret = f.ret.map(|t| c.resolve_type(t, &tscope));
                 // An async function's body returns the `T` of its `Promise<T>`.
                 let ret = match ret {
-                    Some(r) if f.is_async && crate::async_enabled() => Some(c.async_inner(r, f.ret.map(|te| c.ast().ty(te).span).unwrap())),
+                    Some(r) if f.is_async => Some(c.async_inner(r, f.ret.map(|te| c.ast().ty(te).span).unwrap())),
                     r => r,
                 };
                 let throws = f.throws.map(|t| c.resolve_type(t, &tscope));
@@ -1073,7 +1073,7 @@ impl<'a> Checker<'a> {
         };
         let rest = f.params.last().map(|p| p.rest).unwrap_or(false);
         // Callers of an async function get a promise; its errors reject the promise.
-        let (ret, throws) = if f.is_async && crate::async_enabled() { (self.types.promise(ret, throws), NEVER) } else { (ret, throws) };
+        let (ret, throws) = if f.is_async { (self.types.promise(ret, throws), NEVER) } else { (ret, throws) };
         let sig = Sig { tparams, params, param_names, ret, throws, rest };
         self.sig_in_progress.remove(&(m, ii));
         Arc::make_mut(&mut self.sigs).insert((m, ii), sig.clone());
@@ -1104,7 +1104,7 @@ impl<'a> Checker<'a> {
     /// The body's view of a signature: an async function's body returns the `T` of its
     /// `Promise<T>` and throws what the promise rejects with.
     pub(crate) fn body_sig(&self, f: &ast::FnDecl, sig: &Sig) -> Sig {
-        if f.is_async && crate::async_enabled()
+        if f.is_async
             && let Ty::Promise(v, e) = *self.types.get(sig.ret)
         {
             return Sig { ret: v, throws: e, ..sig.clone() };
@@ -1172,7 +1172,7 @@ impl<'a> Checker<'a> {
             // Without a `throws` clause the body's own `try`/`throw` decide (T0831 covers unmarked calls).
             let decl = if sig.throws == UNKNOWN || (f.throws.is_none() && sig.throws == NEVER) { None } else { Some(sig.throws) };
             let mut frame = Frame::new(ret, Some(f.name), true, decl);
-            frame.is_async = f.is_async && crate::async_enabled();
+            frame.is_async = f.is_async;
             fcx.frames.push(frame);
             fcx.class = class;
             if let Some(t) = &this {
@@ -1619,13 +1619,20 @@ impl<'a> Checker<'a> {
                 );
                 Some(ERROR)
             }
-            // Without real async (BARM_ASYNC), a `Promise<T>` is its `T` (see spec §7b).
-            "Promise" => Some(if !arity(self, 1) {
-                ERROR
-            } else if crate::async_enabled() {
-                self.types.promise(targs[0], NEVER)
-            } else {
-                targs[0]
+            // `Promise<T>` never rejects; `Promise<T, E>` can reject with `E` (errors are checked).
+            "Promise" => Some(match *targs {
+                [v] => self.types.promise(v, NEVER),
+                [v, e] => {
+                    self.check_throws_type(e, span);
+                    self.types.promise(v, e)
+                }
+                _ => {
+                    self.report(
+                        Diagnostic::new("T0010", span, format!("`Promise` takes 1 or 2 type arguments, found {}", targs.len()))
+                            .note("expected", "`Promise<T>`, or `Promise<T, E>` for a promise that can reject with `E`"),
+                    );
+                    ERROR
+                }
             }),
             // `Record<string, V>` is a string-keyed `Map` that object literals can build.
             "Record" => {

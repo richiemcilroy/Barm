@@ -1,13 +1,13 @@
-// Timers: setTimeout/setInterval/clearTimeout and promises resolved by timers. Deadlines are at
-// least 10 ms apart, so the order doesn't depend on scheduling jitter (in Node either).
+// Timers: setTimeout/setInterval/clearTimeout and promises resolved by timers. No two events are
+// closer than 20 ms, so the order doesn't depend on scheduling jitter (in Node either).
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 async function main() {
-  setTimeout(() => console.log("timeout 40"), 40)
-  const cancelled = setTimeout(() => console.log("never"), 20)
-  setTimeout(() => console.log("timeout 10"), 10)
+  setTimeout(() => console.log("timeout 120"), 120)
+  const cancelled = setTimeout(() => console.log("never"), 60)
+  setTimeout(() => console.log("timeout 30"), 30)
   clearTimeout(cancelled)
   let ticks = 0
   let interval = 0
@@ -17,19 +17,19 @@ async function main() {
     if (ticks === 3) {
       clearInterval(interval)
     }
-  }, 25)
+  }, 90)
   console.log("scheduled")
-  await sleep(5)
-  console.log("slept 5")
-  await sleep(100)
-  console.log("slept 105, ticks", ticks)
+  await sleep(10)
+  console.log("slept 10")
+  await sleep(330)
+  console.log("slept 340, ticks", ticks)
   const results: string[] = []
   const a = (async () => {
-    await sleep(30)
+    await sleep(60)
     results.push("a")
   })()
   const b = (async () => {
-    await sleep(10)
+    await sleep(20)
     results.push("b")
   })()
   await a

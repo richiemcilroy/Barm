@@ -366,7 +366,7 @@ void bm_task_yield(void);
 void bm_queue_microtask(bm_fn callback);        /* queueMicrotask(cb) (retains cb) */
 bm_int bm_set_timer(bm_fn callback, double ms, bool repeat);   /* setTimeout/setInterval (retains cb) */
 void bm_clear_timer(bm_int id);
-/* Runs microtasks and timers until nothing is left. */
+/* Runs the event loop until nothing is left: microtasks, timers and servers. */
 void bm_async_run(void);
 
 /* ------------------------------------------------------------------ tests */
@@ -446,6 +446,10 @@ bm_str bm_native_urlPart(bm_str href, bm_int k);               /* 0 protocol .. 
 bm_str bm_native_urlDecode(bm_str s, bool plus);
 bm_str bm_native_urlEncode(bm_str s);
 void bm_native_httpRespond(bm_int status, bm_str headers, bm_str body, bool typed);  /* typed: add the default content-type */
+/* An async handler: httpDefer (while the request is being handled) returns an id; the response
+ * comes later through httpRespondTo. Responses on a connection go out in request order. */
+bm_int bm_native_httpDefer(void);
+void bm_native_httpRespondTo(bm_int id, bm_int status, bm_str headers, bm_str body, bool typed);
 bm_int bm_native_headerIndex(bm_str block, bm_str name);   /* offset of the value, or -1 */
 bm_str bm_native_headerValue(bm_str block, bm_int at);
 void bm_http_run(void);   /* after the program: serves registered servers until stopped (no-op if none) */

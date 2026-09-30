@@ -1156,6 +1156,30 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let v = self.tmp(ret, &call, true);
                 self.coerce(v, ty)
             }
+            // A settled promise: one allocation, no closures.
+            (Some("Promise"), "resolve" | "reject") => {
+                let pt = self.c.types.without_undefined(ty);
+                let Ty::Promise(value, _) = self.tget(pt) else {
+                    self.unsupported(span, "this promise");
+                    return Val::plain("NULL", ty);
+                };
+                let desc = self.desc(value);
+                let p = self.tmp(ty, &format!("bm_promise_new({desc})"), true);
+                if name == "reject" {
+                    let e = self.expr(args[0].expr);
+                    self.line(format!("bmg_obj_retain({0}); bm_promise_reject({1}, {0});", e.code, p.code));
+                } else if let Some(a) = args.first() {
+                    let x = self.expr(a.expr);
+                    let x = self.coerce(x, value);
+                    let ct = self.ctype(value);
+                    let rv = self.fresh("rv");
+                    self.line(format!("{ct} {rv} = {};", x.code));
+                    self.line(format!("bm_promise_resolve({}, &{rv});", p.code));
+                } else {
+                    self.line(format!("bm_promise_resolve_move({}, NULL);", p.code));
+                }
+                p
+            }
             (Some("JSON"), "stringify") => {
                 let v = self.expr(args[0].expr);
                 let indent = args.get(2).map(|a| self.expr(a.expr));
@@ -1237,7 +1261,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.line(format!("double {out} = 0; bool {ok} = bm_parse_float({}, &{out});", s.code));
                 self.optional_from(&ok, Val::plain(out, F64), ty)
             }
-            // Timers (real async).
+            // Timers.
             (None, "setTimeout" | "setInterval") => {
                 let cb = self.expr(args[0].expr);
                 let ms = match args.get(1) {

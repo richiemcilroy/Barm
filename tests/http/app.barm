@@ -2,14 +2,21 @@
 
 type Item = { id: int, name: string }
 
-function route(req: Request): Response throws TypeError {
+// `/echo` answers asynchronously (it awaits the body); everything else synchronously, so the
+// protocol tests (pipelining especially) mix both kinds of response.
+async function echo(req: Request): Promise<Response> {
+  const body = await req.text()
+  return new Response(body, { status: 200, headers: { "content-type": "application/octet-stream" } })
+}
+
+function route(req: Request): Response | Promise<Response> throws TypeError {
   const url = try new URL(req.url)
   const path = url.pathname
   if (path === "/") {
     return new Response("hello")
   }
   if (path === "/echo") {
-    return new Response(req.text(), { status: 200, headers: { "content-type": "application/octet-stream" } })
+    return echo(req)
   }
   if (path === "/info") {
     const h = req.headers

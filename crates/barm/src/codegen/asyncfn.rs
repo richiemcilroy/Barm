@@ -1,4 +1,4 @@
-//! Async functions (real async, `BARM_ASYNC`). An async function `f` compiles to:
+//! Async functions. An async function `f` compiles to:
 //! - a frame `AF_f`: `pc` (the label to resume at), `ret`, the parameters and, after
 //!   `frame::lower`, every local and temporary, plus a union `u` of the frames of the async calls
 //!   it awaits directly (only one is in progress at a time);
@@ -24,9 +24,9 @@ pub(crate) struct FrameDef {
 }
 
 impl<'c, 'a> Gen<'c, 'a> {
-    /// Is (module, item) an async function (with real async on)?
+    /// Is (module, item) an async function?
     pub(crate) fn is_async_fn(&self, m: u32, item: u32) -> bool {
-        crate::async_enabled() && matches!(&self.ast(m).items[item as usize].kind, ast::ItemKind::Function(f) if f.is_async)
+        matches!(&self.ast(m).items[item as usize].kind, ast::ItemKind::Function(f) if f.is_async)
     }
 
     /// The (instantiated) type an async function's promise resolves to.
@@ -412,7 +412,7 @@ impl<'c, 'a> Gen<'c, 'a> {
 }
 
 /// Does `e` contain an `await` outside nested functions?
-fn has_await(ast: &ast::Ast, e: ExprId) -> bool {
+pub(crate) fn has_await(ast: &ast::Ast, e: ExprId) -> bool {
     let any = |xs: &[ExprId]| xs.iter().any(|&x| has_await(ast, x));
     match &ast.expr(e).kind {
         ExprKind::Await(_) => true,

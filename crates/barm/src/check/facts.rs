@@ -39,7 +39,7 @@ pub enum Callee {
     New(u32),
     /// `super(...)` in a constructor: the base class type.
     SuperCtor(TyId),
-    /// `new Promise(executor)` (real async only); the promise type is the call's return type.
+    /// `new Promise(executor)`; the promise type is the call's return type.
     NewPromise,
 }
 
