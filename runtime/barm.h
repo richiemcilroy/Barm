@@ -78,8 +78,8 @@ extern const bm_type bm_type_i8, bm_type_i16, bm_type_i32, bm_type_u8, bm_type_u
 /* ------------------------------------------------------------------ strings (immutable UTF-8) */
 
 typedef struct bm_strbuf {
-    int64_t rc;
-    int64_t len;       /* bytes, excluding the trailing NUL */
+    int32_t rc;        /* < 0: immortal (literals) */
+    int32_t len;       /* bytes, excluding the trailing NUL (strings are < 2 GiB) */
     char data[];       /* NUL-terminated */
 } bm_strbuf;
 
@@ -92,7 +92,7 @@ extern bm_strbuf bm_empty_strbuf;
 
 /* A static literal: BM_STR_LIT(name, "text") declares `name` usable as BM_LIT(name). */
 #define BM_STR_LIT(name, text) \
-    static struct { int64_t rc; int64_t len; char data[sizeof(text)]; } name = { -1, sizeof(text) - 1, text }
+    static struct { int32_t rc; int32_t len; char data[sizeof(text)]; } name = { -1, sizeof(text) - 1, text }
 #define BM_LIT(name) ((bm_str){(bm_strbuf *)&(name)})
 
 static inline void bm_str_retain(bm_str s) { if (s.p->rc >= 0) s.p->rc++; }
