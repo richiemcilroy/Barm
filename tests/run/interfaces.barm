@@ -1,0 +1,71 @@
+// Interface values: records and class instances behind one structural type.
+
+interface Shape {
+  name: string
+  area(): f64
+}
+
+interface Named {
+  name: string
+}
+
+interface Box<T> {
+  value: T
+  label?: string
+}
+
+class Circle {
+  constructor(readonly name: string, readonly r: f64) {}
+  area(): f64 {
+    return 3 * this.r * this.r
+  }
+}
+
+class Square {
+  side = 2.0
+  get name(): string {
+    return "square"
+  }
+  area(): f64 {
+    return this.side * this.side
+  }
+}
+
+type Tri = { name: string, area: () => f64 }
+
+function describe(s: Shape): string {
+  return `${s.name}: ${s.area()}`
+}
+
+function greet(n: Named): string {
+  return "hi " + n.name
+}
+
+function unbox(b: Box<int>): int {
+  return b.value + (b.label === undefined ? 0 : 100)
+}
+
+function total(shapes: Shape[]): f64 {
+  let t = 0.0
+  for (const s of shapes) {
+    t += s.area()
+  }
+  return t
+}
+
+function main() {
+  const tri: Tri = { name: "tri", area: () => 1.5 }
+  const sq = new Square()
+  const shapes: Shape[] = [new Circle("circle", 1), sq, tri]
+  for (const s of shapes) {
+    console.log(describe(s))
+  }
+  console.log(total(shapes))
+  sq.side = 3
+  console.log(total(shapes))
+  const first: Shape = shapes[0]!
+  console.log(greet(first), greet(tri), greet({ name: "plain" }))
+  console.log(unbox({ value: 1 }), unbox({ value: 2, label: "x" }))
+  const n: Named = { name: "rec" }
+  console.log(n, first)
+}

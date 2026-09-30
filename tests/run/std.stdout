@@ -1,0 +1,28 @@
+hello
+world
+
+true false [ 'b', 'hello.txt' ]
+true
+c.txt c /a/b .gz
+b/c/ /a/c true /
+true string true undefined
+true true
+demo 2 oé rect slow true
+[{"x":1,"y":2.5},{"x":-3,"y":0,"label":"oé"}]
+{"a":1,"b":[true,false],"c":"q\"x","e":0.30000000000000004}
+[
+  {
+    "kind": "rect",
+    "w": 2,
+    "h": 3
+  },
+  {
+    "kind": "circle",
+    "r": 1
+  }
+]
+SyntaxError
+SyntaxError
+SyntaxError
+2 2 {"a":1,"b":2}
+[ 1, 2, 3 ] hi

@@ -1,0 +1,20 @@
+// Freeing a long linked list doesn't recurse without bound (classes and recursive records).
+
+class Node {
+  constructor(readonly value: int, readonly next: Node | undefined) {}
+}
+
+type List = { value: int, next: List | undefined }
+
+function main() {
+  let head: Node | undefined = undefined
+  let list: List | undefined = undefined
+  for (let i = 0; i < 1000000; i++) {
+    head = new Node(i, head)
+    list = { value: i, next: list }
+  }
+  console.log(head?.value, list?.value)
+  head = undefined
+  list = undefined
+  console.log("freed")
+}

@@ -1,0 +1,8 @@
+circle: 3
+square: 4
+tri: 1.5
+8.5
+13.5
+hi circle hi tri hi plain
+1 102
+{ name: 'rec' } Circle { name: 'circle', r: 1 }

@@ -1,0 +1,21 @@
+circle: 3.14
+rect: 6.00
+perimeter 10
+square! rect: 4.00
+perimeter 8
+<circle> <rect>
+11 10
+2 1
+a undefined 0
+10
+root/docs/notes 1
+10 true false
+15
+Point { x: 10, y: 5 } [ Point { x: 10, y: 5 }, Point { x: 3, y: 4 } ]
+Counter { count: 0 } Tree { value: 2, left: undefined, right: undefined }
+cat with 9 lives
+dog [ 'sit' ]
+2
+undefined 12
+p undefined 1
+2

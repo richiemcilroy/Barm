@@ -1,0 +1,32 @@
+// Optional chaining through records whose fields are themselves optional.
+class Box {
+  readonly v: int
+  constructor(v: int) {
+    this.v = v
+  }
+}
+
+type Init = { status?: int, box?: Box, name?: string, inner?: { depth?: int } }
+
+function status(init?: Init): int {
+  return init?.status ?? 200
+}
+
+function name(init?: Init): string {
+  return init?.name ?? "anon"
+}
+
+function depth(init?: Init): int {
+  return init?.inner?.depth ?? -1
+}
+
+function main(): void {
+  const b = new Box(1)
+  console.log(status({ box: b }), status({ status: 5 }), status())
+  console.log(name({ status: 1 }), name({ name: "ada" }), name())
+  console.log(depth({ inner: {} }), depth({ inner: { depth: 3 } }), depth({}), depth())
+  const i: Init = { box: b }
+  console.log(i.status ?? 7, i.box?.v ?? 0)
+  const s = i.status
+  console.log(s === undefined)
+}

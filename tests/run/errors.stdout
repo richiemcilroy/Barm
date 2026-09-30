@@ -1,0 +1,10 @@
+3
+caught NotFound no such key: zzz
+missing key zzz
+12
+done 12
+not a positive number: -3
+done -3
+not a positive number: -40
+done -40
+Error: plain Error

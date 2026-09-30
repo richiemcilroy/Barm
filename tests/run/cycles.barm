@@ -1,0 +1,45 @@
+// The cycle collector frees unreachable rings of cyclic objects; a weak reference to one reads undefined.
+cyclic class Node {
+  next: Node | undefined = undefined
+  items: Node[] = []
+  constructor(readonly id: int) {}
+}
+
+class Holder {
+  weak target: Node | undefined = undefined
+}
+
+function makeRing(n: int): Node {
+  const first = new Node(0)
+  let cur = first
+  for (let i = 1; i < n; i++) {
+    const nx = new Node(i)
+    cur.next = nx
+    cur.items.push(first)
+    cur = nx
+  }
+  cur.next = first
+  return first
+}
+
+function main() {
+  let total = 0
+  const h = new Holder()
+  for (let round = 0; round < 2000; round++) {
+    const ring = makeRing(50)
+    total += ring.id + (ring.next?.id ?? 0)
+    if (round === 0) {
+      h.target = ring
+    }
+  }
+  // Rings are garbage now; the collector frees them (the weak reference then reads undefined
+  // once its target is collected).
+  const keep = makeRing(3)
+  const shared = keep.items
+  keep.items = []
+  console.log(total, keep.next?.next?.next?.id, shared.length)
+  for (let i = 0; i < 30000; i++) {
+    makeRing(2)
+  }
+  console.log(h.target === undefined)
+}
