@@ -932,6 +932,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let (params, ret) = self.own_method_sig(ci.decl, member, &subst);
                 let proto = self.self_proto(&cname, &ci.name, &params, ret);
                 let ps: Vec<(u32, TyId, bool)> = fd.params.iter().zip(&params).map(|(p, fp)| (p.span.start, fp.ty, fp.inout)).collect();
+                if fd.is_async {
+                    self.emit_async_method(&cname, &proto, m, subst, &ps, ret, fd.body, Some((fd.name_span.start, ty, ci.name.clone())));
+                    return;
+                }
                 let code = self.function_body(m, subst, &ps, ret, FnBodyKind::Block(fd.body), None, Some((fd.name_span.start, ty)), None);
                 let _ = writeln!(self.funcs, "static {proto} {{\n{code}}}\n");
             }
@@ -941,6 +945,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let (params, ret) = self.own_method_sig(decl, member, &subst);
                 let proto = self.fn_proto(&cname, &params, ret, &FxMap::default(), false);
                 let ps: Vec<(u32, TyId, bool)> = fd.params.iter().zip(&params).map(|(p, fp)| (p.span.start, fp.ty, fp.inout)).collect();
+                if fd.is_async {
+                    self.emit_async_method(&cname, &proto, m, subst, &ps, ret, fd.body, None);
+                    return;
+                }
                 let code = self.function_body(m, subst, &ps, ret, FnBodyKind::Block(fd.body), None, None, None);
                 let _ = writeln!(self.funcs, "static {proto} {{\n{code}}}\n");
             }

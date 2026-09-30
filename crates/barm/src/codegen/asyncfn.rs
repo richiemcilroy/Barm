@@ -48,7 +48,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.pending_async = Some((inst.m, inst.item));
         let code = self.function_body(inst.m, inst.subst.clone(), &params, ret, super::body::FnBodyKind::Block(f.body), None, None, None);
         let ptys: Vec<TyId> = params.iter().map(|p| p.1).collect();
-        if !self.async_parts(&cname, &format!("{cname}_task"), &frame, &code, &ptys, ret, false) {
+        if !self.async_parts(&cname, &format!("{cname}_task"), &frame, &code, &ptys, ret, &[]) {
             return;
         }
         // Started as a task of its own (a call that isn't awaited).
@@ -77,7 +77,8 @@ impl<'c, 'a> Gen<'c, 'a> {
         let ptys: Vec<TyId> = params.iter().map(|p| p.1).collect();
         let resume = format!("{cname}_resume");
         let _ = writeln!(self.protos, "static bool {resume}({frame} *F);\nstatic bool {cname}_task(bm_task *t);");
-        if !self.async_parts(&resume, &format!("{cname}_task"), &frame, &code, &ptys, ret, true) {
+        let env = [("bm_env *".to_string(), "env_".to_string(), "bm_env_release(F->env_);".to_string())];
+        if !self.async_parts(&resume, &format!("{cname}_task"), &frame, &code, &ptys, ret, &env) {
             return;
         }
         let mut ps = vec!["bm_env *env_".to_string()];
@@ -95,15 +96,46 @@ impl<'c, 'a> Gen<'c, 'a> {
         );
     }
 
-    /// The frame, resume function and task function of an async body; false after an internal
-    /// error. `env`: an async arrow's frame also holds its closure environment (`env_`).
+    /// An async method (or static method): its C function (`proto`, what callers and dispatch
+    /// call) starts a task holding `self_` and the arguments, and returns the task's promise.
     #[allow(clippy::too_many_arguments)]
-    fn async_parts(&mut self, resume: &str, task: &str, frame: &str, code: &str, params: &[TyId], ret: TyId, env: bool) -> bool {
+    pub(crate) fn emit_async_method(&mut self, cname: &str, proto: &str, m: u32, subst: FxMap<u32, TyId>, params: &[(u32, TyId, bool)], ret_p: TyId, body: crate::ast::StmtId, this: Option<(u32, TyId, String)>) {
+        let ret = self.async_value_type(ret_p);
+        let frame = format!("AF_{cname}");
+        let resume = format!("{cname}_resume");
+        let _ = writeln!(self.typedefs, "typedef struct {frame} {frame};");
+        let _ = writeln!(self.protos, "static bool {resume}({frame} *F);\nstatic bool {cname}_task(bm_task *t);");
+        self.pending_async = Some((u32::MAX - 1, self.counter));
+        let this_arg = this.as_ref().map(|(k, t, _)| (*k, *t));
+        let code = self.function_body(m, subst, params, ret, super::body::FnBodyKind::Block(body), None, this_arg, None);
+        let ptys: Vec<TyId> = params.iter().map(|p| p.1).collect();
+        let extra: Vec<(String, String, String)> = match &this {
+            Some((_, _, st)) => vec![(format!("{st} *"), "self_".to_string(), "bmg_obj_release(F->self_);".to_string())],
+            None => Vec::new(),
+        };
+        if !self.async_parts(&resume, &format!("{cname}_task"), &frame, &code, &ptys, ret, &extra) {
+            return;
+        }
+        let mut set = String::new();
+        if this.is_some() {
+            set.push_str(" F->self_ = self_; bmg_obj_retain(self_);");
+        }
+        for (i, ty) in ptys.iter().enumerate() {
+            let r = if self.is_rc(*ty) { format!(" {};", self.retain_code(*ty, &format!("p{i}"))) } else { String::new() };
+            let _ = write!(set, " F->p{i} = p{i};{r}");
+        }
+        let desc = self.desc(ret);
+        let _ = writeln!(self.funcs, "static {proto} {{\n    bm_task *t = bm_task_new(sizeof({frame}), {cname}_task, {desc});\n    {frame} *F = bm_task_frame(t);{set}\n    return bm_task_spawn(t);\n}}\n");
+    }
+
+    /// The frame, resume function and task function of an async body; false after an internal
+    /// error. `extra`: more frame fields the body uses (C type, name, release when the task
+    /// ends): an async arrow's closure environment (`env_`), a method's `self_`.
+    #[allow(clippy::too_many_arguments)]
+    fn async_parts(&mut self, resume: &str, task: &str, frame: &str, code: &str, params: &[TyId], ret: TyId, extra: &[(String, String, String)]) -> bool {
         let children = std::mem::take(&mut self.last_children);
         let mut names: Vec<String> = (0..params.len()).map(|i| format!("p{i}")).collect();
-        if env {
-            names.push("env_".into());
-        }
+        names.extend(extra.iter().map(|e| e.1.clone()));
         let lowered = match super::frame::lower(code, &names) {
             Ok(l) => l,
             Err(msg) => {
@@ -116,8 +148,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             let ct = self.ctype(ret);
             let _ = writeln!(def, "    {ct} ret;");
         }
-        if env {
-            def.push_str("    bm_env *env_;\n");
+        for (ct, name, _) in extra {
+            let _ = writeln!(def, "    {ct} {name};");
         }
         for (i, ty) in params.iter().enumerate() {
             let ct = self.ctype(*ty);
@@ -148,8 +180,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let _ = write!(release, " {r};");
             }
         }
-        if env {
-            release.push_str(" bm_env_release(F->env_);");
+        for (_, _, rel) in extra {
+            let _ = write!(release, " {rel}");
         }
         let settle = if ret == VOID { "bm_promise_resolve_move(t->promise, NULL);".to_string() } else { "bm_promise_resolve_move(t->promise, &F->ret);".to_string() };
         let _ = writeln!(

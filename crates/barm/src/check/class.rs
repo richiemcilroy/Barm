@@ -45,6 +45,9 @@ pub(crate) struct CMethod {
     pub(crate) is_abstract: bool,
     pub(crate) getter: bool,
     pub(crate) span: Span,
+    /// An async method: its body's view (the declared `Promise<T>`'s `T`, the declared `throws`).
+    /// `ret`/`throws` are what callers see: `Promise<T, E>`, throwing nothing.
+    pub(crate) async_body: Option<(Option<TyId>, Option<TyId>)>,
 }
 
 #[derive(Clone, Debug)]
@@ -360,6 +363,20 @@ impl<'a> Checker<'a> {
                     }
                     let map: Vec<(u32, TyId)> = params.iter().copied().zip(args.iter().copied()).collect();
                     let throws = if mem.is_abstract { f.throws.map(|t| self.resolve_type(t, &scope)).or(Some(NEVER)) } else { self.member_throws_decl(f, &scope) };
+                    // An async method returns a promise; its errors reject it. Until both the
+                    // body's type and errors are known, callers' view is inferred with the body.
+                    let (ret, throws, async_body) = if f.is_async && !getter {
+                        let inner = match (ret, f.ret) {
+                            (Some(r), Some(te)) => Some(self.async_inner(r, self.ast().ty(te).span)),
+                            (r, _) => r,
+                        };
+                        match (inner, throws) {
+                            (Some(i), Some(t)) => (Some(self.types.promise(i, t)), Some(NEVER), Some((inner, throws))),
+                            _ => (None, None, Some((inner, throws))),
+                        }
+                    } else {
+                        (ret, throws, None)
+                    };
                     let method = CMethod {
                         name: mem.name,
                         owner: c,
@@ -374,6 +391,7 @@ impl<'a> Checker<'a> {
                         is_abstract: mem.is_abstract,
                         getter,
                         span: mem.name_span,
+                        async_body,
                     };
                     if mem.is_static {
                         if info.statics.iter().any(|s| s.name == mem.name) {
@@ -411,7 +429,8 @@ impl<'a> Checker<'a> {
         let ret = mm.ret.map(|r| self.types.subst(r, map));
         let throws = mm.throws.map(|r| self.types.subst(r, map));
         let composed = mm.map.iter().map(|&(p, t)| (p, self.types.subst(t, map))).collect();
-        CMethod { params, ret, throws, map: composed, ..mm.clone() }
+        let async_body = mm.async_body.map(|(r, t)| (r.map(|r| self.types.subst(r, map)), t.map(|t| self.types.subst(t, map))));
+        CMethod { params, ret, throws, map: composed, async_body, ..mm.clone() }
     }
 
     /// A member's declared `throws`, or `None` (inferred later) when its body can throw.
@@ -567,6 +586,12 @@ impl<'a> Checker<'a> {
         }
         let r = self.check_member_body(c, member, None);
         let t = self.inferred_throws.remove(&(c, member)).unwrap_or(NEVER);
+        let own = self.classes[c as usize].methods.iter().chain(self.classes[c as usize].statics.iter()).find(|x| x.owner == c && x.member == member).and_then(|x| x.async_body);
+        // An async method: callers get a promise of the body's value that rejects with its errors.
+        let (r, t) = match own {
+            Some((_, declared)) => (self.types.promise(r, declared.unwrap_or(t)), NEVER),
+            None => (r, t),
+        };
         let info = &mut Arc::make_mut(&mut self.classes)[c as usize];
         for x in info.methods.iter_mut().chain(info.statics.iter_mut()) {
             if x.owner == c && x.member == member {
@@ -593,6 +618,8 @@ impl<'a> Checker<'a> {
             _ => {
                 let mm = info.methods.iter().chain(info.statics.iter()).find(|x| x.owner == c && x.member == member).cloned();
                 match mm {
+                    // An async method's body is checked against its promise's value type.
+                    Some(CMethod { async_body: Some((inner, throws)), ref params, .. }) => (params.clone(), ret.or(inner), throws, false),
                     Some(mm) => (mm.params.clone(), ret.or(mm.ret), mm.throws, false),
                     None => return ERROR,
                 }
