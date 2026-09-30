@@ -134,6 +134,10 @@ pub struct Param {
     pub ty: Option<TypeId>,
     pub inout: bool,
     pub optional: bool,
+    /// Constructor parameter property (`constructor(private readonly x: T)`): visibility, readonly.
+    pub prop: Option<(Visibility, bool)>,
+    /// `...xs: T[]`: collects the remaining arguments (last parameter of a function).
+    pub rest: bool,
 }
 
 pub struct ArrowFn {
@@ -168,6 +172,12 @@ pub enum ExprKind {
     NonNull(ExprId),
     Typeof(ExprId),
     Paren(ExprId),
+    /// `this` inside a class body.
+    This,
+    /// `super` (only as `super(...)` in a constructor or `super.method(...)`).
+    Super,
+    /// `try f(x)`: passes an error thrown by the call(s) on to the caller.
+    Try(ExprId),
     Error,
 }
 
@@ -195,8 +205,16 @@ pub enum StmtKind {
     Break,
     Continue,
     Block(Vec<StmtId>),
+    Throw(ExprId),
+    Try { body: StmtId, catch: Option<Catch>, finally: Option<StmtId> },
     Empty,
     Error,
+}
+
+pub struct Catch {
+    /// `catch (e)` / `catch (e: T)`; `None` for `catch { ... }`.
+    pub param: Option<(Sym, Span, Option<TypeId>)>,
+    pub body: StmtId,
 }
 
 pub struct TypeExpr {
@@ -236,7 +254,49 @@ pub struct FnDecl {
     pub tparams: Vec<TypeParam>,
     pub params: Vec<Param>,
     pub ret: Option<TypeId>,
+    /// `throws E`.
+    pub throws: Option<TypeId>,
     pub body: StmtId,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Visibility {
+    Public,
+    Protected,
+    Private,
+}
+
+pub struct ClassDecl {
+    pub name: Sym,
+    pub name_span: Span,
+    pub tparams: Vec<TypeParam>,
+    pub is_abstract: bool,
+    /// `cyclic class`: instances may form reference cycles (collected by the cycle collector).
+    pub cyclic: bool,
+    pub extends: Option<TypeId>,
+    pub implements: Vec<TypeId>,
+    pub members: Vec<ClassMember>,
+}
+
+pub struct ClassMember {
+    pub name: Sym,
+    pub name_span: Span,
+    pub span: Span,
+    pub vis: Visibility,
+    pub is_static: bool,
+    pub readonly: bool,
+    /// `weak parent: Node | undefined`: doesn't keep the target alive.
+    pub weak: bool,
+    pub is_abstract: bool,
+    pub kind: MemberKind,
+}
+
+pub enum MemberKind {
+    Field { ty: Option<TypeId>, init: Option<ExprId>, optional: bool },
+    /// Abstract methods have an empty body block.
+    Method(FnDecl),
+    Getter(FnDecl),
+    Constructor(FnDecl),
 }
 
 pub struct Import {
@@ -253,6 +313,7 @@ pub enum ItemKind {
     Interface { name: Sym, name_span: Span, tparams: Vec<TypeParam>, members: Vec<FieldTy> },
     Const { name: Sym, name_span: Span, ty: Option<TypeId>, init: ExprId },
     Test { name: String, name_span: Span, body: ExprId },
+    Class(ClassDecl),
 }
 
 pub struct Item {
@@ -279,6 +340,7 @@ impl Ast {
         for s in &mut self.stmts {
             match &mut s.kind {
                 StmtKind::Let { name, .. } | StmtKind::ForOf { name, .. } => *name = f(*name),
+                StmtKind::Try { catch: Some(Catch { param: Some((name, _, _)), .. }), .. } => *name = f(*name),
                 _ => {}
             }
         }
@@ -320,6 +382,21 @@ impl Ast {
                 }
                 ItemKind::Const { name, .. } => *name = f(*name),
                 ItemKind::Test { .. } => {}
+                ItemKind::Class(c) => {
+                    c.name = f(c.name);
+                    tparams(&mut c.tparams);
+                    for mem in &mut c.members {
+                        mem.name = f(mem.name);
+                        match &mut mem.kind {
+                            MemberKind::Method(fd) | MemberKind::Getter(fd) | MemberKind::Constructor(fd) => {
+                                fd.name = f(fd.name);
+                                tparams(&mut fd.tparams);
+                                params(&mut fd.params);
+                            }
+                            MemberKind::Field { .. } => {}
+                        }
+                    }
+                }
             }
         }
     }
