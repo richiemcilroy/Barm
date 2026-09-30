@@ -12,17 +12,43 @@ struct User {
 }
 
 static BIG: OnceLock<Vec<u8>> = OnceLock::new();
+static BIG_GZ: OnceLock<Vec<u8>> = OnceLock::new();
+
+/// 8 MiB of word-like text (a fixed pseudo-random sequence of words), gzipped at level 6.
+fn big_gz() -> Vec<u8> {
+    use std::io::Write;
+    let mut seed: u64 = 1;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let words: Vec<String> = (0..5000).map(|_| (0..2 + next() % 8).map(|_| (b'a' + (next() % 26) as u8) as char).collect()).collect();
+    let mut text = Vec::with_capacity(8 << 20);
+    while text.len() < 8 << 20 {
+        text.extend_from_slice(words[(next() % 5000) as usize].as_bytes());
+        text.push(b' ');
+    }
+    text.truncate(8 << 20);
+    let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(6));
+    e.write_all(&text).unwrap();
+    e.finish().unwrap()
+}
 
 fn main() {
     let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(3000);
     let workers: usize = std::env::var("WORKERS").ok().and_then(|w| w.parse().ok()).unwrap_or(4);
     // /big: 8 MiB of text
     BIG.set((0..8 << 20).map(|i| b'a' + (i % 26) as u8).collect()).unwrap();
+    // /big.gz: 8 MiB of text, sent gzipped (the client decodes it)
+    BIG_GZ.set(big_gz()).unwrap();
     let app = Router::new()
         .route("/", get(|| async { "Hello, World!" }))
         .route("/json", get(|| async { Json(User { id: 1, name: "Ada Lovelace", email: "ada@example.com" }) }))
         .route("/echo", post(|body: String| async { body }))
-        .route("/big", get(|| async { BIG.get().unwrap().as_slice() }));
+        .route("/big", get(|| async { BIG.get().unwrap().as_slice() }))
+        .route("/big.gz", get(|| async { ([("content-encoding", "gzip"), ("content-type", "text/plain")], BIG_GZ.get().unwrap().as_slice()) }));
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(workers).enable_all().build().unwrap();
     // TLS_PORT: the same routes over HTTPS, with tests/fetch/tls's certificate (for localhost,
     // signed by its test CA)

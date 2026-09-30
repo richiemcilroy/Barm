@@ -31,6 +31,7 @@ SCENARIOS = [
     ("echo-64", "echo", 64, 100000, False),
     ("big-1", "big", 1, 100, False),
     ("big-8", "big", 8, 200, False),
+    ("gzip-1", "gzip", 1, 100, False),
     ("tls-hello-1", "hello", 1, 20000, True),
     ("tls-hello-64", "hello", 64, 100000, True),
     ("tls-new-1", "close", 1, 2000, True),

@@ -15,6 +15,7 @@ The same client program calls one server from Barm, Bun, Node and Rust, and each
 | `echo-64` | 100,000 `POST /echo` with a 75-byte JSON body, read back with `text()`, 64 at once |
 | `big-1` | 100 downloads of 8 MiB, read with `text()`, one at a time |
 | `big-8` | 200 downloads of 8 MiB, 8 at once |
+| `gzip-1` | 100 downloads of 8 MiB of word-like text sent gzipped (3.8 MiB), decoded by `fetch()` and read with `text()` |
 | `tls-hello-1` | as `hello-1`, over HTTPS (TLS 1.3, one pooled connection) |
 | `tls-hello-64` | as `hello-64`, over HTTPS (64 connections) |
 | `tls-new-1` | 2,000 `GET /` over HTTPS with `Connection: close`: a new connection and handshake each time (sessions resume) |
@@ -44,6 +45,9 @@ Apple M4 Max, macOS, loopback. Each number is the median of 3 runs with clients 
 | big-8 | **1.29k req/s** | 1.18k | 0.33k | 0.33k | 0.70k |
 | cpu/request | **746 µs** | 1,361 µs | 4,834 µs | 3,026 µs | 4,447 µs |
 | peak RSS | **70.9 MB** | 196 MB | 513 MB | 135 MB | 236 MB |
+| gzip-1 | **78.9 req/s** (662 MB/s decoded) | 56.2 | 42.4 | 33.9 | 33.7 |
+| cpu/request | **11,532 µs** | 18,340 µs | 30,096 µs | 29,308 µs | 30,170 µs |
+| peak RSS | **15.0 MB** | 198 MB | 209 MB | 32.9 MB | 32.8 MB |
 
 HTTPS: the server is the same axum app behind rustls, using a certificate from `tests/fetch/tls` that every client trusts through `NODE_EXTRA_CA_CERTS`. Barm uses BoringSSL, as Bun does.
 
@@ -73,4 +77,5 @@ In `big-8`, Barm is 9% ahead of Bun on half the CPU and about a third of the mem
 - The client runs natively on the event loop. There are no per-request threads, and a request costs a few small allocations.
 - Connections are pooled per origin and reused most-recently-first. A request is one `sendmsg`, and the response is parsed incrementally from the socket.
 - A body with a `Content-Length` is read straight into the buffer that becomes the string: one copy, from the kernel.
+- A compressed body read whole is decoded in one pass when it's all in, by libdeflate (twice as fast as zlib) into a buffer reserved once. One read in chunks (`res.body`) is decoded as it arrives, by zlib, at most 4 MB ahead of the reader.
 - `text()` doesn't read the body again. Each chunk is checked as UTF-8 while it is still in cache, as it arrives. A second pass over an 8 MiB body evicted the cache the next transfer needed, and made downloads 4× slower.

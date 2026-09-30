@@ -17,6 +17,7 @@ async fn one(client: &reqwest::Client, mode: &str, base: &str) -> usize {
         "json" => client.get(format!("{base}/json")).send().await.unwrap().json::<User>().await.unwrap().id as usize,
         "echo" => client.post(format!("{base}/echo")).header("content-type", "application/json").body(PAYLOAD).send().await.unwrap().text().await.unwrap().len(),
         "big" => client.get(format!("{base}/big")).send().await.unwrap().text().await.unwrap().len(),
+        "gzip" => client.get(format!("{base}/big.gz")).send().await.unwrap().text().await.unwrap().len(),
         "close" => client.get(format!("{base}/")).header("connection", "close").send().await.unwrap().text().await.unwrap().len(),
         _ => client.get(format!("{base}/")).send().await.unwrap().text().await.unwrap().len(),
     }

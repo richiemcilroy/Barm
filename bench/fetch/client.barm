@@ -1,7 +1,8 @@
 // The fetch() benchmark client. The same code runs under Barm, Bun and Node:
 //   client <mode> <base> <requests> <concurrency>
 // mode: hello (GET /), json (GET /json, parsed), echo (POST a 75-byte JSON body), big (8 MiB),
-// close (GET / with `Connection: close`: a new connection, and TLS handshake, every time).
+// gzip (8 MiB of text sent gzipped, decoded by fetch()), close (GET / with `Connection: close`:
+// a new connection, and TLS handshake, every time).
 // `concurrency` loops each fetch one request at a time; it prints requests and milliseconds.
 const args = process.argv.slice(2)
 const mode = args[0] ?? "hello"
@@ -27,7 +28,7 @@ async function one(): Promise<number> throws Error {
     const t = try await r.text()
     return t === "" ? 0 : 1
   }
-  const t = try await (try await fetch(base + (mode === "big" ? "/big" : "/"))).text()
+  const t = try await (try await fetch(base + (mode === "big" ? "/big" : mode === "gzip" ? "/big.gz" : "/"))).text()
   return t === "" ? 0 : 1
 }
 
