@@ -14,6 +14,8 @@ type LabelTag = Box<dyn Fn(&Gen, crate::intern::Sym) -> Option<usize>>;
 pub(crate) enum FnBodyKind {
     Block(StmtId),
     Expr(ExprId),
+    /// An implicit constructor: only field initializers.
+    Init,
 }
 
 #[derive(Clone)]
@@ -60,6 +62,10 @@ pub(crate) struct Body {
     pub mutated: FxSet<u32>,
     /// Read-only (non-`inout`) parameters.
     pub params: FxSet<u32>,
+    /// In a derived class's constructor: the class whose field initializers run after `super(...)`.
+    pub ctor_class: Option<TyId>,
+    /// Enclosing `try` blocks of this function: (label of the handler, scope depth to unwind to).
+    pub handlers: Vec<(String, usize)>,
 }
 
 impl Body {
@@ -84,12 +90,12 @@ impl<'c, 'a> Gen<'c, 'a> {
         b.out.push('\n');
     }
 
-    fn open(&mut self, s: &str) {
+    pub(crate) fn open(&mut self, s: &str) {
         self.line(s);
         self.b().indent += 1;
     }
 
-    fn close(&mut self, s: &str) {
+    pub(crate) fn close(&mut self, s: &str) {
         self.b().indent -= 1;
         self.line(s);
     }
@@ -166,6 +172,104 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.b().temps.push(Vec::new());
     }
 
+    pub(crate) fn push_temps_pub(&mut self) {
+        self.push_temps();
+    }
+
+    pub(crate) fn pop_temps_pub(&mut self) {
+        self.pop_temps();
+    }
+
+    /// Starts emitting a helper function body outside any source function (thunks).
+    pub(crate) fn begin_scratch(&mut self, m: u32) {
+        self.bodies.push(Body {
+            m,
+            subst: FxMap::default(),
+            out: String::new(),
+            indent: 1,
+            locals: FxMap::default(),
+            scopes: vec![Scope { releases: Vec::new() }],
+            temps: vec![Vec::new()],
+            ret: VOID,
+            loops: Vec::new(),
+            breaks: Vec::new(),
+            boxed: FxSet::default(),
+            stack_arrows: FxSet::default(),
+            unique: FxSet::default(),
+            mutated: FxSet::default(),
+            params: FxSet::default(),
+            ctor_class: None,
+            handlers: Vec::new(),
+        });
+    }
+
+    /// Returns `v` (as `ret`, owned) from a scratch body, releasing its temporaries first.
+    pub(crate) fn scratch_return(&mut self, v: Val, ret: TyId) {
+        if ret == VOID {
+            self.release_all_temps();
+            self.line("return;");
+            return;
+        }
+        let v = self.coerce(v, ret);
+        let code = self.consume(v);
+        let ct = self.ctype(ret);
+        self.line(format!("{ct} r_ = {code};"));
+        self.release_all_temps();
+        self.line("return r_;");
+    }
+
+    pub(crate) fn end_scratch(&mut self) -> String {
+        self.bodies.pop().unwrap().out
+    }
+
+    /// After a call that can throw: on an error, clean up and jump to the handler (or return).
+    pub(crate) fn error_check(&mut self) {
+        self.open("if (__builtin_expect(bmg_err != NULL, 0)) {");
+        self.error_path();
+        self.close("}");
+    }
+
+    /// Leaves the current point with `bmg_err` set: releases temporaries and the scopes being
+    /// left, then jumps to the enclosing `try` handler, or returns (the caller checks `bmg_err`).
+    fn error_path(&mut self) {
+        self.release_all_temps();
+        match self.b().handlers.last().cloned() {
+            Some((label, depth)) => {
+                self.unwind_to(depth);
+                self.line(format!("goto {label};"));
+            }
+            None => {
+                self.unwind_to(0);
+                let ret = self.b().ret;
+                if ret == VOID {
+                    self.line("return;");
+                } else {
+                    let d = self.default_value(ret);
+                    self.line(format!("return {d};"));
+                }
+            }
+        }
+    }
+
+    /// The base class type of a class type, if any.
+    pub(crate) fn class_base_of(&mut self, cls: TyId) -> Option<TyId> {
+        let (c, args) = self.c.class_of(cls)?;
+        let info = &self.c.classes[c as usize];
+        let base = info.base?;
+        let map: FxMap<u32, TyId> = info.params.iter().copied().zip(args).collect();
+        Some(self.c.types.subst(base, &map))
+    }
+
+    /// A local, parameter or field path of one (not a temporary).
+    pub(crate) fn is_place_expr(&self, e: ExprId) -> bool {
+        let m = self.cur_m();
+        match &self.ast(m).expr(e).kind {
+            ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Member { obj: x, .. } | ExprKind::Index { obj: x, .. } => self.is_place_expr(*x),
+            ExprKind::Ident(_) | ExprKind::This => true,
+            _ => false,
+        }
+    }
+
     fn pop_temps(&mut self) {
         let temps = self.b().temps.pop().unwrap();
         for (name, ty) in temps.into_iter().rev() {
@@ -212,7 +316,20 @@ impl<'c, 'a> Gen<'c, 'a> {
     // ------------------------------------------------------------ bodies
 
     /// Emits a function body; returns the C statements (without braces).
-    pub(crate) fn function_body(&mut self, m: u32, subst: FxMap<u32, TyId>, params: &[(u32, TyId, bool)], ret: TyId, kind: FnBodyKind, entry_unique: Option<Vec<u32>>) -> String {
+    /// `this`: (declaration key, class type) for methods and constructors; `ctor_class`: the class
+    /// whose field initializers this constructor runs.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn function_body(
+        &mut self,
+        m: u32,
+        subst: FxMap<u32, TyId>,
+        params: &[(u32, TyId, bool)],
+        ret: TyId,
+        kind: FnBodyKind,
+        entry_unique: Option<Vec<u32>>,
+        this: Option<(u32, TyId)>,
+        ctor_class: Option<TyId>,
+    ) -> String {
         let (boxed, stack_arrows, mutated) = self.analyze_closures(m, &kind);
         let mut body = Body {
             m,
@@ -230,13 +347,26 @@ impl<'c, 'a> Gen<'c, 'a> {
             unique: FxSet::default(),
             mutated,
             params: params.iter().filter(|p| !p.2).map(|p| p.0).collect(),
+            ctor_class,
+            handlers: Vec::new(),
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
             let access = if inout { format!("(*p{i})") } else { format!("p{i}") };
             body.locals.insert(key, Local { access, ty });
         }
+        if let Some((key, ty)) = this {
+            body.locals.insert(key, Local { access: "self_".into(), ty });
+            body.params.insert(key);
+        }
         body.unique.extend(entry_unique.unwrap_or_default());
         self.bodies.push(body);
+        // Constructors of classes without a base class run their field initializers first.
+        if let Some(cls) = ctor_class
+            && (matches!(kind, FnBodyKind::Init) || self.class_base_of(cls).is_none())
+        {
+            self.b().ctor_class = None;
+            self.emit_field_inits(cls);
+        }
         // Parameters captured by heap closures and reassigned move into cells.
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
             if !inout && self.b().boxed.contains(&key) {
@@ -275,6 +405,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.line("return r_;");
                 }
             }
+            FnBodyKind::Init => self.unwind_to(0),
         }
         let b = self.bodies.pop().unwrap();
         b.out
@@ -318,6 +449,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         match kind {
             FnBodyKind::Block(s) => collect_exprs_stmt(ast, *s, &mut exprs),
             FnBodyKind::Expr(e) => collect_exprs_expr(ast, *e, &mut exprs),
+            FnBodyKind::Init => {}
         }
         let facts = self.facts(m);
         let mut stack_arrows = FxSet::default();
@@ -532,15 +664,27 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
     }
 
-    /// A place path (`p`, `p.a.b`) whose root is a read-only parameter or a local that never changes.
-    fn stable_path(&self, e: ExprId) -> bool {
+    /// A place path (`p`, `p.a.b`) whose root is a read-only parameter, `this` or a local that
+    /// never changes, and whose steps through class instances are `readonly` fields.
+    fn stable_path(&mut self, e: ExprId) -> bool {
         let m = self.cur_m();
         let ast = self.ast(m);
         let mut cur = e;
         loop {
             match &ast.expr(cur).kind {
                 ExprKind::Paren(x) => cur = *x,
-                ExprKind::Member { obj, optional: false, .. } => cur = *obj,
+                ExprKind::This => return true,
+                ExprKind::Member { obj, name, optional: false, .. } => {
+                    let ot = self.ty(*obj);
+                    let ot = self.c.types.without_undefined(ot);
+                    if self.c.class_of(ot).is_some() {
+                        match self.c.class_member(ot, *name) {
+                            Some(crate::check::class::ClassMemberRef::Field(f)) if f.readonly && !f.weak => {}
+                            _ => return false,
+                        }
+                    }
+                    cur = *obj
+                }
                 ExprKind::Ident(_) => {
                     return match self.ident_fact(m, cur) {
                         Some(IdentFact::Local(k)) => {
@@ -749,6 +893,15 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.close("}");
             }
             StmtKind::Switch(disc, cases) => self.switch(s, *disc, cases),
+            StmtKind::Throw(x) => {
+                self.push_temps();
+                let v = self.expr(*x);
+                let code = self.consume(v);
+                self.line(format!("bmg_err = (void *)({code});"));
+                self.error_path();
+                self.pop_temps_silent();
+            }
+            StmtKind::Try { body, catch, finally } => self.try_stmt(s, *body, catch.as_ref(), *finally),
             StmtKind::Return(v) => {
                 let ret = self.b().ret;
                 match v {
@@ -802,6 +955,90 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.line(format!("goto {label};"));
             }
         }
+    }
+
+    /// Drops the current temp scope without emitting releases (after a path that already left).
+    fn pop_temps_silent(&mut self) {
+        self.b().temps.pop();
+    }
+
+    /// `try { } catch (e) { } finally { }`: errors in the block jump to the handler label.
+    fn try_stmt(&mut self, s: StmtId, body: StmtId, catch: Option<&ast::Catch>, finally: Option<StmtId>) {
+        let m = self.cur_m();
+        let (lcatch, lend, lfin) = (self.fresh("catch"), self.fresh("tryend"), self.fresh("finerr"));
+        let pend = finally.map(|_| {
+            let p = self.fresh("pend");
+            self.line(format!("void *{p} = NULL;"));
+            p
+        });
+        let depth = self.b().scopes.len();
+        self.b().handlers.push((lcatch.clone(), depth));
+        self.scoped_block(body);
+        self.b().handlers.pop();
+        self.line(format!("goto {lend};"));
+        self.line(format!("{lcatch}:;"));
+        match catch {
+            Some(c) => {
+                self.open("{");
+                self.push_scope();
+                let ev = self.fresh("err");
+                self.line(format!("void *{ev} = bmg_err; bmg_err = NULL;"));
+                match &c.param {
+                    Some((name, nspan, _)) => {
+                        let ty = self.facts(m).bindings.get(&s).copied().unwrap_or(ERROR);
+                        let ty = self.inst(ty);
+                        let ct = self.ctype(ty);
+                        let uniq = self.fresh("");
+                        let var = format!("v_{}_{}", self.sym(*name), uniq);
+                        self.line(format!("{ct} {var} = ({ct}){ev};"));
+                        let rel = format!("{};", self.release_code(ty, &var));
+                        self.b().scopes.last_mut().unwrap().releases.push(rel);
+                        self.b().locals.insert(nspan.start, Local { access: var, ty });
+                    }
+                    None => self.line(format!("bmg_obj_release({ev});")),
+                }
+                if finally.is_some() {
+                    self.b().handlers.push((lfin.clone(), depth));
+                }
+                let cm = self.cur_m();
+                if let StmtKind::Block(ss) = &self.ast(cm).stmt(c.body).kind {
+                    for &x in ss {
+                        self.stmt(x);
+                    }
+                } else {
+                    self.stmt(c.body);
+                }
+                if finally.is_some() {
+                    self.b().handlers.pop();
+                }
+                self.pop_scope();
+                self.close("}");
+                self.line(format!("goto {lend};"));
+                if let Some(p) = &pend {
+                    self.line(format!("{lfin}:; {p} = bmg_err; bmg_err = NULL;"));
+                }
+            }
+            None => {
+                if let Some(p) = &pend {
+                    self.line(format!("{p} = bmg_err; bmg_err = NULL;"));
+                }
+            }
+        }
+        self.line(format!("{lend}:;"));
+        if let (Some(f), Some(p)) = (finally, pend) {
+            self.scoped_block(f);
+            self.open(&format!("if ({p} != NULL) {{"));
+            self.line(format!("bmg_err = {p};"));
+            self.error_path();
+            self.close("}");
+        }
+    }
+
+    /// A block statement in its own C block and scope.
+    fn scoped_block(&mut self, s: StmtId) {
+        self.open("{");
+        self.scoped_stmt(s);
+        self.close("}");
     }
 
     /// A statement in its own scope (branches of `if`).
@@ -872,7 +1109,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                         }
                     }
                     if ok {
-                        result = (Some(format!("({}).tag", base.code)), Box::new(move |_, l| map.iter().find(|(s, _)| *s == l).map(|(_, i)| *i)));
+                        result = (Some(self.u_tag(&base.code, base.ty)), Box::new(move |_, l| map.iter().find(|(s, _)| *s == l).map(|(_, i)| *i)));
                     }
                 }
             }
@@ -882,7 +1119,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let ms = self.c.types.tys(ms).to_vec();
                     if ms.iter().all(|&x| matches!(self.tget(x), Ty::StrLit(_))) {
                         let lits: Vec<(crate::intern::Sym, usize)> = ms.iter().enumerate().map(|(i, &x)| (if let Ty::StrLit(l) = self.tget(x) { l } else { unreachable!() }, i)).collect();
-                        result = (Some(format!("({}).tag", v.code)), Box::new(move |_, l| lits.iter().find(|(s, _)| *s == l).map(|(_, i)| *i)));
+                        result = (Some(self.u_tag(&v.code, v.ty)), Box::new(move |_, l| lits.iter().find(|(s, _)| *s == l).map(|(_, i)| *i)));
                     }
                 }
                 if result.0.is_none() {
@@ -1048,6 +1285,17 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             ExprKind::Call { .. } => self.call(e),
             ExprKind::New { callee, args, .. } => {
+                if let Some(fact) = self.facts(m).calls.get(&e).cloned()
+                    && let Callee::New(_) = fact.callee
+                {
+                    let params: Vec<FnParam> = fact.params.iter().map(|p| FnParam { ty: self.inst(p.ty), ..*p }).collect();
+                    let cls = self.inst(fact.ret);
+                    let v = self.new_object(e, cls, args, &params, span);
+                    if self.facts(m).throwing.contains(&e) {
+                        self.error_check();
+                    }
+                    return self.coerce(v, ty);
+                }
                 let name = match &ast.expr(*callee).kind {
                     ExprKind::Ident(s) => self.sym(*s).to_string(),
                     _ => String::new(),
@@ -1073,6 +1321,16 @@ impl<'c, 'a> Gen<'c, 'a> {
             ExprKind::Index { obj, index, optional } => self.index(*obj, *index, *optional, ty, span),
             ExprKind::Object(fields) => {
                 let target = self.c.unfold(ty);
+                // Checked against an interface: build a record with the interface's members, then wrap it.
+                let target = if let Ty::Interface(..) = self.tget(target) {
+                    let ms = self.iface_members(target);
+                    let order: Vec<crate::intern::Sym> = ms.iter().map(|f| f.name).collect();
+                    let rt = self.c.types.record(ms);
+                    self.c.types.note_field_order(rt, order);
+                    rt
+                } else {
+                    target
+                };
                 let Ty::Record(fs) = self.tget(target) else {
                     self.unsupported(span, "an object literal of this type");
                     return Val::plain("0", ty);
@@ -1185,6 +1443,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let v = self.expr(*x);
                 self.typeof_str(v)
             }
+            ExprKind::This => self.ident(e, ty),
+            ExprKind::Try(x) => self.expr(*x),
+            ExprKind::Super => Val::plain("0", ty),
         }
     }
 
@@ -1225,6 +1486,20 @@ impl<'c, 'a> Gen<'c, 'a> {
         if v.ty == to || to == ERROR {
             return v;
         }
+        // Narrowed by `instanceof`: a class viewed as a subclass (or a union member downcast).
+        if let Ty::Class(tc, _) = self.tget(to) {
+            match self.tget(v.ty) {
+                Ty::Class(..) => return self.class_cast(v, to),
+                Ty::Union(ms) => {
+                    let ms = self.c.types.tys(ms).to_vec();
+                    if let Some(k) = ms.iter().position(|&m| matches!(self.tget(m), Ty::Class(mc, _) if self.c.class_descends(tc, mc))) {
+                        let payload = Val { code: self.u_payload(&v.code, v.ty, k), ty: ms[k], owned: false };
+                        return self.class_cast(payload, to);
+                    }
+                }
+                _ => {}
+            }
+        }
         if matches!(self.tget(v.ty), Ty::Rec(..)) {
             let u = self.unfold_val(v);
             return self.project(u, to);
@@ -1234,7 +1509,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 if self.is_unit(to) {
                     return Val::plain("0", to);
                 }
-                return Val { code: format!("({}).u.m{k}", v.code), ty: to, owned: false };
+                return Val { code: self.u_payload(&v.code, v.ty, k), ty: to, owned: false };
             }
             // Narrowed to a smaller union: re-tag (members outside the target can't occur here).
             if let Ty::Union(fms) = self.tget(v.ty)
@@ -1272,6 +1547,16 @@ impl<'c, 'a> Gen<'c, 'a> {
             (Ty::Undefined, Ty::Void) | (Ty::Void, Ty::Undefined) => return Val::plain("0", to),
             _ => {}
         }
+        // Class to class (upcast): a pointer cast.
+        if let (Ty::Class(..), Ty::Class(..)) = (tf, tt) {
+            return self.class_cast(v, to);
+        }
+        // Into an interface value (a fat pointer).
+        if let (Ty::Record(_) | Ty::Class(..) | Ty::Interface(..), Ty::Interface(..)) = (tf, tt)
+            && let Some(iv) = self.wrap_iface(v.clone(), to)
+        {
+            return iv;
+        }
         // Recursive aliases: box / unbox.
         if let Ty::Rec(..) = tt {
             let inner = self.c.unfold(to);
@@ -1295,12 +1580,13 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
             }
             if let Some(k) = members.iter().position(|&mt| mt == from) {
-                let ct = self.ctype(to);
                 if self.is_unit(from) {
-                    return self.tmp(to, &format!("({ct}){{ .tag = {k} }}"), false);
+                    let u = self.u_make(to, k, None);
+                    return self.tmp(to, &u, false);
                 }
                 let code = self.consume(v);
-                return self.tmp(to, &format!("({ct}){{ .tag = {k}, .u.m{k} = {code} }}"), true);
+                let u = self.u_make(to, k, Some(&code));
+                return self.tmp(to, &u, true);
             }
             if let Some(mt) = self.member_target(to, from) {
                 let mv = self.coerce(v, mt);
@@ -1387,25 +1673,34 @@ impl<'c, 'a> Gen<'c, 'a> {
         let ct = self.ctype(to);
         let res = self.fresh("u");
         self.line(format!("{ct} {res};"));
-        self.open(&format!("switch (({}).tag) {{", v.code));
+        let tag = self.u_tag(&v.code, v.ty);
+        self.open(&format!("switch ({tag}) {{"));
         for (i, &fm) in fms.iter().enumerate() {
-            let Some(mt) = self.member_target(to, fm) else { continue };
+            let target = self.member_target(to, fm).or_else(|| {
+                // After `instanceof`: a base-class member becomes a subclass member.
+                let Ty::Class(fc, _) = self.tget(fm) else { return None };
+                self.members(to).into_iter().find(|&t| matches!(self.tget(t), Ty::Class(tc, _) if self.c.class_descends(tc, fc)))
+            });
+            let Some(mt) = target else { continue };
             let k = self.tag_of(to, mt).unwrap();
             self.open(&format!("case {i}: {{"));
             self.push_temps();
             if self.is_unit(mt) {
-                self.line(format!("{res}.tag = {k};"));
+                let u = self.u_make(to, k, None);
+                self.line(format!("{res} = {u};"));
             } else {
-                let payload = if self.is_unit(fm) { Val::plain("0", fm) } else { Val::plain(format!("({}).u.m{i}", v.code), fm) };
-                let cv = self.coerce(payload, mt);
+                let payload = if self.is_unit(fm) { Val::plain("0", fm) } else { Val::plain(self.u_payload(&v.code, v.ty, i), fm) };
+                let cv = if matches!((self.tget(fm), self.tget(mt)), (Ty::Class(..), Ty::Class(..))) { self.class_cast(payload, mt) } else { self.coerce(payload, mt) };
                 let code = self.consume(cv);
-                self.line(format!("{res}.tag = {k}; {res}.u.m{k} = {code};"));
+                let u = self.u_make(to, k, Some(&code));
+                self.line(format!("{res} = {u};"));
             }
             self.pop_temps();
             self.line("break;");
             self.close("}");
         }
-        self.line(format!("default: {res}.tag = 0; break;"));
+        let dv = self.default_value(to);
+        self.line(format!("default: {res} = {dv}; break;"));
         self.close("}");
         let owned = self.is_rc(to);
         if owned {
@@ -1419,13 +1714,21 @@ impl<'c, 'a> Gen<'c, 'a> {
         if v.ty == to {
             return v;
         }
+        if let (Ty::Class(fc, _), Ty::Class(tc, _)) = (self.tget(v.ty), self.tget(to))
+            && !self.c.class_descends(fc, tc)
+        {
+            let isa = self.instanceof_code(v.clone(), tc);
+            let loc = self.loc(span);
+            self.line(format!("if (!{isa}) bm_trap(\"`as` cast failed: the object is a different class\", {loc});"));
+            return self.class_cast(v, to);
+        }
         let v = if matches!(self.tget(v.ty), Ty::Rec(..)) { self.unfold_val(v) } else { v };
         if let Ty::Union(_) = self.tget(v.ty) {
             let fms = self.members(v.ty);
             let allowed: Vec<usize> = fms.iter().enumerate().filter(|(_, fm)| **fm == to || self.members(to).contains(fm)).map(|(i, _)| i).collect();
             if !allowed.is_empty() {
                 let loc = self.loc(span);
-                let conds: Vec<String> = allowed.iter().map(|i| format!("({}).tag != {i}", v.code)).collect();
+                let conds: Vec<String> = allowed.iter().map(|&i| format!("!{}", self.u_is(&v.code, v.ty, i))).collect();
                 let msg = if to == self.c.types.without_undefined(v.ty) { "value is undefined (`!` assertion failed)" } else { "`as` cast failed: the value has a different type" };
                 self.line(format!("if ({}) bm_trap({}, {loc});", conds.join(" && "), c_string(msg.as_bytes())));
                 return self.project(v, to);
@@ -1454,7 +1757,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             let ms = self.c.types.tys(ms).to_vec();
             let res = self.fresh("s");
             self.line(format!("bm_str {res};"));
-            self.open(&format!("switch (({}).tag) {{", v.code));
+            let tag = self.u_tag(&v.code, v.ty);
+            self.open(&format!("switch ({tag}) {{"));
             for (i, &m) in ms.iter().enumerate() {
                 let n = name(&self.c.types, m);
                 let l = self.lit(n.as_bytes());
@@ -1484,7 +1788,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         let v = if matches!(self.tget(v.ty), Ty::Rec(..)) { return "true".into() } else { v };
         match self.tag_of(v.ty, UNDEFINED) {
-            Some(k) => format!("(({}).tag != {k})", v.code),
+            Some(k) => format!("(!{})", self.u_is(&v.code, v.ty, k)),
             None => "true".into(),
         }
     }
@@ -1625,7 +1929,18 @@ impl<'c, 'a> Gen<'c, 'a> {
                 };
                 Val::plain(code, ty)
             }
-            In | Instanceof => Val::plain("false", BOOL),
+            Instanceof => {
+                let v = self.expr(l);
+                let m = self.cur_m();
+                match self.ident_fact(m, r) {
+                    Some(IdentFact::Class(c)) => {
+                        let code = self.instanceof_code(v, c);
+                        Val::plain(code, BOOL)
+                    }
+                    _ => Val::plain("false", BOOL),
+                }
+            }
+            In => Val::plain("false", BOOL),
         }
     }
 
@@ -1696,11 +2011,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                 if let Some(mt) = target {
                     let k = self.tag_of(u.ty, mt).unwrap();
                     if self.is_unit(mt) {
-                        return format!("(({}).tag == {k})", u.code);
+                        return self.u_is(&u.code, u.ty, k);
                     }
                     let xv = self.coerce(x.clone(), mt);
-                    let inner = self.eq_code(mt, &format!("({}).u.m{k}", u.code), &xv.code);
-                    return format!("(({}).tag == {k} && {inner})", u.code);
+                    let inner = self.eq_code(mt, &self.u_payload(&u.code, u.ty, k), &xv.code);
+                    return format!("({} && {inner})", self.u_is(&u.code, u.ty, k));
                 }
                 if let Ty::Str = self.tget(x.ty) {
                     // Union of literals compared with a string: convert the union.
@@ -1731,6 +2046,22 @@ impl<'c, 'a> Gen<'c, 'a> {
                 return Val::plain(code, ty);
             }
             Some(MemberFact::NsConst(cm, ci)) => return self.const_ref(cm, ci),
+            Some(MemberFact::StaticField(c, mi)) => return self.static_field_ref(c, mi),
+            Some(MemberFact::Env(var)) => {
+                let lit = self.lit(self.sym(var).to_string().as_bytes());
+                let (ok, sv) = (self.fresh("ok"), self.fresh("ev"));
+                self.line(format!("bm_str {sv} = BM_EMPTY_STR; bool {ok} = bm_process_env({lit}, &{sv});"));
+                self.b().temps.last_mut().unwrap().push((sv.clone(), STR));
+                let v = Val { code: sv, ty: STR, owned: false };
+                return self.optional_from_pub(&ok, v, ty);
+            }
+            Some(MemberFact::MathConst) if matches!(&self.ast(m).expr(obj).kind, ExprKind::Ident(s) if self.sym(*s) == "process") => {
+                return match self.sym(name) {
+                    "argv" => self.tmp(ty, "bm_process_argv()", true),
+                    "platform" => self.tmp(STR, "bm_str_from(BMG_PLATFORM, sizeof(BMG_PLATFORM) - 1)", true),
+                    _ => Val::plain("0", ty),
+                };
+            }
             Some(MemberFact::MathConst) => {
                 let v = match self.sym(name) {
                     "PI" => "3.141592653589793",
@@ -1757,8 +2088,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             self.push_temps();
             let inner_ty = self.c.types.without_undefined(base.ty);
             let pb = self.project(base, inner_ty);
-            let field_ty = self.c.types.without_undefined(ty);
-            let fv = self.field(pb, name, field_ty, span);
+            // Read at the expression's type (which includes `undefined` unless narrowed):
+            // an optional field keeps its own presence tag.
+            let fv = self.field(pb, name, ty, span);
             let fv = self.coerce(fv, ty);
             let code = self.consume(fv);
             self.line(format!("{res} = {code};"));
@@ -1783,6 +2115,14 @@ impl<'c, 'a> Gen<'c, 'a> {
         let base = self.unfold_val(base);
         let n = self.sym(name).to_string();
         match self.tget(base.ty) {
+            Ty::Class(..) => self.class_field_read(base, name, ty, span),
+            Ty::Interface(..) => match self.iface_field(base, name, ty) {
+                Some(v) => v,
+                None => {
+                    self.unsupported(span, "using an interface method as a value");
+                    Val::plain("0", ty)
+                }
+            },
             Ty::Record(fs) => {
                 let f = self.c.types.fields(fs).iter().find(|f| f.name == name).copied();
                 let Some(f) = f else {
@@ -1804,11 +2144,12 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let res = self.fresh("f");
                 let ct = self.ctype(ty);
                 self.line(format!("{ct} {res};"));
-                self.open(&format!("switch (({}).tag) {{", base.code));
+                let tag = self.u_tag(&base.code, base.ty);
+                self.open(&format!("switch ({tag}) {{"));
                 for (i, &mt) in ms.iter().enumerate() {
                     self.open(&format!("case {i}: {{"));
                     self.push_temps();
-                    let payload = Val { code: format!("({}).u.m{i}", base.code), ty: mt, owned: false };
+                    let payload = Val { code: self.u_payload(&base.code, base.ty, i), ty: mt, owned: false };
                     let fv = self.field(payload, name, ty, span);
                     let fv = self.coerce(fv, ty);
                     let code = self.consume(fv);
@@ -1894,20 +2235,24 @@ impl<'c, 'a> Gen<'c, 'a> {
             ExprKind::Paren(x) | ExprKind::NonNull(x) => self.place(*x),
             ExprKind::Ident(_) => match self.ident_fact(m, e) {
                 Some(IdentFact::Local(k)) => match self.b().locals.get(&k).cloned() {
-                    Some(l) => Place { lv: l.access, ty: l.ty },
+                    Some(l) => Place { lv: l.access, ty: l.ty, weak: false },
                     None => {
                         self.unsupported(span, "assigning to this variable");
-                        Place { lv: "bm__dummy".into(), ty: ERROR }
+                        Place { lv: "bm__dummy".into(), ty: ERROR, weak: false }
                     }
                 },
                 _ => {
                     self.unsupported(span, "assigning to this name");
-                    Place { lv: "bm__dummy".into(), ty: ERROR }
+                    Place { lv: "bm__dummy".into(), ty: ERROR, weak: false }
                 }
             },
             ExprKind::Member { obj, name, .. } => {
-                let p = self.place(*obj);
                 let narrowed = self.ty(*obj);
+                let nt = self.c.types.without_undefined(narrowed);
+                if self.c.class_of(nt).is_some() {
+                    return self.class_field_place(*obj, *name, span);
+                }
+                let p = self.place(*obj);
                 let p = self.project_place(p, narrowed);
                 // Through a recursive alias: unbox (copy-on-write) to reach the record.
                 let p = if matches!(self.tget(p.ty), Ty::Rec(..)) {
@@ -1922,10 +2267,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                     _ => None,
                 };
                 match ft {
-                    Some(ft) => Place { lv: format!("({}).f_{n}", p.lv), ty: ft },
+                    Some(ft) => Place { lv: format!("({}).f_{n}", p.lv), ty: ft, weak: false },
                     None => {
                         self.unsupported(span, "assigning to this member");
-                        Place { lv: "bm__dummy".into(), ty: ERROR }
+                        Place { lv: "bm__dummy".into(), ty: ERROR, weak: false }
                     }
                 }
             }
@@ -1935,7 +2280,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let p = self.project_place(p, narrowed);
                 let Ty::Array(et) = self.tget(p.ty) else {
                     self.unsupported(span, "assigning through this index");
-                    return Place { lv: "bm__dummy".into(), ty: ERROR };
+                    return Place { lv: "bm__dummy".into(), ty: ERROR, weak: false };
                 };
                 let i = self.expr(*index);
                 let i = self.int_code(i);
@@ -1952,13 +2297,13 @@ impl<'c, 'a> Gen<'c, 'a> {
                 } else {
                     self.line(format!("{ect} *{pv} = ({ect} *)bmg_at_mut(&{}, {d}, sizeof({ect}), {i}, {loc});", p.lv));
                 }
-                Place { lv: format!("(*{pv})"), ty: et }
+                Place { lv: format!("(*{pv})"), ty: et, weak: false }
             }
             _ => {
                 // A temporary receiver (e.g. `xs.slice().sort()`): materialize it.
                 let v = self.expr(e);
                 let v = self.own(v);
-                Place { lv: v.code, ty: v.ty }
+                Place { lv: v.code, ty: v.ty, weak: false }
             }
         }
     }
@@ -1976,10 +2321,10 @@ impl<'c, 'a> Gen<'c, 'a> {
             let clone_inner = if self.is_rc(inner) { format!("{};", self.retain_code(inner, &format!("{bp}n->v"))) } else { String::new() };
             self.line(format!("{bn} **{bp} = &{};", p.lv));
             self.line(format!("if ((*{bp})->rc > 1) {{ {bn} *{bp}n = bmg_alloc_small(sizeof({bn})); {bp}n->rc = 1; {bp}n->v = (*{bp})->v; {clone_inner} (*{bp})->rc--; *{bp} = {bp}n; }}"));
-            return self.project_place(Place { lv: format!("(*{bp})->v"), ty: inner }, to);
+            return self.project_place(Place { lv: format!("(*{bp})->v"), ty: inner, weak: false }, to);
         }
         if let Some(k) = self.tag_of(p.ty, to) {
-            return Place { lv: format!("({}).u.m{k}", p.lv), ty: to };
+            return Place { lv: self.u_payload(&p.lv, p.ty, k), ty: to, weak: false };
         }
         p
     }
@@ -1989,6 +2334,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             AssignOp::Assign => {
                 let v = self.expr(value);
                 let p = self.place(target);
+                if p.weak {
+                    return self.weak_store(&p.lv, p.ty, v);
+                }
                 let v = self.coerce(v, p.ty);
                 let code = self.consume(v);
                 let ct = self.ctype(p.ty);
@@ -2187,6 +2535,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             unique: FxSet::default(),
             mutated: inner_mutated,
             params: params.iter().filter(|p| !p.2).map(|p| p.0).collect(),
+            ctor_class: None,
+            handlers: Vec::new(),
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
             let access = if inout { format!("(*p{i})") } else { format!("p{i}") };
@@ -2219,6 +2569,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.line("return r_;");
                 }
             }
+            FnBodyKind::Init => {}
         }
         self.bodies.pop().unwrap().out
     }
@@ -2227,6 +2578,8 @@ impl<'c, 'a> Gen<'c, 'a> {
 pub(crate) struct Place {
     pub lv: String,
     pub ty: TyId,
+    /// A weak class field (weak counts instead of strong ones).
+    pub weak: bool,
 }
 
 pub(crate) struct ArrowInfo {
@@ -2254,7 +2607,7 @@ fn arrow_captures(ast: &ast::Ast, facts: &crate::check::ModuleFacts, arrow: Expr
     collect_exprs_expr(ast, arrow, &mut exprs);
     let mut out: Vec<u32> = Vec::new();
     for e in exprs {
-        if let ExprKind::Ident(_) = ast.expr(e).kind
+        if let ExprKind::Ident(_) | ExprKind::This = ast.expr(e).kind
             && let Some(IdentFact::Local(k)) = facts.idents.get(&e)
             && (*k < span.start || *k >= span.end)
             && !out.contains(k)
@@ -2263,6 +2616,10 @@ fn arrow_captures(ast: &ast::Ast, facts: &crate::check::ModuleFacts, arrow: Expr
         }
     }
     out
+}
+
+pub(crate) fn collect_exprs_stmt_pub(ast: &ast::Ast, s: StmtId, out: &mut Vec<ExprId>) {
+    collect_exprs_stmt(ast, s, out)
 }
 
 fn collect_exprs_stmt(ast: &ast::Ast, s: StmtId, out: &mut Vec<ExprId>) {
