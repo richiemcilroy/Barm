@@ -184,6 +184,7 @@ pub(crate) struct Gen<'c, 'a> {
     pub(crate) statics_done: FxSet<(u32, u32)>,
     pub(crate) ctor_move_memo: FxMap<u32, Vec<bool>>,
     pub(crate) weak_memo: FxMap<u32, bool>,
+    pub(crate) weak_slot_memo: FxMap<u32, bool>,
     /// Helper functions whose prototypes are in `protos`, emitted with the helpers.
     pub(crate) helpers_after_decl: String,
     /// Box types whose struct bodies are still to be defined.
@@ -260,6 +261,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             statics_done: FxSet::default(),
             ctor_move_memo: FxMap::default(),
             weak_memo: FxMap::default(),
+            weak_slot_memo: FxMap::default(),
             helpers_after_decl: String::new(),
             pending_boxes: Vec::new(),
             itabs: FxMap::default(),
@@ -654,7 +656,16 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         let ui = ms.iter().position(|&m| m == UNDEFINED)?;
         let pi = 1 - ui;
-        matches!(self.tget(ms[pi]), Ty::Class(..)).then_some((pi, ui))
+        // A class instance or a recursive alias's box: a pointer, with NULL for `undefined`.
+        matches!(self.tget(ms[pi]), Ty::Class(..) | Ty::Rec(..)).then_some((pi, ui))
+    }
+
+    /// The recursive-alias member of a niche union (`Tree | undefined`), if that's what it holds.
+    pub(crate) fn niche_rec(&self, u: TyId) -> Option<TyId> {
+        let (pi, _) = self.niche(u)?;
+        let Ty::Union(ms) = self.tget(u) else { return None };
+        let m = self.c.types.tys(ms)[pi];
+        matches!(self.tget(m), Ty::Rec(..)).then_some(m)
     }
 
     /// The tag of a union value (for `switch`).
@@ -942,6 +953,11 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Promise(..) => format!("bm_promise_retain({place})"),
             Ty::Class(..) => format!("bmg_obj_retain({place})"),
             Ty::Interface(..) => format!("bm_iface_retain({place})"),
+            Ty::Union(_) if self.niche_rec(t).is_some() => {
+                let m = self.niche_rec(t).unwrap();
+                let inner = self.retain_code(m, place);
+                format!("({{ if (({place}) != NULL) {inner}; }})")
+            }
             Ty::Union(_) if self.niche(t).is_some() => format!("bmg_obj_retain({place})"),
             _ if self.is_rc(t) => {
                 self.ensure_helper(t, H_RC);
@@ -970,6 +986,11 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Promise(..) => format!("bm_promise_release({place})"),
             Ty::Class(..) => self.class_release_code(t, place),
             Ty::Interface(..) => format!("bm_iface_release({place})"),
+            Ty::Union(_) if self.niche_rec(t).is_some() => {
+                let m = self.niche_rec(t).unwrap();
+                let inner = self.release_code(m, place);
+                format!("({{ if (({place}) != NULL) {inner}; }})")
+            }
             Ty::Union(ms) if self.niche(t).is_some() => {
                 let (pi, _) = self.niche(t).unwrap();
                 let m = self.c.types.tys(ms)[pi];
@@ -994,6 +1015,12 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Func(..) => format!("(({a}).fn == ({b}).fn && ({a}).env == ({b}).env)"),
             Ty::Class(..) | Ty::Promise(..) => format!("((void *)({a}) == (void *)({b}))"),
             Ty::Interface(..) => format!("(({a}).p == ({b}).p)"),
+            Ty::Union(_) if self.niche_rec(t).is_some() => {
+                // values: equal when both are undefined, or both hold equal trees
+                let m = self.niche_rec(t).unwrap();
+                let inner = self.eq_code(m, a, b);
+                format!("((({a}) == NULL || ({b}) == NULL) ? (({a}) == ({b})) : {inner})")
+            }
             Ty::Union(_) if self.niche(t).is_some() => format!("((void *)({a}) == (void *)({b}))"),
             Ty::Record(_) | Ty::Union(_) | Ty::Rec(..) => {
                 self.ensure_helper(t, H_EQ);
@@ -1032,7 +1059,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Union(ms) if self.niche(t).is_some() => {
                 let (pi, _) = self.niche(t).unwrap();
                 let m = self.c.types.tys(ms)[pi];
-                let inner = self.class_string_code(m, place);
+                let inner = if self.niche_rec(t).is_some() { self.string_code(m, place) } else { self.class_string_code(m, place) };
                 format!("({{ if (({place}) != NULL) {inner}; else bm_sb_push_cstr(sb, \"undefined\"); }})")
             }
             Ty::Map(..) | Ty::Set(_) => format!("({})->to_str(sb, &({place}))", self.desc(t)),
@@ -1071,6 +1098,11 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Func(..) => "bm_sb_push_cstr(sb, \"[Function (anonymous)]\")".into(),
             Ty::Class(..) => format!("bmg_obj_inspect(sb, (void *)({place}), {depth})"),
             Ty::Interface(..) => format!("(({place}).t ? ({place}).t->inspect(sb, ({place}).p, {depth}) : bm_sb_push_cstr(sb, \"undefined\"))"),
+            Ty::Union(_) if self.niche_rec(t).is_some() => {
+                let m = self.niche_rec(t).unwrap();
+                let inner = self.inspect_code(m, place, depth);
+                format!("({{ if (({place}) != NULL) {inner}; else bm_sb_push_cstr(sb, \"undefined\"); }})")
+            }
             Ty::Union(_) if self.niche(t).is_some() => format!("({{ if (({place}) != NULL) bmg_obj_inspect(sb, (void *)({place}), {depth}); else bm_sb_push_cstr(sb, \"undefined\"); }})"),
             _ => {
                 self.ensure_helper(t, H_INSPECT);
@@ -1116,6 +1148,11 @@ impl<'c, 'a> Gen<'c, 'a> {
             let hash = match self.tget(t) {
                 Ty::Class(..) => "((uint64_t)(uintptr_t)(*(void *const *)p) * 0x9E3779B97F4A7C15ull)".into(),
                 Ty::Interface(..) => "((uint64_t)(uintptr_t)(((const bm_iface *)p)->p) * 0x9E3779B97F4A7C15ull)".into(),
+                Ty::Union(_) if self.niche_rec(t).is_some() => {
+                    let m = self.niche_rec(t).unwrap();
+                    self.ensure_helper(m, H_HASH);
+                    format!("(*(void *const *)p == NULL ? 0x9E3779B97F4A7C15ull : hs_{}(p))", self.box_name(m))
+                }
                 Ty::Union(_) if self.niche(t).is_some() => "((uint64_t)(uintptr_t)(*(void *const *)p) * 0x9E3779B97F4A7C15ull)".into(),
                 Ty::Record(_) | Ty::Union(_) | Ty::Rec(..) => {
                     self.ensure_helper(t, H_HASH);
@@ -1413,11 +1450,13 @@ typedef uint8_t bm_unit;
 #define BMG_LIT(name) ((bm_str){&(name)})
 /* Small-object allocator for boxes and cells (sizes known at every call site): per-size-class
  * free lists refilled from 64 KiB slabs. Memory is reused, never returned to malloc. */
-enum { BMG_CLASSES = 33 };
+/* 8-byte size classes (up to 512 bytes): a 24-byte tree node takes 24 bytes. Everything
+ * allocated here needs only 8-byte alignment. */
+enum { BMG_CLASSES = 65 };
 typedef struct bmg_free_node { struct bmg_free_node *next; } bmg_free_node;
 static bmg_free_node *bmg_bins[BMG_CLASSES];
 static __attribute__((noinline)) void *bmg_refill(size_t c) {
-    size_t sz = c * 16, n = 65536 / sz;
+    size_t sz = c * 8, n = 65536 / sz;
     char *slab = bm_alloc(n * sz);
     for (size_t i = n - 1; i >= 1; i--) {
         bmg_free_node *f = (bmg_free_node *)(void *)(slab + i * sz);
@@ -1433,7 +1472,7 @@ static inline void *bmg_alloc_small(size_t size) {
 #ifdef BMG_PLAIN_ALLOC
     return bm_alloc(size);
 #endif
-    size_t c = (size + 15) >> 4;
+    size_t c = (size + 7) >> 3;
     if (__builtin_expect(c >= BMG_CLASSES, 0)) return bm_alloc(size);
     bmg_free_node *f = bmg_bins[c];
     if (__builtin_expect(f != NULL, 1)) { bmg_bins[c] = f->next; return f; }
@@ -1474,23 +1513,28 @@ typedef struct bm_iface { void *p; const bmg_itab *t; } bm_iface;
 static inline void bm_iface_retain(bm_iface v) { if (v.t) v.t->retain(v.p); }
 static inline void bm_iface_release(bm_iface v) { if (v.t) v.t->release(v.p); }
 /* Class instances: a 16-byte header, then fields (a subclass embeds its base first). */
-typedef struct bmg_obj { int32_t rc; int32_t weak; uint32_t cid; uint32_t flags; } bmg_obj;
+/* Every class instance starts with an 8-byte header. Classes that weak references (or the cycle
+ * collector) can reach also count weak references, in a slot right after the header (the root
+ * of the hierarchy has it, so its offset is the same in every subclass). */
+typedef struct bmg_obj { int32_t rc; uint16_t cid; uint16_t flags; } bmg_obj;
+typedef struct bmg_objw { bmg_obj h; int32_t weak; int32_t pad_; } bmg_objw;
+#define BMG_WEAK(p) (((bmg_objw *)(void *)(p))->weak)
 static void bmg_obj_drop(void *p);
 static void bmg_obj_free(void *p);
 static void bmg_obj_inspect(bm_sb *sb, void *p, int depth);
-#define bmg_obj_init(o, id) (*(bmg_obj *)(void *)(o) = (bmg_obj){1, 0, (id), 0})
+#define bmg_obj_init(o, id) (*(bmg_obj *)(void *)(o) = (bmg_obj){1, (uint16_t)(id), 0})
 static inline void bmg_obj_retain(void *p) { if (p) ((bmg_obj *)p)->rc++; }
 /* A function value adapted to another function type: the environment holds the original. */
 typedef struct bmg_fnbox { bm_env h; bm_fn f; } bmg_fnbox;
 static void bmg_fnbox_drop(bm_env *e) { bm_env_release(((bmg_fnbox *)e)->f.env); }
 static inline void bmg_obj_release(void *p) { if (p && --((bmg_obj *)p)->rc == 0) bmg_obj_drop(p); }
-static inline void bmg_weak_retain(void *p) { if (p) ((bmg_obj *)p)->weak++; }
-static inline void bmg_weak_release(void *p) { if (p && --((bmg_obj *)p)->weak == 0 && ((bmg_obj *)p)->rc <= 0) bmg_obj_free(p); }
+static inline void bmg_weak_retain(void *p) { if (p) BMG_WEAK(p)++; }
+static inline void bmg_weak_release(void *p) { if (p && --BMG_WEAK(p) == 0 && ((bmg_obj *)p)->rc <= 0) bmg_obj_free(p); }
 static inline void bmg_free_small(void *p, size_t size) {
 #ifdef BMG_PLAIN_ALLOC
     bm_free(p); return;
 #endif
-    size_t c = (size + 15) >> 4;
+    size_t c = (size + 7) >> 3;
     if (__builtin_expect(c >= BMG_CLASSES, 0)) { bm_free(p); return; }
     bmg_free_node *f = p;
     f->next = bmg_bins[c];
@@ -1534,13 +1578,13 @@ static bmg_gcb *bmg_gcb_find(void *buf, int *fresh) {
         if (!bmg_gcb_tab) bm_trap("out of memory", "cycle collector");
         bmg_gcb_cap = nc;
         for (size_t i = 0; i < oc; i++) if (old[i].buf) {
-            size_t h = ((uintptr_t)old[i].buf >> 4) * 0x9E3779B97F4A7C15ull & (nc - 1);
+            size_t h = ((uintptr_t)old[i].buf >> 3) * 0x9E3779B97F4A7C15ull & (nc - 1);
             while (bmg_gcb_tab[h].buf) h = (h + 1) & (nc - 1);
             bmg_gcb_tab[h] = old[i];
         }
         free(old);
     }
-    size_t h = ((uintptr_t)buf >> 4) * 0x9E3779B97F4A7C15ull & (bmg_gcb_cap - 1);
+    size_t h = ((uintptr_t)buf >> 3) * 0x9E3779B97F4A7C15ull & (bmg_gcb_cap - 1);
     while (bmg_gcb_tab[h].buf && bmg_gcb_tab[h].buf != buf) h = (h + 1) & (bmg_gcb_cap - 1);
     *fresh = bmg_gcb_tab[h].buf == NULL;
     if (*fresh) { bmg_gcb_tab[h].buf = buf; bmg_gcb_n++; }
@@ -1605,14 +1649,14 @@ static void bmg_cyc_collect(void) {
         c->next = garbage;
         garbage = c;
     }
-    for (bmg_cyc *c = garbage; c; c = c->next) BMG_OBJ(c)->weak++; /* pinned while fields are released */
+    for (bmg_cyc *c = garbage; c; c = c->next) BMG_WEAK(BMG_OBJ(c))++; /* pinned while fields are released */
     for (bmg_cyc *c = garbage; c; c = c->next) bmg_obj_dropfields(BMG_OBJ(c));
     for (bmg_cyc *c = garbage, *next; c; c = next) {
         next = c->next;
         bmg_obj *h = BMG_OBJ(c);
         h->rc = 0;
         h->flags &= ~BMG_COLLECTING;
-        if (--h->weak == 0) bmg_obj_free(h);
+        if (--BMG_WEAK(h) == 0) bmg_obj_free(h);
     }
     int64_t live = bmg_cyc_count * 2;
     bmg_cyc_limit = live > 10000 ? live : 10000;
