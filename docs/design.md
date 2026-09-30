@@ -222,13 +222,15 @@ Fixtures: `cap-performance-fixtures/reference-recording.cap` (meta/config JSON, 
   Known gaps: interfaces as value types, `unknown` at runtime, closures returning into mismatched function types, `console.log("%s", …)` format specifiers, per-module (rather than whole-binary) caching.
 - **M1.5 — instant loop.** Daemon + tier 0 (copy-and-patch) + runner process; differential tests vs tier 2. Benchmarks: edit→test latency.
 - **M1.75 — tier-up.** Hotness counters, background tier 1, slot swapping and inlining-aware invalidation.
-- **M2 — memory model validation.** Classes, inheritance, RC + cycle check, allocator; micro suite vs Rust/Node/scriptc. Port Cap #1 and #3.
-- **M3 — real programs.** Errors/effects, closures, std (fs, json, process, cli), C FFI. Port Cap #2, #4, #5.
+- **M2 — memory model validation. ✅ Done (2026-09-30).** Classes (single inheritance, `super`, `abstract`, `implements`, getters, statics, visibility, `readonly`, parameter properties, generic classes); reference counting with borrowed parameters, moved constructor arguments and direct (inlinable) drops; the static cycle check (`weak` back-references, `readonly` set-once references, or `cyclic class` with a trial-deletion cycle collector that only cyclic classes pay for); interface values as fat pointers; `C | undefined` as a nullable pointer; devirtualized method calls with `switch` dispatch for overridden methods. Also fixed: narrowing soundness across nested blocks, loops and closures; unbounded-depth frees (programs run on a 1 GiB reserved stack). Benchmarks: class-based binary trees 2.8× faster than Rust, virtual dispatch 2× faster than Rust and C.
+  Known gaps: setters, generic methods, closures capturing `this` stored on the object aren't traced by the cycle collector, `instanceof` on interface values.
+- **M3 — real programs. ✅ Errors and std done (2026-09-30).** `throw`/`try`/`catch`/`finally`, `throws` (declared or inferred), `try f()` propagation markers, built-in `Error` classes (written in Barm, in a prelude module); errors are return values checked by one branch after calls that can throw. Standard library with Node's names (`node:fs`, `node:path`, `process`, `Date.now`, `performance.now`), written in Barm over a small `__native` runtime layer; `JSON.stringify` and a typed, validating `JSON.parse` generated per type (faster than Bun: stringify+parse of 200k records 238 ms vs 273 ms). Rest parameters. A small-string allocator in the runtime.
+  Still to do: effects (`uses`), closures that throw, C FFI.
 - **M4 — fast.** Optimization passes in Barm IR (inlining, escape analysis, RC elision, bounds-check elimination), PGO, benchmark suite vs Rust/C/Go.
 - **M5 — agent toolchain.** `q`, `map`, `fix`, `docs`, LSP + MCP.
 - **M6 — async, net/http, crypto, packages.** Port Cap #6.
 
-A minimal blocking HTTP server (threads, no async) moves forward to right after M3, so the headline requests/sec benchmark vs Bun+Hono, Node+Hono, scriptc and Rust (hyper/axum) can run early.
+A minimal HTTP server moves forward to right after M3, so the headline requests/sec benchmark can run early. **✅ Done (2026-09-30):** `std/http` — a Bun-style `serve({ fetch })` written in Barm over a native event loop (kqueue/epoll, level-triggered, one `read` and one `write` per request, pipelining with output backpressure) and forked workers that share the socket with even connection counts. On Linux it serves 1.5× the requests/s of Rust (axum/tokio) on one core and 1.3–2.5× on four, at 3–9 MB RSS; details in bench/http/README.md.
 
 ## Open decisions
 
