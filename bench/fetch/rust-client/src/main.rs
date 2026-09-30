@@ -17,6 +17,7 @@ async fn one(client: &reqwest::Client, mode: &str, base: &str) -> usize {
         "json" => client.get(format!("{base}/json")).send().await.unwrap().json::<User>().await.unwrap().id as usize,
         "echo" => client.post(format!("{base}/echo")).header("content-type", "application/json").body(PAYLOAD).send().await.unwrap().text().await.unwrap().len(),
         "big" => client.get(format!("{base}/big")).send().await.unwrap().text().await.unwrap().len(),
+        "close" => client.get(format!("{base}/")).header("connection", "close").send().await.unwrap().text().await.unwrap().len(),
         _ => client.get(format!("{base}/")).send().await.unwrap().text().await.unwrap().len(),
     }
 }
@@ -33,7 +34,12 @@ fn main() {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
     };
     rt.block_on(async move {
-        let client = reqwest::Client::new();
+        // NODE_EXTRA_CA_CERTS: a CA to trust (the TLS benchmark's), as Node, Bun and Barm read it
+        let mut builder = reqwest::Client::builder();
+        if let Ok(path) = std::env::var("NODE_EXTRA_CA_CERTS") {
+            builder = builder.add_root_certificate(reqwest::Certificate::from_pem(&std::fs::read(path).unwrap()).unwrap());
+        }
+        let client = builder.build().unwrap();
         let start = std::time::Instant::now();
         let per = total / conc;
         let mut tasks = Vec::new();

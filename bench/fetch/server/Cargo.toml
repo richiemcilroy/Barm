@@ -7,6 +7,9 @@ edition = "2021"
 axum = "0.8"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "macros"] }
 serde = { version = "1", features = ["derive"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
 
 [profile.release]
 lto = true
