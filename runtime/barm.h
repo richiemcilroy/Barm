@@ -72,6 +72,7 @@ typedef struct bm_type {
 
 /* Descriptors for primitives. */
 extern const bm_type bm_type_int, bm_type_f64, bm_type_f32, bm_type_bool, bm_type_str, bm_type_undefined;
+extern const bm_type bm_type_promise;   /* every Promise<T> (a bm_promise *): Node's `Promise { ... }` */
 extern const bm_type bm_type_i8, bm_type_i16, bm_type_i32, bm_type_u8, bm_type_u16, bm_type_u32, bm_type_u64;
 
 /* ------------------------------------------------------------------ strings (immutable UTF-8) */
@@ -302,6 +303,9 @@ enum { BM_PENDING = 0, BM_FULFILLED = 1, BM_REJECTED = 2 };
 
 typedef struct bm_task bm_task;
 
+/* Something to run (as a microtask) when a promise settles. */
+typedef struct bm_reaction { void (*fn)(void *a, void *b); void *a, *b; } bm_reaction;
+
 typedef struct bm_promise {
     int64_t rc;
     uint8_t state;            /* BM_PENDING, BM_FULFILLED or BM_REJECTED */
@@ -309,8 +313,8 @@ typedef struct bm_promise {
     bool reported;            /* on the unhandled-rejection list */
     const bm_type *vt;        /* the value's type */
     void *err;                /* rejection: an Error object (owned) */
-    bm_task *waiter;          /* first task waiting for it */
-    bm_task **more;           /* further waiters, in the order they started waiting */
+    bm_task *waiter;          /* the task waiting for it, when that's the first and only reaction */
+    bm_reaction *more;        /* other reactions, in the order they were added */
     int32_t nmore, capmore;
     _Alignas(16) unsigned char value[];
 } bm_promise;
@@ -331,7 +335,7 @@ enum { BM_TASK_SYNC = 1u };
 extern bm_task *bm_cur_task;  /* the task running now (NULL outside tasks) */
 
 /* The program's error objects: released and printed through hooks the program installs. */
-void bm_async_init(void (*err_release)(void *), void (*err_report)(void *));
+void bm_async_init(void (*err_retain)(void *), void (*err_release)(void *), void (*err_report)(void *));
 
 bm_promise *bm_promise_new(const bm_type *vt);                 /* pending, rc 1 */
 static inline void bm_promise_retain(bm_promise *p) { if (p) p->rc++; }
@@ -364,6 +368,10 @@ void bm_await_suspend(bm_promise *p);
 void bm_task_yield(void);
 
 void bm_queue_microtask(bm_fn callback);        /* queueMicrotask(cb) (retains cb) */
+/* Promise.all / Promise.race over an array of promises (borrowed): `et` describes their values;
+ * `arr_t`, an array of them (all's result). A new promise (rc 1). */
+bm_promise *bm_promise_all(struct bm_arr ps, const bm_type *et, const bm_type *arr_t);
+bm_promise *bm_promise_race(struct bm_arr ps, const bm_type *et);
 bm_int bm_set_timer(bm_fn callback, double ms, bool repeat);   /* setTimeout/setInterval (retains cb) */
 void bm_clear_timer(bm_int id);
 /* Runs the event loop until nothing is left: microtasks, timers and servers. */

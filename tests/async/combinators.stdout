@@ -1,0 +1,7 @@
+t0 t1 t2 all=1,2,3 t3 t4 t5
+in order: 1,2,3
+empty: 0
+all rejected: failed after 20
+race: 2
+race rejected: failed after 10
+AB

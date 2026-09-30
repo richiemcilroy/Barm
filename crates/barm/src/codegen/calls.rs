@@ -1180,6 +1180,23 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 p
             }
+            (Some("Promise"), "all" | "race") => {
+                let pt = self.c.types.without_undefined(ty);
+                let Ty::Promise(value, _) = self.tget(pt) else {
+                    self.unsupported(span, "this promise");
+                    return Val::plain("NULL", ty);
+                };
+                let arr = self.expr(args[0].expr);
+                let arr = self.own(arr);
+                if name == "all" {
+                    let Ty::Array(elem) = self.tget(value) else { return Val::plain("NULL", ty) };
+                    let (ed, ad) = (self.desc(elem), self.desc(value));
+                    self.tmp(ty, &format!("bm_promise_all({}, {ed}, {ad})", arr.code), true)
+                } else {
+                    let ed = self.desc(value);
+                    self.tmp(ty, &format!("bm_promise_race({}, {ed})", arr.code), true)
+                }
+            }
             (Some("JSON"), "stringify") => {
                 let v = self.expr(args[0].expr);
                 let indent = args.get(2).map(|a| self.expr(a.expr));

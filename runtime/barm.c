@@ -2654,6 +2654,7 @@ bm_str bm_jp_error(bm_jp *p) {
 #endif
 
 bm_task *bm_cur_task;
+static void (*bm_err_retain)(void *);
 static void (*bm_err_release)(void *);
 
 /* Tasks, promises and pending HTTP requests come and go per request: per-size free lists
@@ -2697,7 +2698,8 @@ static void bm_async_free(void *p, size_t size) {
 }
 static void (*bm_err_report)(void *);
 
-void bm_async_init(void (*err_release)(void *), void (*err_report)(void *)) {
+void bm_async_init(void (*err_retain)(void *), void (*err_release)(void *), void (*err_report)(void *)) {
+    bm_err_retain = err_retain;
     bm_err_release = err_release;
     bm_err_report = err_report;
 }
@@ -2838,8 +2840,22 @@ static void bm_promise_wake(bm_promise *p) {
         bm_mq_push(bm_resume_job, p->waiter, NULL);
         p->waiter = NULL;
     }
-    for (int32_t i = 0; i < p->nmore; i++) bm_mq_push(bm_resume_job, p->more[i], NULL);
+    for (int32_t i = 0; i < p->nmore; i++) bm_mq_push(p->more[i].fn, p->more[i].a, p->more[i].b);
     p->nmore = 0;
+}
+
+/* Runs fn(a, b) as a microtask once p settles (at once if it has), after earlier reactions. */
+static void bm_promise_react(bm_promise *p, void (*fn)(void *, void *), void *a, void *b) {
+    p->handled = true;
+    if (p->state != BM_PENDING) {
+        bm_mq_push(fn, a, b);
+        return;
+    }
+    if (p->nmore == p->capmore) {
+        p->capmore = p->capmore ? p->capmore * 2 : 4;
+        p->more = bm_realloc(p->more, (size_t)p->capmore * sizeof *p->more);
+    }
+    p->more[p->nmore++] = (bm_reaction){fn, a, b};
 }
 
 void bm_promise_resolve(bm_promise *p, const void *value) {
@@ -2891,15 +2907,142 @@ void bm_await_suspend(bm_promise *p) {
         bm_mq_push(bm_resume_job, t, NULL);
         return;
     }
-    if (!p->waiter) {
+    if (!p->waiter && !p->nmore) {
         p->waiter = t;
         return;
     }
-    if (p->nmore == p->capmore) {
-        p->capmore = p->capmore ? p->capmore * 2 : 4;
-        p->more = bm_realloc(p->more, (size_t)p->capmore * sizeof *p->more);
+    bm_promise_react(p, bm_resume_job, t, NULL);
+}
+
+/* One descriptor for every promise type: the value's type travels with the promise. */
+static void bm_promise_ty_retain(void *p) { bm_promise_retain(*(bm_promise **)p); }
+static void bm_promise_ty_release(void *p) { bm_promise_release(*(bm_promise **)p); }
+static bool bm_promise_ty_eq(const void *a, const void *b) { return *(bm_promise *const *)a == *(bm_promise *const *)b; }
+static uint64_t bm_promise_ty_hash(const void *p) { return bm_mix64((uint64_t)(uintptr_t)*(bm_promise *const *)p); }
+static void bm_promise_ty_str(bm_sb *sb, const void *p) { (void)p; bm_sb_push_cstr(sb, "[object Promise]"); }
+static void bm_promise_ty_inspect(bm_sb *sb, const void *pp, int depth) {
+    bm_promise *p = *(bm_promise *const *)pp;
+    bm_sb_push_cstr(sb, "Promise { ");
+    if (p->state == BM_PENDING) bm_sb_push_cstr(sb, "<pending>");
+    else if (p->state == BM_REJECTED) bm_sb_push_cstr(sb, "<rejected>");
+    else if (p->vt && p->vt->inspect) p->vt->inspect(sb, p->value, depth + 1);
+    else bm_sb_push_cstr(sb, "undefined");
+    bm_sb_push_cstr(sb, " }");
+}
+const bm_type bm_type_promise = {sizeof(bm_promise *), bm_promise_ty_retain, bm_promise_ty_release, bm_promise_ty_eq, bm_promise_ty_hash, bm_promise_ty_str, bm_promise_ty_inspect};
+
+/* ---------------------------------------------------------------- Promise.all, Promise.race */
+
+typedef struct {
+    bm_promise *result;
+    bm_promise **elems;       /* retained until every reaction has run */
+    int64_t n, remaining, pending_jobs;
+    const bm_type *et, *arr_t;
+    unsigned char *values;    /* all: the values so far (n * et->size), with `filled` flags */
+    bool *filled;
+} bm_combine;
+
+static void bm_combine_done(bm_combine *s) {
+    if (--s->pending_jobs) return;
+    size_t size = s->et ? s->et->size : 0;
+    for (int64_t i = 0; i < s->n; i++) {
+        if (s->filled && s->filled[i] && s->et->release) s->et->release(s->values + (size_t)i * size);
+        bm_promise_release(s->elems[i]);
     }
-    p->more[p->nmore++] = t;
+    bm_promise_release(s->result);
+    bm_free(s->values);
+    bm_free(s->filled);
+    bm_free(s->elems);
+    bm_free(s);
+}
+
+static bm_combine *bm_combine_new(bm_arr ps, const bm_type *et, const bm_type *rt, const bm_type *arr_t) {
+    bm_combine *s = bm_alloc(sizeof *s);
+    memset(s, 0, sizeof *s);
+    s->n = s->remaining = s->pending_jobs = bm_arr_len(ps);
+    s->et = et;
+    s->arr_t = arr_t;
+    s->result = bm_promise_new(rt);
+    bm_promise_retain(s->result);   /* the state's reference */
+    s->elems = bm_alloc((size_t)(s->n ? s->n : 1) * sizeof *s->elems);
+    for (int64_t i = 0; i < s->n; i++) {
+        s->elems[i] = ((bm_promise **)bm_arr_data(ps))[i];
+        bm_promise_retain(s->elems[i]);
+    }
+    return s;
+}
+
+static void bm_all_step(void *a, void *b) {
+    bm_combine *s = a;
+    int64_t i = (int64_t)(intptr_t)b;
+    bm_promise *p = s->elems[i];
+    if (s->result->state == BM_PENDING) {
+        if (p->state == BM_REJECTED) {
+            if (bm_err_retain) bm_err_retain(p->err);
+            bm_promise_reject(s->result, p->err);
+        } else {
+            size_t size = s->et->size;
+            if (size) {
+                memcpy(s->values + (size_t)i * size, p->value, size);
+                if (s->et->retain) s->et->retain(s->values + (size_t)i * size);
+            }
+            s->filled[i] = true;
+            if (--s->remaining == 0) {
+                /* every value is in: move them into the result array */
+                bm_arr arr = bm_arr_with_capacity(s->et, s->n);
+                void *dst = bm_arr_reserve_tail(&arr, s->et, s->n);
+                if (size) memcpy(dst, s->values, (size_t)s->n * size);
+                arr.len = s->n;
+                memset(s->filled, 0, (size_t)s->n * sizeof *s->filled);
+                bm_promise_resolve_move(s->result, &arr);
+            }
+        }
+    }
+    bm_combine_done(s);
+}
+
+bm_promise *bm_promise_all(bm_arr ps, const bm_type *et, const bm_type *arr_t) {
+    bm_combine *s = bm_combine_new(ps, et, arr_t, arr_t);
+    bm_promise *result = s->result;
+    if (s->n == 0) {
+        /* nothing to wait for: fulfilled at once, with [] */
+        bm_arr empty = BM_EMPTY_ARR;
+        bm_promise_resolve_move(result, &empty);
+        s->pending_jobs = 1;
+        bm_combine_done(s);
+        return result;
+    }
+    s->values = bm_alloc((size_t)s->n * (et->size ? et->size : 1));
+    s->filled = bm_alloc((size_t)s->n * sizeof *s->filled);
+    memset(s->filled, 0, (size_t)s->n * sizeof *s->filled);
+    for (int64_t i = 0; i < s->n; i++) bm_promise_react(s->elems[i], bm_all_step, s, (void *)(intptr_t)i);
+    return result;
+}
+
+static void bm_race_step(void *a, void *b) {
+    bm_combine *s = a;
+    bm_promise *p = s->elems[(int64_t)(intptr_t)b];
+    if (s->result->state == BM_PENDING) {
+        if (p->state == BM_REJECTED) {
+            if (bm_err_retain) bm_err_retain(p->err);
+            bm_promise_reject(s->result, p->err);
+        } else {
+            bm_promise_resolve(s->result, p->value);
+        }
+    }
+    bm_combine_done(s);
+}
+
+bm_promise *bm_promise_race(bm_arr ps, const bm_type *et) {
+    bm_combine *s = bm_combine_new(ps, et, et, NULL);
+    bm_promise *result = s->result;
+    if (s->n == 0) {   /* never settles, as in JavaScript */
+        s->pending_jobs = 1;
+        bm_combine_done(s);
+        return result;
+    }
+    for (int64_t i = 0; i < s->n; i++) bm_promise_react(s->elems[i], bm_race_step, s, (void *)(intptr_t)i);
+    return result;
 }
 
 typedef struct { bm_env h; bm_promise *p; } bm_resolver_env;
