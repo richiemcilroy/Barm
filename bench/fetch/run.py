@@ -16,16 +16,25 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 OUT = os.path.join(HERE, "out")
 PORT = 3311
+TLS_PORT = 3312
 BASE = f"http://127.0.0.1:{PORT}"
+# HTTPS: the server's certificate (tests/fetch/tls) is for localhost, signed by the test CA,
+# which every client trusts through NODE_EXTRA_CA_CERTS
+TLS_BASE = f"https://localhost:{TLS_PORT}"
+CA = os.path.join(ROOT, "tests/fetch/tls/ca.pem")
 
-# (name, route, concurrent loops, requests)
+# (name, route, concurrent loops, requests, over TLS)
 SCENARIOS = [
-    ("hello-1", "hello", 1, 20000),
-    ("hello-64", "hello", 64, 100000),
-    ("json-64", "json", 64, 100000),
-    ("echo-64", "echo", 64, 100000),
-    ("big-1", "big", 1, 100),
-    ("big-8", "big", 8, 200),
+    ("hello-1", "hello", 1, 20000, False),
+    ("hello-64", "hello", 64, 100000, False),
+    ("json-64", "json", 64, 100000, False),
+    ("echo-64", "echo", 64, 100000, False),
+    ("big-1", "big", 1, 100, False),
+    ("big-8", "big", 8, 200, False),
+    ("tls-hello-1", "hello", 1, 20000, True),
+    ("tls-hello-64", "hello", 64, 100000, True),
+    ("tls-new-1", "close", 1, 2000, True),
+    ("tls-big-1", "big", 1, 100, True),
 ]
 
 
@@ -97,18 +106,19 @@ def main():
     ap.add_argument("--timeout", type=float, default=120)
     a = ap.parse_args()
     clients = a.only.split(",")
-    scen = [(name, mode, conc, max(conc, int(n * a.scale))) for name, mode, conc, n in SCENARIOS if name in a.scenarios.split(",")]
+    scen = [(name, mode, conc, max(conc, int(n * a.scale)), tls) for name, mode, conc, n, tls in SCENARIOS if name in a.scenarios.split(",")]
     build()
-    server = subprocess.Popen([os.path.join(HERE, "server/target/release/fetch-bench-server")], env={**os.environ, "PORT": str(PORT), "WORKERS": "4"})
+    server = subprocess.Popen([os.path.join(HERE, "server/target/release/fetch-bench-server")], env={**os.environ, "PORT": str(PORT), "TLS_PORT": str(TLS_PORT), "WORKERS": "4"})
     results = {}
     try:
         wait_port(PORT)
-        for name, mode, conc, n in scen:
+        wait_port(TLS_PORT)
+        for name, mode, conc, n, tls in scen:
             for rep in range(a.reps):
                 for c in clients:
-                    env = {**os.environ, "MODE_RT": "mt" if c == "rust-mt" else "ct"}
+                    env = {**os.environ, "MODE_RT": "mt" if c == "rust-mt" else "ct", "NODE_EXTRA_CA_CERTS": CA}
                     try:
-                        wall, cpu, rss, out = run_client(CLIENTS[c] + [mode, BASE, str(n), str(conc)], env, a.timeout)
+                        wall, cpu, rss, out = run_client(CLIENTS[c] + [mode, TLS_BASE if tls else BASE, str(n), str(conc)], env, a.timeout)
                         r = {"wall": wall, "cpu": cpu, "rss": rss, "rps": n / wall, "out": out}
                     except RuntimeError as e:
                         r = {"error": str(e)}
@@ -121,7 +131,7 @@ def main():
     med = lambda xs: sorted(xs)[len(xs) // 2]
     print("\n| scenario | " + " | ".join(clients) + " |")
     print("|---|" + "---:|" * len(clients))
-    for name, mode, conc, n in scen:
+    for name, mode, conc, n, tls in scen:
         for metric in ("rps", "cpu", "rss"):
             row = []
             for c in clients:
