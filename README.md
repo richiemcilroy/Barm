@@ -69,22 +69,24 @@ The full list is in [docs/spec.md](docs/spec.md).
 
 ## Performance
 
-Median wall time on an Apple M4 Max. Every language prints identical output.
+Median wall time and peak memory on an Apple M4 Max. Every language prints identical output.
 
-| benchmark | Rust | Node | Bun | **Barm** |
-|---|---:|---:|---:|---:|
-| binary_trees | 800 ms | 478 ms | 398 ms | **316 ms** |
-| class_trees | 806 ms | 486 ms | 382 ms | **286 ms** |
-| dispatch (virtual calls) | 84 ms | 207 ms | 115 ms | **42 ms** |
-| map_insert | 561 ms | 980 ms | 834 ms | **343 ms** |
-| nbody | 246 ms | 577 ms | 533 ms | **217 ms** |
-| sort | 77 ms | 1190 ms | 706 ms | **40 ms** |
-| strings | 246 ms | 521 ms | 211 ms | **222 ms** |
-| fib | 463 ms | 1521 ms | 966 ms | 611 ms\* |
+| benchmark | C | Rust | Node | Bun | **Barm** |
+|---|---:|---:|---:|---:|---:|
+| binary_trees | 688 ms · 17.9 MB | 803 ms · 18.1 MB | 478 ms · 202 MB | 389 ms · 164 MB | **266 ms · 17.8 MB** |
+| class_trees | 695 ms · 17.9 MB | 806 ms · 18.1 MB | 471 ms · 440 MB | 379 ms · 218 MB | **271 ms · 17.8 MB** |
+| dispatch (virtual calls) | 83 ms · 1.8 MB | 83 ms · 2.0 MB | 206 ms · 78 MB | 112 ms · 25 MB | **40 ms · 1.9 MB** |
+| map_insert | 464 ms · 225 MB | 504 ms · 297 MB | 882 ms · 282 MB | 711 ms · 564 MB | **250 ms · 166 MB** |
+| nbody | 319 ms · 1.8 MB | 232 ms · 2.0 MB | 551 ms · 77 MB | 511 ms · 22 MB | **213 ms · 1.8 MB** |
+| sort | 281 ms · 24.7 MB | 75 ms · 38.5 MB | 1158 ms · 266 MB | 693 ms · 116 MB | **46 ms** · 25.0 MB |
+| strings | 256 ms · 206 MB | 223 ms · 251 MB | 492 ms · 662 MB | 201 ms · 566 MB | **140 ms · 159 MB** |
+| points | 315 ms · 1.8 MB | 315 ms · 1.9 MB | 1942 ms · 83 MB | 881 ms · 30 MB | **313 ms · 1.8 MB** |
+| array_push | 54 ms · 233 MB | 62 ms · 233 MB | 346 ms · 742 MB | 216 ms · 579 MB | **54 ms · 231 MB** |
+| fib | 504 ms | **459 ms** | 1509 ms | 955 ms | 499 ms\* |
 
-\* Barm checks for integer overflow by default. Rust with overflow checks takes 607 ms, and `barm build --unchecked` takes 451 ms.
+\* Barm checks for integer overflow by default and still matches C, which doesn't. Rust with overflow checks takes 586 ms; `barm build --unchecked` takes 398 ms, the fastest here.
 
-Binaries are about 50 KB (Rust's are about 470 KB), and a build takes 0.08–0.13 s. Run the benchmarks yourself with `python3 bench/run.py`; the method is in [bench/README.md](bench/README.md).
+Binaries are 35–37 KB (C's are 33 KB, Rust's about 470 KB), and a build takes 0.05–0.07 s (C 0.05 s, Rust 0.08–0.16 s). Run the benchmarks yourself with `python3 bench/run.py`; the method is in [bench/README.md](bench/README.md).
 
 ### HTTP server
 
@@ -121,10 +123,10 @@ Requests per second on Linux (M4 Max, Docker), 128 keep-alive connections, JSON 
 
 | | Rust (axum) | Bun | **Barm** |
 |---|---:|---:|---:|
-| 1 core | 299k | 259k | **386k** |
-| 4 cores | 1.27M\* | 964k | **1.65M** |
+| 1 core | 294k | 257k | **371k** |
+| 4 cores | 1.30M\* | 958k | **1.61M** |
 | p99 at a fixed 600k req/s, 4 cores | 1.91 ms\* | — | **1.30 ms** |
-| memory, 4 cores (PSS) | 5.0 MB\* | 98 MB | **2.5 MB** |
+| memory, 4 cores (PSS) | 5.1 MB\* | 97 MB | **1.6 MB** |
 
 \* Thread-per-core Rust; tokio's default multi-thread runtime reaches 720k. With pipelining, Barm serves 8.1M JSON requests/s on 4 cores (Rust 2.4M). Method, macOS numbers and caveats are in [bench/http/README.md](bench/http/README.md).
 
