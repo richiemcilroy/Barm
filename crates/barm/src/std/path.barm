@@ -1,0 +1,116 @@
+// node:path — POSIX paths.
+
+export const sep = "/"
+export const delimiter = ":"
+
+export function isAbsolute(p: string): bool {
+  return p.startsWith("/")
+}
+
+/// Resolves `.` and `..` segments and repeated slashes (keeps a trailing slash).
+export function normalize(p: string): string {
+  if (p === "") {
+    return "."
+  }
+  const absolute = p.startsWith("/")
+  const trailing = p.endsWith("/")
+  const out: string[] = []
+  for (const part of p.split("/")) {
+    if (part === "" || part === ".") {
+      continue
+    }
+    if (part === "..") {
+      if (out.length > 0 && out[out.length - 1] !== "..") {
+        out.pop()
+      } else if (!absolute) {
+        out.push("..")
+      }
+      continue
+    }
+    out.push(part)
+  }
+  let result = out.join("/")
+  if (absolute) {
+    result = "/" + result
+  }
+  if (result === "") {
+    return absolute ? "/" : "."
+  }
+  if (trailing && result !== "/") {
+    result = result + "/"
+  }
+  return result
+}
+
+export function join(...parts: string[]): string {
+  const kept: string[] = []
+  for (const p of parts) {
+    if (p !== "") {
+      kept.push(p)
+    }
+  }
+  if (kept.length === 0) {
+    return "."
+  }
+  return normalize(kept.join("/"))
+}
+
+export function resolve(...parts: string[]): string {
+  let result = ""
+  for (const p of parts) {
+    if (p === "") {
+      continue
+    }
+    result = p.startsWith("/") ? p : (result === "" ? p : result + "/" + p)
+  }
+  if (!result.startsWith("/")) {
+    const cwd = __native.cwd()
+    result = result === "" ? cwd : cwd + "/" + result
+  }
+  const n = normalize(result)
+  return n.byteLength > 1 && n.endsWith("/") ? n.slice(0, n.byteLength - 1) : n
+}
+
+function stripTrailing(p: string): string {
+  let s = p
+  while (s.byteLength > 1 && s.endsWith("/")) {
+    s = s.slice(0, s.byteLength - 1)
+  }
+  return s
+}
+
+export function basename(p: string, ext?: string): string {
+  const s = stripTrailing(p)
+  const parts = s.split("/")
+  let base = parts[parts.length - 1] ?? ""
+  if (ext !== undefined && ext !== base && base.endsWith(ext)) {
+    base = base.slice(0, base.byteLength - ext.byteLength)
+  }
+  return base
+}
+
+export function dirname(p: string): string {
+  if (p === "") {
+    return "."
+  }
+  const s = stripTrailing(p)
+  const parts = s.split("/")
+  if (parts.length === 1) {
+    return "."
+  }
+  parts.pop()
+  const d = parts.join("/")
+  return d === "" ? "/" : stripTrailing(d)
+}
+
+export function extname(p: string): string {
+  const base = basename(p)
+  if (base === "..") {
+    return ""
+  }
+  const parts = base.split(".")
+  if (parts.length <= 1 || (parts.length === 2 && parts[0] === "")) {
+    return ""
+  }
+  return "." + (parts[parts.length - 1] ?? "")
+}
