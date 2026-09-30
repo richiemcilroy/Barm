@@ -1,0 +1,12 @@
+inner finally 1
+outer finally 1 outer1
+got inner1
+inner finally 2
+outer finally 2 outer2
+caught boom mid2
+inner finally 3
+outer finally 3 outer3
+got mid3
+finally sees 9
+3 9
+i0j0 f0 f1 i0j2 f2 F0 i1j0 f0 f1 i1j2 f2 F1 i2j0 f0 f1 f2 F2 i3j0 f0 f1 i3j2 f2

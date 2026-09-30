@@ -66,6 +66,9 @@ pub(crate) struct Body {
     pub ctor_class: Option<TyId>,
     /// Enclosing `try` blocks of this function: (label of the handler, scope depth to unwind to).
     pub handlers: Vec<(String, usize)>,
+    /// Enclosing `try` blocks that have a `finally`, innermost last: (the `finally` block, scope
+    /// depth outside the `try`). `return`, `break` and `continue` run them on the way out.
+    pub finallies: Vec<(StmtId, usize)>,
 }
 
 impl Body {
@@ -200,6 +203,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             params: FxSet::default(),
             ctor_class: None,
             handlers: Vec::new(),
+            finallies: Vec::new(),
         });
     }
 
@@ -302,6 +306,39 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
     }
 
+    /// Releases the scopes `to..from` (innermost first), for leaving them in steps.
+    fn unwind_range(&mut self, from: usize, to: usize) {
+        let mut lines = Vec::new();
+        for scope in self.b().scopes[to..from].iter().rev() {
+            for r in scope.releases.iter().rev() {
+                lines.push(r.clone());
+            }
+        }
+        for l in lines {
+            self.line(l);
+        }
+    }
+
+    /// Leaves to scope depth `depth` (0 for `return`), running the `finally` blocks being left,
+    /// innermost first: each runs after the scopes inside its `try` are released, with only the
+    /// `finally`s and error handlers outside it active.
+    fn unwind_for_exit(&mut self, depth: usize) {
+        let fins: Vec<(StmtId, usize)> = self.b().finallies.iter().rev().filter(|(_, d)| *d >= depth).copied().collect();
+        let mut prev = self.b().scopes.len();
+        for (f, d) in fins {
+            self.unwind_range(prev, d);
+            prev = d;
+            let saved_fins = self.b().finallies.clone();
+            let saved_handlers = self.b().handlers.clone();
+            self.b().finallies.retain(|(_, dd)| *dd < d);
+            self.b().handlers.retain(|(_, dd)| *dd < d);
+            self.scoped_block(f);
+            self.b().finallies = saved_fins;
+            self.b().handlers = saved_handlers;
+        }
+        self.unwind_range(prev, depth);
+    }
+
     fn release_all_temps(&mut self) {
         let mut lines = Vec::new();
         let all: Vec<(String, TyId)> = self.b().temps.iter().flat_map(|s| s.iter().cloned()).collect();
@@ -349,6 +386,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             params: params.iter().filter(|p| !p.2).map(|p| p.0).collect(),
             ctor_class,
             handlers: Vec::new(),
+            finallies: Vec::new(),
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
             let access = if inout { format!("(*p{i})") } else { format!("p{i}") };
@@ -928,7 +966,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                         let r = self.fresh("r");
                         self.line(format!("{ct} {r} = {code};"));
                         self.release_all_temps();
-                        self.unwind_to(0);
+                        self.unwind_for_exit(0);
                         self.line(format!("return {r};"));
                         // The statement's temp scope is gone on this path; keep structure balanced.
                         self.b().temps.pop();
@@ -937,19 +975,19 @@ impl<'c, 'a> Gen<'c, 'a> {
                         self.push_temps();
                         let _ = self.expr(*x);
                         self.pop_temps();
-                        self.unwind_to(0);
+                        self.unwind_for_exit(0);
                         self.line("return;");
                     }
                     None => {
                         if ret == VOID {
-                            self.unwind_to(0);
+                            self.unwind_for_exit(0);
                             self.line("return;");
                         } else {
                             let v = self.coerce(Val::plain("0", UNDEFINED), ret);
                             let ct = self.ctype(ret);
                             let r = self.fresh("r");
                             self.line(format!("{ct} {r} = {};", v.code));
-                            self.unwind_to(0);
+                            self.unwind_for_exit(0);
                             self.line(format!("return {r};"));
                         }
                     }
@@ -957,7 +995,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             StmtKind::Break => {
                 let (target, depth) = self.b().breaks.last().cloned().expect("break target");
-                self.unwind_to(depth);
+                self.unwind_for_exit(depth);
                 match target {
                     BreakTarget::Native => self.line("break;"),
                     BreakTarget::Goto(l) => self.line(format!("goto {l};")),
@@ -965,7 +1003,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             StmtKind::Continue => {
                 let (label, depth) = self.b().loops.last().cloned().expect("continue target");
-                self.unwind_to(depth);
+                self.unwind_for_exit(depth);
                 self.line(format!("goto {label};"));
             }
         }
@@ -986,6 +1024,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             p
         });
         let depth = self.b().scopes.len();
+        if let Some(f) = finally {
+            self.b().finallies.push((f, depth));
+        }
         self.b().handlers.push((lcatch.clone(), depth));
         self.scoped_block(body);
         self.b().handlers.pop();
@@ -1037,6 +1078,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.line(format!("{p} = bmg_err; bmg_err = NULL;"));
                 }
             }
+        }
+        if finally.is_some() {
+            self.b().finallies.pop();
         }
         self.line(format!("{lend}:;"));
         if let (Some(f), Some(p)) = (finally, pend) {
@@ -2605,6 +2649,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             params: params.iter().filter(|p| !p.2).map(|p| p.0).collect(),
             ctor_class: None,
             handlers: Vec::new(),
+            finallies: Vec::new(),
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
             let access = if inout { format!("(*p{i})") } else { format!("p{i}") };
