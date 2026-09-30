@@ -25,7 +25,7 @@ fn main() {
                 continue;
             }
         }
-        let opts = barm::build::Options { mode: barm::codegen::Mode::Run, unchecked: false, opt: "-O1".into(), emit_c: None };
+        let opts = barm::build::Options { mode: barm::codegen::Mode::Run, unchecked: false, opt: "-O1".into(), emit_c: None, symbols: false };
         let built = match barm::build::build(std::slice::from_ref(case), &root, &opts) {
             Ok(b) => b,
             Err(barm::build::BuildError::Diagnostics(sm, d)) => {

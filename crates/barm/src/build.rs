@@ -42,6 +42,9 @@ pub struct Options {
     pub opt: String,
     /// Also write the generated C here.
     pub emit_c: Option<PathBuf>,
+    /// Keep function names and C debug info (`barm build -g`) for debuggers and profilers;
+    /// otherwise local symbols are stripped (smaller binaries).
+    pub symbols: bool,
 }
 
 /// The files on disk behind a source map (not the standard library's built-in modules).
@@ -164,6 +167,9 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     if opts.unchecked {
         flags.push("-DBARM_UNCHECKED=1");
     }
+    if opts.symbols {
+        flags.push("-g");
+    }
     // The program links with a big main stack (below), so main needn't check for one.
     if cfg!(target_vendor = "apple") && !extra.contains("-fsanitize") {
         flags.push("-DBMG_MAIN_STACK=1");
@@ -249,12 +255,18 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     if cfg!(target_vendor = "apple") {
         // Only `main` is exported: the runtime's functions needn't be in the export table.
         cmd.arg("-Wl,-dead_strip").arg("-Wl,-exported_symbol,_main");
+        if !opts.symbols {
+            cmd.arg("-Wl,-x"); // local symbols (function names) only serve debuggers and profilers
+        }
         // (Sanitizers can't lay out their shadow memory around a large main stack.)
         if !extra.contains("-fsanitize") {
             cmd.arg(LINK_STACK);
         }
     } else if !cfg!(windows) {
         cmd.arg("-Wl,--gc-sections");
+        if !opts.symbols {
+            cmd.arg("-Wl,-x");
+        }
     }
     let linked = run_cc(cmd, &ld, &c_path);
     let _ = std::fs::remove_file(&obj);
@@ -267,7 +279,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
 /// macOS: the main thread's stack size (the most arm64 allows).
 const LINK_STACK: &str = "-Wl,-stack_size,0x20000000";
 /// Everything that changes how programs are linked, for the binary cache key.
-const LINK_FLAGS: &str = "dead-strip; exported: _main; sanitizers link without -stack_size; -Wl,-stack_size,0x20000000";
+const LINK_FLAGS: &str = "dead-strip; exported: _main; -x unless -g; sanitizers link without -stack_size; -Wl,-stack_size,0x20000000";
 
 /// The precompiled fixed prefix (`pre-<key>.h`, with its `.pch`/`.gch` beside it) to pass as
 /// `-include`, built on first use; `None` if the compiler can't precompile it (then programs

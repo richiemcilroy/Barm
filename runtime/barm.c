@@ -11,6 +11,7 @@
 
 #include <float.h>
 #include <math.h>
+#include <errno.h>
 #include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,10 +43,37 @@ static int64_t bm_tests_passed, bm_tests_failed;
 
 /* ================================================================== traps and memory */
 
+/* Output goes straight to the file descriptors (the runtime buffers stdout itself, and stderr
+ * is unbuffered anyway): no stdio in the paths every program links. */
+__attribute__((noinline)) void bm_write_fd(int fd, const char *s, size_t n) {
+#if defined(__unix__) || defined(__APPLE__)
+    while (n) {
+        ssize_t w = write(fd, s, n);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            return;
+        }
+        s += w;
+        n -= (size_t)w;
+    }
+#else
+    FILE *f = fd == 2 ? stderr : stdout;
+    fwrite(s, 1, n, f);
+    fflush(f);
+#endif
+}
+
+__attribute__((noinline)) void bm_err_cstr(const char *s) { bm_write_fd(2, s, strlen(s)); }
+
+static size_t bm_fmt_i64(char *buf, int64_t v);
+
 static _Noreturn void bm_oom(size_t size) {
     bm_out_flush();
-    fprintf(stderr, "trap: out of memory (allocating %zu bytes)\n", size);
-    fflush(stderr);
+    char num[24];
+    size_t n = bm_fmt_i64(num, (int64_t)size);
+    bm_err_cstr("trap: out of memory (allocating ");
+    bm_write_fd(2, num, n);
+    bm_err_cstr(" bytes)\n");
     exit(101);
 }
 
@@ -58,9 +86,14 @@ _Noreturn void bm_trap(const char *msg, const char *loc) {
         bm_test_unwind();
     }
     bm_out_flush();
-    fprintf(stderr, "trap: %s\n", msg);
-    if (loc && *loc) fprintf(stderr, "  at %s\n", loc);
-    fflush(stderr);
+    bm_err_cstr("trap: ");
+    bm_err_cstr(msg);
+    bm_err_cstr("\n");
+    if (loc && *loc) {
+        bm_err_cstr("  at ");
+        bm_err_cstr(loc);
+        bm_err_cstr("\n");
+    }
     exit(101);
 }
 
@@ -392,9 +425,9 @@ typedef struct { int32_t rc; int32_t len; char data[4]; } bm_small_strbuf;
 #define BM_A1(c) {-1, 1, {(char)(c), 0}}
 #define BM_A4(c) BM_A1(c), BM_A1((c) + 1), BM_A1((c) + 2), BM_A1((c) + 3)
 #define BM_A16(c) BM_A4(c), BM_A4((c) + 4), BM_A4((c) + 8), BM_A4((c) + 12)
-/* Immortal one-character ASCII strings: chars()/split("") and friends never allocate for ASCII. */
-static const bm_small_strbuf bm_ascii_strs[128] = {
-    BM_A16(0), BM_A16(16), BM_A16(32), BM_A16(48), BM_A16(64), BM_A16(80), BM_A16(96), BM_A16(112),
+/* Immortal one-character strings for printable ASCII: chars()/split("") and friends don't allocate for them. */
+static const bm_small_strbuf bm_ascii_strs[96] = { /* printable ASCII, 32..127 */
+    BM_A16(32), BM_A16(48), BM_A16(64), BM_A16(80), BM_A16(96), BM_A16(112),
 };
 #undef BM_A1
 #undef BM_A4
@@ -403,7 +436,7 @@ static const bm_small_strbuf bm_ascii_strs[128] = {
 BM_STR_LIT(bm_lit_true, "true");
 BM_STR_LIT(bm_lit_false, "false");
 
-static inline bm_str bm_ascii_str(unsigned char c) { return (bm_str){(bm_strbuf *)&bm_ascii_strs[c]}; }
+static inline bm_str bm_ascii_str(unsigned char c) { return (bm_str){(bm_strbuf *)&bm_ascii_strs[c - 32]}; }
 
 /* Small strings (header + bytes + NUL <= BM_SMALL_MAX) come from the small-object free lists;
  * larger ones from malloc. The class follows from the length alone, so freeing needs no flag.
@@ -494,7 +527,7 @@ void bm_str_release_slow(bm_str s) {
 
 bm_str bm_str_from(const char *bytes, size_t n) {
     if (n == 0) return BM_EMPTY_STR;
-    if (n == 1 && (unsigned char)bytes[0] < 128) return bm_ascii_str((unsigned char)bytes[0]);
+    if (n == 1 && (unsigned char)bytes[0] - 32u < 96u) return bm_ascii_str((unsigned char)bytes[0]);
     bm_strbuf *b = bm_strbuf_new(n);
     memcpy(b->data, bytes, n);
     return (bm_str){b};
@@ -2228,10 +2261,9 @@ static bool bm_out_tty; /* stdout is a terminal: flush after every line */
 
 void bm_out_flush(void) {
     if (bm_out_len) {
-        fwrite(bm_out_buf, 1, bm_out_len, stdout);
+        bm_write_fd(1, bm_out_buf, bm_out_len);
         bm_out_len = 0;
     }
-    fflush(stdout);
 }
 
 void bm_out_write(const char *s, size_t n) {
@@ -2240,7 +2272,7 @@ void bm_out_write(const char *s, size_t n) {
         bm_out_flush();
         if (!bm_out_big) bm_out_big = bm_alloc(BM_OUT_BIG);
         if (n >= bm_out_cap) {
-            fwrite(s, 1, n, stdout);
+            bm_write_fd(1, s, n);
             return;
         }
     }
@@ -2258,8 +2290,7 @@ void bm_out_sb_line(bm_sb *sb) {
 void bm_err_sb_line(bm_sb *sb) {
     bm_out_flush(); /* keep stdout/stderr ordering */
     bm_sb_push_char(sb, '\n');
-    fwrite(sb->data, 1, sb->len, stderr);
-    fflush(stderr);
+    bm_write_fd(2, sb->data, sb->len);
     bm_sb_free(sb);
 }
 
@@ -2618,8 +2649,7 @@ void bm_write_stdout(bm_str s) { bm_out_write(s.p->data, (size_t)s.p->len); }
 
 void bm_write_stderr(bm_str s) {
     bm_out_flush();
-    fwrite(s.p->data, 1, (size_t)s.p->len, stderr);
-    fflush(stderr);
+    bm_write_fd(2, s.p->data, (size_t)s.p->len);
 }
 
 /* ================================================================== JSON */

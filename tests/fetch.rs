@@ -379,7 +379,7 @@ fn main() {
                 failed.push(format!("{name}: the expectation differs from Bun's output\n--- expected\n{expected}--- bun\n{js}{}", String::from_utf8_lossy(&out.stderr)));
             }
         }
-        let opts = barm::build::Options { mode: barm::codegen::Mode::Run, unchecked: false, opt: "-O1".into(), emit_c: None };
+        let opts = barm::build::Options { mode: barm::codegen::Mode::Run, unchecked: false, opt: "-O1".into(), emit_c: None, symbols: false };
         match barm::build::build(std::slice::from_ref(case), &root, &opts) {
             Ok(built) => {
                 if !built.tls {
@@ -401,7 +401,7 @@ fn main() {
         }
     }
     // Only programs that fetch link TLS.
-    let opts = barm::build::Options { mode: barm::codegen::Mode::Run, unchecked: false, opt: "-O1".into(), emit_c: None };
+    let opts = barm::build::Options { mode: barm::codegen::Mode::Run, unchecked: false, opt: "-O1".into(), emit_c: None, symbols: false };
     let hello = std::env::temp_dir().join(format!("barm-no-tls-{}.barm", std::process::id()));
     std::fs::write(&hello, "console.log(\"hi\")\n").unwrap();
     match barm::build::build(std::slice::from_ref(&hello), &root, &opts) {

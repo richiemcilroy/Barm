@@ -15,7 +15,7 @@ fn main() {
     let mut failed = Vec::new();
     for case in &cases {
         let name = case.file_stem().unwrap().to_string_lossy().into_owned();
-        let opts = barm::build::Options { mode: barm::codegen::Mode::Run, unchecked: false, opt: "-O1".into(), emit_c: None };
+        let opts = barm::build::Options { mode: barm::codegen::Mode::Run, unchecked: false, opt: "-O1".into(), emit_c: None, symbols: false };
         let built = match barm::build::build(std::slice::from_ref(case), &root, &opts) {
             Ok(b) => b,
             Err(barm::build::BuildError::Diagnostics(sm, d)) => {
@@ -43,7 +43,7 @@ fn main() {
         }
     }
     // Every test in examples/ must pass natively.
-    let opts = barm::build::Options { mode: barm::codegen::Mode::Test, unchecked: false, opt: "-O1".into(), emit_c: None };
+    let opts = barm::build::Options { mode: barm::codegen::Mode::Test, unchecked: false, opt: "-O1".into(), emit_c: None, symbols: false };
     let examples = root.join("examples");
     match barm::build::build(&[examples], &root, &opts) {
         Ok(b) => {

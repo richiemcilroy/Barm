@@ -125,7 +125,7 @@ fn check(failed: &mut Vec<String>, name: &str, ok: bool, detail: impl std::fmt::
 fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
     let app = root.join("tests/http/app.barm");
-    let opts = barm::build::Options { mode: barm::codegen::Mode::Run, unchecked: false, opt: "-O2".into(), emit_c: None };
+    let opts = barm::build::Options { mode: barm::codegen::Mode::Run, unchecked: false, opt: "-O2".into(), emit_c: None, symbols: false };
     let built = match barm::build::build(std::slice::from_ref(&app), &root, &opts) {
         Ok(b) => b,
         Err(barm::build::BuildError::Diagnostics(sm, d)) => panic!("build failed\n{}", barm::diag::render_text(&d, &sm)),

@@ -28,6 +28,8 @@ typedef int64_t bm_int;
 
 _Noreturn void bm_trap(const char *msg, const char *loc);
 void *bm_alloc(size_t size);          /* traps on out-of-memory */
+void bm_write_fd(int fd, const char *s, size_t n); /* all of s to fd 1 or 2, unbuffered */
+void bm_err_cstr(const char *s);                     /* to stderr */
 
 /* Small objects (strings, boxes, class instances, closures' cells: up to 512 bytes) come from
  * per-size-class free lists shared by the runtime and generated code (8-byte classes).
