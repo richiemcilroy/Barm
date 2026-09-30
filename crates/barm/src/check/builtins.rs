@@ -10,8 +10,35 @@ pub(super) const BUILTIN_TYPES: &[&str] = &[
 ];
 
 pub(super) const GLOBAL_NAMES: &[&str] = &[
-    "Math", "console", "expect", "String", "Number", "parseInt", "parseFloat", "isNaN", "int", "f64", "f32", "i8", "i16", "i32", "u8", "u16", "u32", "u64",
+    "Math", "console", "expect", "String", "Number", "parseInt", "parseFloat", "isNaN", "int", "f64", "f32", "i8", "i16", "i32", "u8", "u16", "u32", "u64", "process", "Date",
+    "performance", "JSON",
 ];
+
+/// Runtime calls available to standard-library modules (`__native.name(...)`): parameters, result.
+pub(super) fn native_sig(types: &mut Types, name: &str) -> Option<(Vec<TyId>, TyId)> {
+    let str_arr = types.array(STR);
+    Some(match name {
+        "takeError" | "cwd" => (vec![], STR),
+        "readFile" => (vec![STR], STR),
+        "writeFile" => (vec![STR, STR, BOOL], VOID),
+        "exists" => (vec![STR], BOOL),
+        "readDir" => (vec![STR], str_arr),
+        "mkdir" => (vec![STR, BOOL], VOID),
+        "unlink" => (vec![STR], VOID),
+        "rm" => (vec![STR, BOOL, BOOL], VOID),
+        "httpServe" => {
+            let p = |ty| FnParam { ty, inout: false, optional: false };
+            let handler = types.func(vec![p(STR), p(STR), p(STR), p(STR)], VOID);
+            (vec![INT, STR, INT, handler], VOID)
+        }
+        "httpRespond" => (vec![INT, STR, STR], VOID),
+        "headerIndex" => (vec![STR, STR], INT),
+        "headerValue" => (vec![STR, INT], STR),
+        "headerRemove" => (vec![STR, STR], STR),
+        "headerAppend" => (vec![STR, STR, STR], STR),
+        _ => return None,
+    })
+}
 
 const CONVERSIONS: &[&str] = &["int", "i64", "f64", "f32", "i8", "i16", "i32", "u8", "u16", "u32", "u64"];
 
@@ -20,7 +47,7 @@ pub(super) fn is_builtin_type(name: &str) -> bool {
 }
 
 pub(super) fn is_builtin_ns(name: &str) -> bool {
-    matches!(name, "Math" | "console" | "JSON")
+    matches!(name, "Math" | "console" | "JSON" | "process" | "Date" | "performance")
 }
 
 pub(super) fn is_builtin_fn(name: &str) -> bool {
@@ -33,13 +60,10 @@ pub(super) fn removed_global(name: &str) -> Option<String> {
         "eval" | "Function" => format!("`{name}` is not supported: there is no runtime code evaluation"),
         "globalThis" | "window" | "document" | "global" => format!("`{name}` is not available; Barm compiles to native programs"),
         "require" | "module" | "exports" => "CommonJS is not supported; use `import { name } from \"./file\"`".to_string(),
-        "process" => "`process` is not available yet; the `std/process` module is planned for M3".to_string(),
         "setTimeout" | "setInterval" | "fetch" | "Promise" => format!("`{name}` is not supported yet (async is planned for M6)"),
-        "Date" => "`Date` is not supported yet; the `std/time` module is planned for M3".to_string(),
         "Symbol" | "Proxy" | "Reflect" | "WeakMap" | "WeakSet" | "BigInt" => format!("`{name}` is not supported"),
         "Object" => "`Object` is not supported: records have fixed fields; use `Map` for dynamic keys".to_string(),
         "Array" => "`Array.from`/`Array.isArray` are not supported; use array literals and `map`".to_string(),
-        "Error" => "`Error` is not supported yet (errors are planned for M3)".to_string(),
         _ => return None,
     })
 }
@@ -157,7 +181,7 @@ fn opt(c: &mut Checker, ty: TyId) -> FnParam {
 
 fn sig(params: Vec<(FnParam, &str)>, ret: TyId) -> CallSig {
     let (params, names) = params.into_iter().map(|(p, n)| (p, n.to_string())).unzip();
-    CallSig { tparams: Vec::new(), params, names, rest: None, ret }
+    CallSig { tparams: Vec::new(), params, names, rest: None, ret, throws: NEVER }
 }
 
 pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSig> {
@@ -173,7 +197,7 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
             let opt_e = c.types.optional(e);
             let pred = c.types.func(vec![p(e), FnParam { ty: INT, inout: false, optional: true }], BOOL);
             match name {
-                "push" | "unshift" => mk(CallSig { tparams: Vec::new(), params: Vec::new(), names: Vec::new(), rest: Some(e), ret: INT }, true),
+                "push" | "unshift" => mk(CallSig { tparams: Vec::new(), params: Vec::new(), names: Vec::new(), rest: Some(e), ret: INT, throws: NEVER }, true),
                 "pop" | "shift" => mk(sig(vec![], opt_e), true),
                 "map" | "flatMap" => {
                     let u_name = c.syms.u;
@@ -182,7 +206,7 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
                     let ret_elem = if name == "map" { ut } else { c.types.array(ut) };
                     let f = c.types.func(vec![p(e), FnParam { ty: INT, inout: false, optional: true }], ret_elem);
                     let ret = c.types.array(ut);
-                    mk(CallSig { tparams: vec![u], params: vec![p(f)], names: vec!["fn".into()], rest: None, ret }, false)
+                    mk(CallSig { tparams: vec![u], params: vec![p(f)], names: vec!["fn".into()], rest: None, ret, throws: NEVER }, false)
                 }
                 "filter" => mk(sig(vec![(p(pred), "predicate")], arr), false),
                 "forEach" => {
@@ -194,7 +218,7 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
                     let u = c.new_gparam(u_name, None);
                     let ut = c.types.intern(Ty::Param(u));
                     let f = c.types.func(vec![p(ut), p(e), FnParam { ty: INT, inout: false, optional: true }], ut);
-                    mk(CallSig { tparams: vec![u], params: vec![p(f), p(ut)], names: vec!["fn".into(), "initial".into()], rest: None, ret: ut }, false)
+                    mk(CallSig { tparams: vec![u], params: vec![p(f), p(ut)], names: vec!["fn".into(), "initial".into()], rest: None, ret: ut, throws: NEVER }, false)
                 }
                 "some" | "every" => mk(sig(vec![(p(pred), "predicate")], BOOL), false),
                 "find" => mk(sig(vec![(p(pred), "predicate")], opt_e), false),
@@ -328,12 +352,20 @@ impl<'a> Checker<'a> {
         if ns == "Math" && MATH_CONSTS.contains(&n.as_str()) {
             return F64;
         }
-        if ns == "JSON" {
-            self.report(Diagnostic::new("U0017", name_span, "`JSON` is not supported yet; the `std/json` module is planned for M3"));
-            return ERROR;
+        if ns == "process" {
+            match n.as_str() {
+                "argv" => return self.types.array(STR),
+                "platform" => return STR,
+                // `process.env.NAME`, `process.stdout.write(s)`: namespaces of their own.
+                "env" | "stdout" | "stderr" => return self.types.intern(Ty::BuiltinNs(name)),
+                _ => {}
+            }
         }
         let known: Vec<&str> = match ns {
             "Math" => MATH_CONSTS.iter().copied().chain(MATH_F64_FNS.iter().map(|f| f.0)).chain(MATH_INT_FNS.iter().copied()).chain(["abs", "min", "max"]).collect(),
+            "process" => vec!["argv", "env", "exit", "cwd", "platform", "stdout", "stderr"],
+            "Date" | "performance" => vec!["now"],
+            "JSON" => vec!["stringify", "parse"],
             _ => vec!["log", "error", "warn", "info"],
         };
         if known.contains(&n.as_str()) {
@@ -370,12 +402,163 @@ impl<'a> Checker<'a> {
                 }
                 VOID
             }
-            "JSON" => {
+            "JSON" => self.json_call(name, name_span, args, exp, span),
+            "process" => {
+                let (params, ret): (Vec<FnParam>, TyId) = match name {
+                    "exit" => (vec![opt(self, INT)], NEVER),
+                    "cwd" => (vec![], STR),
+                    _ => {
+                        self.check_args_loose(args);
+                        self.unknown_ns_member(ns, name, &["argv", "env", "exit", "cwd", "platform", "stdout", "stderr"], name_span);
+                        return ERROR;
+                    }
+                };
+                let names = params.iter().map(|_| "code".to_string()).collect();
+                let cs = CallSig { tparams: Vec::new(), params, names, rest: None, ret, throws: NEVER };
+                self.call_sig(&cs, &format!("process.{name}"), &[], args, exp, span)
+            }
+            "Date" | "performance" => {
+                if name != "now" {
+                    self.check_args_loose(args);
+                    let msg = if ns == "Date" { "only `Date.now()` is supported (no `Date` objects yet)" } else { "only `performance.now()` is supported" };
+                    self.report(Diagnostic::new("U0017", name_span, msg));
+                    return ERROR;
+                }
+                let cs = CallSig { tparams: Vec::new(), params: Vec::new(), names: Vec::new(), rest: None, ret: F64, throws: NEVER };
+                self.call_sig(&cs, &format!("{ns}.now"), &[], args, exp, span)
+            }
+            "stdout" | "stderr" => {
+                if name != "write" {
+                    self.check_args_loose(args);
+                    self.unknown_ns_member(&format!("process.{ns}"), name, &["write"], name_span);
+                    return ERROR;
+                }
+                let cs = CallSig { tparams: Vec::new(), params: vec![p(STR)], names: vec!["text".into()], rest: None, ret: VOID, throws: NEVER };
+                self.call_sig(&cs, &format!("process.{ns}.write"), &[], args, exp, span)
+            }
+            "__native" => match native_sig(&mut self.types, name) {
+                Some((ps, ret)) => {
+                    let names = ps.iter().enumerate().map(|(i, _)| format!("a{i}")).collect();
+                    let cs = CallSig { tparams: Vec::new(), params: ps.into_iter().map(p).collect(), names, rest: None, ret, throws: NEVER };
+                    self.call_sig(&cs, &format!("__native.{name}"), &[], args, exp, span)
+                }
+                None => {
+                    self.check_args_loose(args);
+                    self.report(Diagnostic::new("T0107", name_span, format!("unknown native function `{name}`")));
+                    ERROR
+                }
+            },
+            _ => self.math_call(name, name_span, args, exp, span),
+        }
+    }
+
+    /// `JSON.stringify(value, undefined?, indent?)` and `JSON.parse(text)` (the result type comes
+    /// from context: `const c: Config = JSON.parse(text)` or `JSON.parse(text) as Config`).
+    fn json_call(&mut self, name: &str, name_span: Span, args: &[Arg], exp: Option<TyId>, span: Span) -> TyId {
+        let call = self.pending_call.take();
+        match name {
+            "stringify" => {
+                if args.is_empty() || args.len() > 3 {
+                    self.report(Diagnostic::new("T0201", span, format!("`JSON.stringify` takes 1 to 3 arguments, found {}", args.len())));
+                }
+                if let Some(a) = args.first() {
+                    let t = self.expr(a.expr, None);
+                    if !self.json_ok(t, true) {
+                        let s = self.ast().expr(a.expr).span;
+                        let shown = self.show(t);
+                        self.report(Diagnostic::new("T0840", s, format!("`{shown}` can't be converted to JSON")).note("supported", "numbers, strings, booleans, arrays, records, unions of these, `Map<string, T>` and class instances"));
+                    }
+                }
+                if let Some(a) = args.get(1) {
+                    let t = self.expr(a.expr, None);
+                    if t != UNDEFINED && t != ERROR {
+                        let s = self.ast().expr(a.expr).span;
+                        self.report(Diagnostic::new("U0017", s, "`JSON.stringify` replacers are not supported; pass `undefined`"));
+                    }
+                }
+                if let Some(a) = args.get(2) {
+                    let hint = self.types.union(&[INT, STR]);
+                    let t = self.expr(a.expr, Some(INT));
+                    let s = self.ast().expr(a.expr).span;
+                    self.expect_assignable(t, hint, s, Some("the indentation (spaces, or a string)".into()));
+                }
+                STR
+            }
+            "parse" => {
+                if args.len() != 1 {
+                    self.report(Diagnostic::new("T0201", span, format!("`JSON.parse` takes 1 argument, found {}", args.len())));
+                    self.check_args_loose(args);
+                    return ERROR;
+                }
+                let t = self.expr(args[0].expr, Some(STR));
+                let s = self.ast().expr(args[0].expr).span;
+                self.expect_assignable(t, STR, s, None);
+                let Some(target) = exp.filter(|&x| x != ERROR && x != UNKNOWN) else {
+                    if exp != Some(ERROR) {
+                        self.report(
+                            Diagnostic::new("T0841", span, "`JSON.parse` needs to know what type to produce")
+                                .note("instead", "annotate the binding (`const c: Config = JSON.parse(text)`) or cast (`JSON.parse(text) as Config`)")
+                                .note("why", "the parsed value is checked against the type, so it's safe to use"),
+                        );
+                    }
+                    return ERROR;
+                };
+                if !self.json_ok(target, false) {
+                    let shown = self.show(target);
+                    self.report(Diagnostic::new("T0840", span, format!("JSON can't be parsed into `{shown}`")).note("supported", "numbers, strings, booleans, arrays, records, unions of these and `Map<string, T>`"));
+                    return ERROR;
+                }
+                let syntax = self.builtin_class("SyntaxError");
+                if syntax != ERROR {
+                    self.on_throw(syntax, span, Some("JSON.parse"), call);
+                }
+                if let (Some(c), Some(f)) = (call, self.facts_mut())
+                    && let Some(cf) = f.calls.get_mut(&c)
+                {
+                    cf.ret = target;
+                }
+                target
+            }
+            _ => {
                 self.check_args_loose(args);
-                self.report(Diagnostic::new("U0017", span, "`JSON` is not supported yet; the `std/json` module is planned for M3"));
+                self.unknown_ns_member("JSON", name, &["stringify", "parse"], name_span);
                 ERROR
             }
-            _ => self.math_call(name, name_span, args, exp, span),
+        }
+    }
+
+    /// Can values of this type go to and (`!allow_class`) come from JSON?
+    pub(super) fn json_ok(&mut self, t: TyId, allow_class: bool) -> bool {
+        let mut seen = Vec::new();
+        self.json_ok_in(t, allow_class, &mut seen)
+    }
+
+    fn json_ok_in(&mut self, t: TyId, allow_class: bool, seen: &mut Vec<TyId>) -> bool {
+        if seen.contains(&t) {
+            return true;
+        }
+        seen.push(t);
+        match *self.types.get(t) {
+            Ty::Error | Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::Bool | Ty::Str | Ty::StrLit(_) | Ty::Undefined => true,
+            Ty::Array(e) => self.json_ok_in(e, allow_class, seen),
+            Ty::Map(k, v) => k == STR && self.json_ok_in(v, allow_class, seen),
+            Ty::Record(fs) => {
+                let fs = self.types.fields(fs).to_vec();
+                fs.iter().all(|f| self.json_ok_in(f.ty, allow_class, seen))
+            }
+            Ty::Union(ms) => {
+                let ms = self.types.tys(ms).to_vec();
+                ms.iter().all(|&m| self.json_ok_in(m, allow_class, seen))
+            }
+            Ty::Rec(..) => {
+                let u = self.unfold(t);
+                self.json_ok_in(u, allow_class, seen)
+            }
+            Ty::Class(..) if allow_class => {
+                let fields = self.class_as_fields(t);
+                fields.iter().filter(|f| !matches!(self.types.get(f.ty), Ty::Func(..))).map(|f| f.ty).collect::<Vec<_>>().into_iter().all(|ft| self.json_ok_in(ft, allow_class, seen))
+            }
+            _ => false,
         }
     }
 
@@ -383,11 +566,11 @@ impl<'a> Checker<'a> {
         let desc = format!("Math.{name}");
         if let Some(&(_, arity)) = MATH_F64_FNS.iter().find(|f| f.0 == name) {
             let names = ["x", "y"];
-            let cs = CallSig { tparams: Vec::new(), params: (0..arity).map(|_| p(F64)).collect(), names: names[..arity].iter().map(|s| s.to_string()).collect(), rest: None, ret: F64 };
+            let cs = CallSig { tparams: Vec::new(), params: (0..arity).map(|_| p(F64)).collect(), names: names[..arity].iter().map(|s| s.to_string()).collect(), rest: None, ret: F64, throws: NEVER };
             return self.call_sig(&cs, &desc, &[], args, exp, span);
         }
         if MATH_INT_FNS.contains(&name) {
-            let cs = CallSig { tparams: Vec::new(), params: vec![p(F64)], names: vec!["x".into()], rest: None, ret: INT };
+            let cs = CallSig { tparams: Vec::new(), params: vec![p(F64)], names: vec!["x".into()], rest: None, ret: INT, throws: NEVER };
             return self.call_sig(&cs, &desc, &[], args, exp, span);
         }
         match name {
@@ -562,7 +745,7 @@ impl<'a> Checker<'a> {
                 }
             }
             "toBeCloseTo" => {
-                let cs = CallSig { tparams: Vec::new(), params: vec![p(F64), opt(self, INT)], names: vec!["expected".into(), "digits".into()], rest: None, ret: VOID };
+                let cs = CallSig { tparams: Vec::new(), params: vec![p(F64), opt(self, INT)], names: vec!["expected".into(), "digits".into()], rest: None, ret: VOID, throws: NEVER };
                 self.call_sig(&cs, "toBeCloseTo", &[], args, None, span);
                 if subject != ERROR && !self.types.is_numeric(subject) {
                     let msg = format!("`toBeCloseTo` needs a number, found `{}`", self.show(subject));
