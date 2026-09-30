@@ -10,6 +10,8 @@ dropped: TypeError ECONNRESET: The socket connection was closed unexpectedly. Fo
 malformed: TypeError Malformed_HTTP_Response: Malformed_HTTP_Response fetching "BASE/malformed". For more information, pass `verbose: true` in the second argument to fetch()
 cut short: TypeError ECONNRESET: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()
 bad gzip: TypeError ZlibError: ZlibError fetching "BASE/badgzip". For more information, pass `verbose: true` in the second argument to fetch()
+bad brotli: TypeError BrotliDecompressionError: BrotliDecompressionError fetching "BASE/badbr". For more information, pass `verbose: true` in the second argument to fetch()
+bad zstd: TypeError ZstdDecompressionError: ZstdDecompressionError fetching "BASE/badzstd". For more information, pass `verbose: true` in the second argument to fetch()
 warm up: 200 BASE/text | hello
 pooled then dropped: TypeError ECONNRESET: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()
 still fine: 200 BASE/text | hello

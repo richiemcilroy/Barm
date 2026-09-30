@@ -142,7 +142,7 @@ scripts/sanitize.sh run file.barm # run under ASan/UBSan in a Linux container
 ## Project layout
 
 - `crates/barm/`: the compiler (Rust, no dependencies)
-- `vendor/boringssl/`: BoringSSL (Apache-2.0), for `fetch()` over `https:`. It's compiled once, and only programs that call `fetch()` link it (see [vendor/boringssl/BARM.md](vendor/boringssl/BARM.md)).
+- `vendor/boringssl/`, `vendor/brotli/`, `vendor/zstd/`: BoringSSL (Apache-2.0) for `fetch()` over `https:`, and the brotli (MIT) and zstd (BSD) decoders for compressed responses. They're compiled once, and only programs that call `fetch()` link them (see each `BARM.md`).
 - `runtime/`: the C runtime linked into every program
 - `examples/`: sample programs
 - `tests/`: checker snapshots, run tests and fuzzing

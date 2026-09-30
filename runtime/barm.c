@@ -5210,8 +5210,10 @@ enum { BM_FR_HEAD, BM_FR_FIXED, BM_FR_CHUNK_SIZE, BM_FR_CHUNK_DATA, BM_FR_CHUNK_
 enum { BM_FETCH_FOLLOW, BM_FETCH_MANUAL, BM_FETCH_ERROR };
 enum { BM_FETCH_DECOMPRESS = 1, BM_FETCH_INSECURE = 2 };
 
-/* Set by bm_tls_install() in programs linked with TLS (runtime/tls.c). */
+/* Set by bm_tls_install() in programs linked with TLS (runtime/tls.c, runtime/codecs.c). */
 const bm_tls_ops *bm_tls_impl;
+bool (*bm_decode_brotli)(const uint8_t *p, size_t n, bm_sb *out);
+bool (*bm_decode_zstd)(const uint8_t *p, size_t n, bm_sb *out);
 
 typedef struct bm_fr {
     bm_int id;
@@ -5235,7 +5237,7 @@ typedef struct bm_fr {
     /* the response */
     int state, status;
     bool keep, discard, head_only, got_any;
-    int enc;                   /* 1 gzip, 2 deflate */
+    int enc;                   /* 1 gzip, 2 deflate, 3 br, 4 zstd */
     int64_t remaining;
     /* The body is checked as UTF-8 while it arrives (still in cache): text() then needn't read
      * it again. A second pass over a big body right after it arrived also slows the next
@@ -5440,7 +5442,11 @@ static bool bm_fr_prepare(bm_fr *r) {
         bm_sb_push(h, host, (size_t)(auth_end - host));
         bm_sb_push(h, "\r\n", 2);
     }
-    if (r->decompress && !bm_hdr_has(r->headers, "accept-encoding")) bm_sb_push(h, "Accept-Encoding: gzip, deflate\r\n", 32);
+    /* what Bun asks for (brotli and zstd come with the TLS archive, which every fetch program links) */
+    if (r->decompress && !bm_hdr_has(r->headers, "accept-encoding")) {
+        if (bm_decode_brotli) bm_sb_push(h, "Accept-Encoding: gzip, deflate, br, zstd\r\n", 42);
+        else bm_sb_push(h, "Accept-Encoding: gzip, deflate\r\n", 32);
+    }
     if (userinfo && !bm_hdr_has(r->headers, "authorization")) {
         bm_str ui = bm_native_urlDecode(bm_str_from(userinfo, (size_t)(userinfo_end - userinfo)), false);
         bm_sb_push(h, "Authorization: Basic ", 21);
@@ -5591,7 +5597,7 @@ static bool bm_fr_head(bm_fr *r, const char *p, size_t n) {
             if (bm_has_token(v, vl, "close")) close = true;
             if (bm_has_token(v, vl, "keep-alive")) keepalive_seen = true;
         } else if (bm_ieq(l, nl, "content-encoding")) {
-            r->enc = bm_ieq(v, vl, "gzip") || bm_ieq(v, vl, "x-gzip") ? 1 : bm_ieq(v, vl, "deflate") ? 2 : 0;
+            r->enc = bm_ieq(v, vl, "gzip") || bm_ieq(v, vl, "x-gzip") ? 1 : bm_ieq(v, vl, "deflate") ? 2 : bm_ieq(v, vl, "br") ? 3 : bm_ieq(v, vl, "zstd") ? 4 : 0;
         } else if (bm_ieq(l, nl, "location")) {
             r->location.len = 0;
             bm_sb_push(&r->location, v, vl);
@@ -6036,10 +6042,15 @@ static void bm_fr_complete(bm_fr *r) {
     }
     if (r->decompress && r->enc && r->rbody.len) {
         bm_sb out = {0};
-        bool ok = r->enc == 1 ? bm_gunzip((const uint8_t *)r->rbody.data, r->rbody.len, &out) : bm_zlib_or_raw((const uint8_t *)r->rbody.data, r->rbody.len, &out);
+        const uint8_t *in = (const uint8_t *)r->rbody.data;
+        bool ok = r->enc == 1 ? bm_gunzip(in, r->rbody.len, &out)
+            : r->enc == 2 ? bm_zlib_or_raw(in, r->rbody.len, &out)
+            : r->enc == 3 ? bm_decode_brotli && bm_decode_brotli(in, r->rbody.len, &out)
+            : bm_decode_zstd && bm_decode_zstd(in, r->rbody.len, &out);
         if (!ok || out.len > INT32_MAX) {
             bm_sb_free(&out);
-            bm_fr_fail(r, "ZlibError", "ZlibError fetching \"%s\". %s", r->url.p->data, BM_FETCH_VERBOSE);
+            const char *why = r->enc == 3 ? "BrotliDecompressionError" : r->enc == 4 ? "ZstdDecompressionError" : "ZlibError"; /* Bun's codes */
+            bm_fr_fail(r, why, "%s fetching \"%s\". %s", why, r->url.p->data, BM_FETCH_VERBOSE);
             return;
         }
         bm_sb_free(&r->rbody);

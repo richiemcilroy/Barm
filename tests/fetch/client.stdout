@@ -44,6 +44,9 @@ deflate (zlib): 200 length=136863 same=true
 deflate (stored blocks): 200 length=70000 same=true
 deflate (raw, fixed codes): 200 "OK" ok=true redirected=false BASE/deflate?f=fixture-fixed.deflate | small body, fixed Huffman codes
 gzip (two members): 200 "OK" ok=true redirected=false BASE/gzip?f=fixture-two.gz | first member|second member
+brotli: 200 length=136863 same=true
+zstd: 200 length=136863 same=true
+zstd (two frames): 200 "OK" ok=true redirected=false BASE/zstd?f=fixture-two.zst | first frame|second frame
 decompress off: 17702 gzip
 invalid UTF-8: "a�b� c😀d"
 BOM: "bom"
