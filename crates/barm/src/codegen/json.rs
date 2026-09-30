@@ -112,7 +112,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                         let _ = writeln!(b, "    case {i}: {{ {} }} break;", body.trim());
                     } else {
                         let w = self.json_writer(m);
-                        let _ = writeln!(b, "    case {i}: {w}(sb, &v->u.m{i}, ind, lvl); break;");
+                        // (a class member is `K *const`: the writer takes `const K **`)
+                        let mct = self.ctype(m);
+                        let _ = writeln!(b, "    case {i}: {w}(sb, (const {mct} *)&v->u.m{i}, ind, lvl); break;");
                     }
                 }
                 b.push_str("    default: bm_sb_push_cstr(sb, \"null\"); break;\n    }\n");
@@ -134,12 +136,13 @@ impl<'c, 'a> Gen<'c, 'a> {
         let mut b = String::from("    bool first = true;\n    bm_sb_add_char(sb, '{');\n");
         for (name, ty, lv) in parts {
             let w = self.json_writer(*ty);
+            let ct = self.ctype(*ty);
             let key_text = format!("\"{name}\"");
             let key = format!("{}, {}", c_string(key_text.as_bytes()), key_text.len());
             let skip = self.json_is_undefined(*ty, lv);
             let _ = writeln!(
                 b,
-                "    if (!({skip})) {{\n        if (!first) bm_sb_add_char(sb, ',');\n        first = false;\n        bmg_js_nl(sb, ind, lvl + 1);\n        bm_sb_add(sb, {key});\n        if (ind.p->len) bm_sb_add(sb, \": \", 2); else bm_sb_add_char(sb, ':');\n        {w}(sb, &{lv}, ind, lvl + 1);\n    }}"
+                "    if (!({skip})) {{\n        if (!first) bm_sb_add_char(sb, ',');\n        first = false;\n        bmg_js_nl(sb, ind, lvl + 1);\n        bm_sb_add(sb, {key});\n        if (ind.p->len) bm_sb_add(sb, \": \", 2); else bm_sb_add_char(sb, ':');\n        {w}(sb, (const {ct} *)&{lv}, ind, lvl + 1);\n    }}"
             );
         }
         b.push_str("    if (!first) bmg_js_nl(sb, ind, lvl);\n    bm_sb_add_char(sb, '}');\n");
