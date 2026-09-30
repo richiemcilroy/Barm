@@ -87,6 +87,7 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
   ```
 - Copy-then-mutate where the original is read again (`const b = a; b.push(1); use(a)`, or `const b = a; addOne(&a); use(b)`) is an error [M1], because TS would share and Barm copies.
 - `class` instances are shared references (reference-counted): assignment shares the object, as in TS, and changes through one reference are seen through all. Their fields can be changed through any reference (`p.x = 1` works on a `const p` or a parameter). See §6a.
+- A value is freed as soon as nothing can use it again: a local's value is released after the last statement of its block that uses it (directly or through a local that may borrow from it), not at the end of the block.
 
 ## 6a. Classes **[M2]**
 ```ts

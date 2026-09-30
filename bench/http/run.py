@@ -97,6 +97,10 @@ def pss_mb(pgid):
     # worker's shared code isn't counted again)
     if pids and shutil.which("footprint"):
         out = subprocess.run(["footprint", "-f", "bytes"] + [a for p in pids for a in ("-p", p)], capture_output=True, text=True).stdout
+        # Several processes: per-process lines, then their sum as "Summary Footprint".
+        total = re.search(r"Summary Footprint: (\d+) B", out)
+        if total:
+            return int(total.group(1)) / (1 << 20)
         fp = [int(m.group(1)) for m in re.finditer(r"Footprint: (\d+) B", out)]
         if fp:
             return sum(fp) / (1 << 20)
