@@ -1,0 +1,147 @@
+// std/http — a Bun-style HTTP/1.1 server:
+//
+//   serve({ port: 3000, fetch: (req: Request): Response => new Response("hi") })
+//
+// The event loop, parser and writer are native (kqueue/epoll, keep-alive, pipelining);
+// `workers` > 1 forks that many processes sharing the listening socket, supervised by the
+// parent: a worker that dies is replaced, and SIGTERM/SIGINT stop them all.
+
+function check(): void throws Error {
+  const err = __native.takeError()
+  if (err !== "") {
+    throw new Error(err)
+  }
+}
+
+// Header names are case-insensitive; the block is "name: value\r\n" lines.
+export class Headers {
+  private raw: string
+
+  constructor(raw?: string) {
+    this.raw = raw ?? ""
+  }
+
+  get(name: string): string | undefined {
+    const at = __native.headerIndex(this.raw, name)
+    if (at < 0) {
+      return undefined
+    }
+    return __native.headerValue(this.raw, at)
+  }
+
+  has(name: string): bool {
+    return __native.headerIndex(this.raw, name) >= 0
+  }
+
+  append(name: string, value: string): void {
+    this.raw = __native.headerAppend(this.raw, name, value)
+  }
+
+  set(name: string, value: string): void {
+    this.delete(name)
+    this.append(name, value)
+  }
+
+  delete(name: string): void {
+    this.raw = __native.headerRemove(this.raw, name)
+  }
+
+  // The raw block, as sent on the wire.
+  toString(): string {
+    return this.raw
+  }
+}
+
+export class Request {
+  readonly method: string
+  private target: string
+  private rawHeaders: string
+  private rawBody: string
+
+  constructor(method: string, target: string, rawHeaders: string, body: string) {
+    this.method = method
+    this.target = target
+    this.rawHeaders = rawHeaders
+    this.rawBody = body
+  }
+
+  // "http://host/path?query", as in the Fetch API.
+  get url(): string {
+    const host = __native.headerIndex(this.rawHeaders, "host")
+    return "http://" + (host < 0 ? "localhost" : __native.headerValue(this.rawHeaders, host)) + this.target
+  }
+
+  // "/path" (no query).
+  get pathname(): string {
+    const q = this.target.indexOf("?")
+    return q < 0 ? this.target : this.target.slice(0, q)
+  }
+
+  // "?query", or "" when there is none.
+  get search(): string {
+    const q = this.target.indexOf("?")
+    return q < 0 ? "" : this.target.slice(q)
+  }
+
+  get headers(): Headers {
+    return new Headers(this.rawHeaders)
+  }
+
+  header(name: string): string | undefined {
+    const at = __native.headerIndex(this.rawHeaders, name)
+    if (at < 0) {
+      return undefined
+    }
+    return __native.headerValue(this.rawHeaders, at)
+  }
+
+  text(): string {
+    return this.rawBody
+  }
+}
+
+export type ResponseInit = { status?: int, headers?: Headers }
+
+export class Response {
+  readonly status: int
+  readonly body: string
+  readonly rawHeaders: string
+
+  constructor(body?: string, init?: ResponseInit) {
+    this.body = body ?? ""
+    this.status = init?.status ?? 200
+    const h = init?.headers
+    this.rawHeaders = h === undefined ? "" : h.toString()
+  }
+
+  get headers(): Headers {
+    return new Headers(this.rawHeaders)
+  }
+
+  text(): string {
+    return this.body
+  }
+}
+
+// A response with `content-type: application/json`; `body` is already serialized:
+// `json(JSON.stringify(value))`.
+export function json(body: string, status?: int): Response {
+  return new Response(body, { status: status ?? 200, headers: new Headers("content-type: application/json\r\n") })
+}
+
+export type ServeOptions = {
+  port?: int
+  hostname?: string
+  workers?: int
+  fetch: (req: Request) => Response
+}
+
+// Serves until the process is killed; throws if the address can't be bound.
+export function serve(options: ServeOptions): void throws Error {
+  const handler = options.fetch
+  __native.httpServe(options.port ?? 3000, options.hostname ?? "0.0.0.0", options.workers ?? 1, (method: string, target: string, headers: string, body: string): void => {
+    const res = handler(new Request(method, target, headers, body))
+    __native.httpRespond(res.status, res.rawHeaders, res.body)
+  })
+  try check()
+}
