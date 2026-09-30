@@ -85,7 +85,7 @@ static size_t bm_size_mul_add(size_t a, size_t b, size_t c) {
  * bm_str_from_sb can adopt it without copying. sb->data points at the bytes. */
 #define BM_STR_HDR offsetof(bm_strbuf, data)
 
-static void bm_sb_grow(bm_sb *sb, size_t need) {
+void bm_sb_grow(bm_sb *sb, size_t need) {
     size_t cap = sb->cap ? sb->cap * 2 : 32;
     if (cap < need) cap = need;
     if (cap > SIZE_MAX - BM_STR_HDR - 1) bm_trap("string too long", NULL);
@@ -207,15 +207,57 @@ BM_STR_LIT(bm_lit_false, "false");
 
 static inline bm_str bm_ascii_str(unsigned char c) { return (bm_str){(bm_strbuf *)&bm_ascii_strs[c]}; }
 
+/* Small strings (header + bytes + NUL <= BM_SMALL_MAX) come from per-size free lists refilled
+ * from 64 KiB slabs; larger ones from malloc. The class follows from the length alone, so
+ * freeing needs no flag. (Plain malloc under AddressSanitizer, so it sees every string.) */
+enum { BM_SMALL_MAX = 256, BM_SMALL_CLASSES = BM_SMALL_MAX / 16 + 1 };
+#if defined(__SANITIZE_ADDRESS__) || (defined(__has_feature) && __has_feature(address_sanitizer))
+#define BM_PLAIN_ALLOC 1
+#endif
+static void *bm_small_bins[BM_SMALL_CLASSES];
+static __attribute__((noinline)) void *bm_small_refill(size_t c) {
+    size_t sz = c * 16, n = 65536 / sz;
+    char *slab = bm_alloc(n * sz);
+    for (size_t i = n - 1; i >= 1; i--) {
+        void **f = (void **)(void *)(slab + i * sz);
+        *f = bm_small_bins[c];
+        bm_small_bins[c] = f;
+    }
+    return slab;
+}
+static inline void *bm_small_alloc(size_t size) {
+#ifdef BM_PLAIN_ALLOC
+    return bm_alloc(size);
+#endif
+    size_t c = (size + 15) >> 4;
+    void **f = bm_small_bins[c];
+    if (BM_LIKELY(f != NULL)) { bm_small_bins[c] = *f; return f; }
+    return bm_small_refill(c);
+}
+static inline void bm_small_free(void *p, size_t size) {
+#ifdef BM_PLAIN_ALLOC
+    free(p); return;
+#endif
+    size_t c = (size + 15) >> 4;
+    *(void **)p = bm_small_bins[c];
+    bm_small_bins[c] = p;
+}
+static inline size_t bm_strbuf_size(size_t n) { return BM_STR_HDR + n + 1; }
+
 static bm_strbuf *bm_strbuf_new(size_t n) {
-    bm_strbuf *b = (bm_strbuf *)bm_alloc(bm_size_mul_add(n, 1, BM_STR_HDR + 1));
+    size_t size = bm_size_mul_add(n, 1, BM_STR_HDR + 1);
+    bm_strbuf *b = (bm_strbuf *)(size <= BM_SMALL_MAX ? bm_small_alloc(size) : bm_alloc(size));
     b->rc = 1;
     b->len = (int64_t)n;
     b->data[n] = 0;
     return b;
 }
 
-void bm_str_release_slow(bm_str s) { free(s.p); }
+void bm_str_release_slow(bm_str s) {
+    size_t size = bm_strbuf_size((size_t)s.p->len);
+    if (size <= BM_SMALL_MAX) bm_small_free(s.p, size);
+    else free(s.p);
+}
 
 bm_str bm_str_from(const char *bytes, size_t n) {
     if (n == 0) return BM_EMPTY_STR;
@@ -228,6 +270,11 @@ bm_str bm_str_from(const char *bytes, size_t n) {
 bm_str bm_str_from_sb(bm_sb *sb) {
     size_t n = sb->len;
     if (n <= 1) { /* empty or one byte: bm_str_from may return an immortal string */
+        bm_str r = bm_str_from(sb->data, n);
+        bm_sb_free(sb);
+        return r;
+    }
+    if (bm_strbuf_size(n) <= BM_SMALL_MAX) { /* small strings live in the small-block allocator */
         bm_str r = bm_str_from(sb->data, n);
         bm_sb_free(sb);
         return r;
@@ -350,7 +397,30 @@ static size_t bm_fmt_number(char *buf, double v, bool is_f32) {
     if (v < (is_f32 ? 16777216.0 : 9007199254740992.0) && v == (double)(int64_t)v)
         return (size_t)(p - buf) + bm_fmt_i64(p, (int64_t)v);
     char d[24] = {0};
-    int n, k = bm_shortest_digits(v, is_f32, d, &n);
+    int n, k = 0;
+    /* Fast path: the fewest decimals f such that round(v * 10^f) / 10^f is exactly v (both
+     * exact in a double: the division is correctly rounded, like parsing the decimal). The
+     * smallest f gives the fewest significant digits. Typical JSON numbers (prices, coordinates)
+     * take this path; others use the general shortest search. */
+    static const double pow10_tab[] = { 1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16 };
+    if (!is_f32 && v >= 1e-7 && v < 1e15) {
+        for (int f = 1; f <= 16 && !k; f++) {
+            double s = v * pow10_tab[f];
+            if (s >= 9007199254740992.0) break;
+            double r = (double)(int64_t)(s + 0.5);
+            if (r / pow10_tab[f] != v) continue;
+            /* digits of r, with the decimal point f places from the right */
+            char tmp[24];
+            int m = (int)bm_fmt_i64(tmp, (int64_t)r);
+            int lead = 0;
+            while (lead < m - 1 && tmp[lead] == '0') lead++;
+            k = m - lead;
+            memcpy(d, tmp + lead, (size_t)k);
+            n = m - f;
+            while (k > 1 && d[k - 1] == '0') k--;
+        }
+    }
+    if (!k) k = bm_shortest_digits(v, is_f32, d, &n);
     if (k <= n && n <= 21) {
         memcpy(p, d, (size_t)k); p += k;
         for (int i = k; i < n; i++) *p++ = '0';
@@ -1806,6 +1876,31 @@ void bm_inspect_record(bm_sb *sb, int depth, size_t n, const char *const *names,
     bm_reduce_to_single_string(sb, &out, "{", "}", false, depth + 1, false);
 }
 
+void bm_inspect_object(bm_sb *sb, int depth, const char *cls, size_t n, const char *const *names, const bm_type *const *types,
+                       const void *const *fields) {
+    size_t cl = strlen(cls);
+    if (n == 0) {
+        bm_sb_push(sb, cls, cl);
+        bm_sb_push(sb, " {}", 3);
+        return;
+    }
+    char buf[160];
+    snprintf(buf, sizeof buf, "[%s]", cls);
+    if (!bm_inspect_enter(sb, depth, buf)) return;
+    bm_pieces out = {0};
+    for (size_t i = 0; i < n; i++) {
+        if (bm_is_plain_key(names[i])) bm_sb_push_cstr(&out.text, names[i]);
+        else bm_push_quoted(&out.text, names[i], strlen(names[i]));
+        bm_sb_push(&out.text, ": ", 2);
+        bm_ictx.indent += 2;
+        types[i]->inspect(&out.text, fields[i], depth + 1);
+        bm_ictx.indent -= 2;
+        bm_pieces_mark(&out);
+    }
+    snprintf(buf, sizeof buf, "%s {", cls);
+    bm_reduce_to_single_string(sb, &out, buf, "}", false, depth + 1, false);
+}
+
 /* ================================================================== primitive type descriptors */
 
 #define BM_DEFINE_INT_TYPE(name, ctype, is_unsigned)                                              \
@@ -1969,6 +2064,8 @@ void bm_env_release_slow(bm_env *e) {
 
 /* ================================================================== tests */
 
+bool bm_test_active(void) { return bm_test_jmp != NULL; }
+
 void bm_test_run(const char *name, void (*fn)(void)) {
     jmp_buf jb;
     bm_test_jmp = &jb;
@@ -2044,4 +2141,1127 @@ void bm_init(int argc, char **argv) {
     } else {
         bm_random_seed(0);
     }
+}
+
+/* ================================================================== system */
+
+#include <dirent.h>
+#include <errno.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+
+static bm_sb bm_native_err;
+
+static const char *bm_errno_name(int e) {
+    switch (e) {
+    case ENOENT: return "ENOENT";
+    case EACCES: return "EACCES";
+    case EEXIST: return "EEXIST";
+    case ENOTDIR: return "ENOTDIR";
+    case EISDIR: return "EISDIR";
+    case ENOTEMPTY: return "ENOTEMPTY";
+    case EPERM: return "EPERM";
+    case EBUSY: return "EBUSY";
+    case EMFILE: return "EMFILE";
+    case ENOSPC: return "ENOSPC";
+    case EROFS: return "EROFS";
+    default: return "EIO";
+    }
+}
+
+static const char *bm_errno_text(int e) {
+    switch (e) {
+    case ENOENT: return "no such file or directory";
+    case EACCES: return "permission denied";
+    case EEXIST: return "file already exists";
+    case ENOTDIR: return "not a directory";
+    case EISDIR: return "illegal operation on a directory";
+    case ENOTEMPTY: return "directory not empty";
+    case EPERM: return "operation not permitted";
+    default: return strerror(e);
+    }
+}
+
+/* "ENOENT: no such file or directory, open 'path'" */
+static void bm_native_fail(int e, const char *op, bm_str path) {
+    if (bm_native_err.len) return;
+    bm_sb_push_cstr(&bm_native_err, bm_errno_name(e));
+    bm_sb_push_cstr(&bm_native_err, ": ");
+    bm_sb_push_cstr(&bm_native_err, bm_errno_text(e));
+    bm_sb_push_cstr(&bm_native_err, ", ");
+    bm_sb_push_cstr(&bm_native_err, op);
+    bm_sb_push_cstr(&bm_native_err, " '");
+    bm_sb_push(&bm_native_err, path.p->data, (size_t)path.p->len);
+    bm_sb_push_char(&bm_native_err, '\'');
+}
+
+bm_str bm_native_takeError(void) {
+    if (!bm_native_err.len) return BM_EMPTY_STR;
+    return bm_str_from_sb(&bm_native_err);
+}
+
+bm_str bm_native_readFile(bm_str path) {
+    FILE *f = fopen(path.p->data, "rb");
+    if (!f) { bm_native_fail(errno, "open", path); return BM_EMPTY_STR; }
+    struct stat st;
+    if (fstat(fileno(f), &st) == 0 && S_ISDIR(st.st_mode)) { fclose(f); bm_native_fail(EISDIR, "read", path); return BM_EMPTY_STR; }
+    bm_sb sb = {0};
+    char buf[65536];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof buf, f)) > 0) bm_sb_push(&sb, buf, n);
+    int err = ferror(f) ? errno : 0;
+    fclose(f);
+    if (err) { bm_sb_free(&sb); bm_native_fail(err, "read", path); return BM_EMPTY_STR; }
+    return bm_str_from_sb(&sb);
+}
+
+void bm_native_writeFile(bm_str path, bm_str data, bool append) {
+    FILE *f = fopen(path.p->data, append ? "ab" : "wb");
+    if (!f) { bm_native_fail(errno, "open", path); return; }
+    if (data.p->len && fwrite(data.p->data, 1, (size_t)data.p->len, f) != (size_t)data.p->len) bm_native_fail(errno, "write", path);
+    if (fclose(f) != 0) bm_native_fail(errno, "close", path);
+}
+
+bool bm_native_exists(bm_str path) {
+    struct stat st;
+    return stat(path.p->data, &st) == 0;
+}
+
+static int bm_cmp_cstr(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+
+bm_arr bm_native_readDir(bm_str path) {
+    DIR *d = opendir(path.p->data);
+    if (!d) { bm_native_fail(errno, "scandir", path); return BM_EMPTY_ARR; }
+    char **names = NULL;
+    size_t n = 0, cap = 0;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        if (n == cap) { cap = cap ? cap * 2 : 16; names = bm_realloc(names, cap * sizeof(char *)); }
+        size_t len = strlen(e->d_name);
+        names[n] = bm_alloc(len + 1);
+        memcpy(names[n], e->d_name, len + 1);
+        n++;
+    }
+    closedir(d);
+    qsort(names, n, sizeof(char *), bm_cmp_cstr);
+    bm_arr out = bm_arr_with_capacity(&bm_type_str, (bm_int)n);
+    for (size_t i = 0; i < n; i++) {
+        bm_str s = bm_str_from(names[i], strlen(names[i]));
+        bm_arr_push(&out, &bm_type_str, &s);
+        bm_free(names[i]);
+    }
+    bm_free(names);
+    return out;
+}
+
+static int bm_mkdir_p(char *p) {
+    for (char *s = p + 1; *s; s++) {
+        if (*s != '/') continue;
+        *s = 0;
+        if (mkdir(p, 0777) != 0 && errno != EEXIST) { *s = '/'; return -1; }
+        *s = '/';
+    }
+    if (mkdir(p, 0777) != 0 && errno != EEXIST) return -1;
+    return 0;
+}
+
+void bm_native_mkdir(bm_str path, bool recursive) {
+    if (recursive) {
+        char *p = bm_alloc((size_t)path.p->len + 1);
+        memcpy(p, path.p->data, (size_t)path.p->len + 1);
+        if (bm_mkdir_p(p) != 0) bm_native_fail(errno, "mkdir", path);
+        bm_free(p);
+        return;
+    }
+    if (mkdir(path.p->data, 0777) != 0) bm_native_fail(errno, "mkdir", path);
+}
+
+void bm_native_unlink(bm_str path) {
+    if (unlink(path.p->data) != 0) bm_native_fail(errno, "unlink", path);
+}
+
+static int bm_rm_rf(const char *p) {
+    struct stat st;
+    if (lstat(p, &st) != 0) return -1;
+    if (S_ISDIR(st.st_mode)) {
+        DIR *d = opendir(p);
+        if (!d) return -1;
+        struct dirent *e;
+        size_t pl = strlen(p);
+        while ((e = readdir(d))) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            size_t nl = strlen(e->d_name);
+            char *child = bm_alloc(pl + nl + 2);
+            memcpy(child, p, pl);
+            child[pl] = '/';
+            memcpy(child + pl + 1, e->d_name, nl + 1);
+            int r = bm_rm_rf(child);
+            bm_free(child);
+            if (r != 0) { closedir(d); return -1; }
+        }
+        closedir(d);
+        return rmdir(p);
+    }
+    return unlink(p);
+}
+
+void bm_native_rm(bm_str path, bool recursive, bool force) {
+    struct stat st;
+    if (lstat(path.p->data, &st) != 0) {
+        if (!(force && errno == ENOENT)) bm_native_fail(errno, "rm", path);
+        return;
+    }
+    if (S_ISDIR(st.st_mode) && !recursive) { bm_native_fail(EISDIR, "rm", path); return; }
+    if (bm_rm_rf(path.p->data) != 0) bm_native_fail(errno, "rm", path);
+}
+
+bm_str bm_native_cwd(void) {
+    char buf[4096];
+    if (!getcwd(buf, sizeof buf)) return bm_str_from(".", 1);
+    return bm_str_from(buf, strlen(buf));
+}
+
+bm_arr bm_process_argv(void) {
+    bm_arr out = bm_arr_with_capacity(&bm_type_str, bm_argc + 1);
+    /* Node: [node binary, script, args...]; a Barm program is both, so argv[0] appears twice. */
+    for (int i = -1; i < bm_argc; i++) {
+        const char *a = bm_argv[i < 0 ? 0 : i];
+        bm_str s = bm_str_from(a, strlen(a));
+        bm_arr_push(&out, &bm_type_str, &s);
+    }
+    return out;
+}
+
+bool bm_process_env(bm_str name, bm_str *out) {
+    const char *v = getenv(name.p->data);
+    if (!v) return false;
+    *out = bm_str_from(v, strlen(v));
+    return true;
+}
+
+_Noreturn void bm_process_exit(bm_int code) {
+    bm_out_flush();
+    exit((int)code);
+}
+
+double bm_date_now(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (double)tv.tv_sec * 1000.0 + (double)(tv.tv_usec / 1000);
+}
+
+static struct timespec bm_start_time;
+double bm_performance_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    if (bm_start_time.tv_sec == 0 && bm_start_time.tv_nsec == 0) bm_start_time = ts;
+    return (double)(ts.tv_sec - bm_start_time.tv_sec) * 1e3 + (double)(ts.tv_nsec - bm_start_time.tv_nsec) / 1e6;
+}
+
+void bm_write_stdout(bm_str s) { bm_out_write(s.p->data, (size_t)s.p->len); }
+
+void bm_write_stderr(bm_str s) {
+    bm_out_flush();
+    fwrite(s.p->data, 1, (size_t)s.p->len, stderr);
+    fflush(stderr);
+}
+
+/* ================================================================== JSON */
+
+/* Bytes that need escaping in a JSON string: control characters, '"' and '\\'. */
+static const uint8_t bm_json_esc[256] = {
+    1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+    0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,
+};
+
+void bm_json_quote(bm_sb *sb, bm_str s) {
+    static const char hex[] = "0123456789abcdef";
+    const unsigned char *d = (const unsigned char *)s.p->data;
+    size_t n = (size_t)s.p->len, i = 0;
+    bm_sb_reserve(sb, n + 2);
+    sb->data[sb->len++] = '"';
+    while (i < n) {
+        size_t start = i;
+        while (i < n && !bm_json_esc[d[i]]) i++;
+        if (i > start) bm_sb_push(sb, (const char *)d + start, i - start);
+        if (i == n) break;
+        unsigned char c = d[i++];
+        char buf[6];
+        switch (c) {
+        case '"': bm_sb_push(sb, "\\\"", 2); break;
+        case '\\': bm_sb_push(sb, "\\\\", 2); break;
+        case '\b': bm_sb_push(sb, "\\b", 2); break;
+        case '\f': bm_sb_push(sb, "\\f", 2); break;
+        case '\n': bm_sb_push(sb, "\\n", 2); break;
+        case '\r': bm_sb_push(sb, "\\r", 2); break;
+        case '\t': bm_sb_push(sb, "\\t", 2); break;
+        default:
+            buf[0] = '\\'; buf[1] = 'u'; buf[2] = '0'; buf[3] = '0'; buf[4] = hex[c >> 4]; buf[5] = hex[c & 15];
+            bm_sb_push(sb, buf, 6);
+        }
+    }
+    bm_sb_push_char(sb, '"');
+}
+
+void bm_json_number(bm_sb *sb, double x) {
+    if (x != x || x == INFINITY || x == -INFINITY) { bm_sb_push_cstr(sb, "null"); return; }
+    if (x == 0) { bm_sb_push_char(sb, '0'); return; } /* -0 prints as 0 */
+    bm_sb_push_f64(sb, x);
+}
+
+void bm_jp_init(bm_jp *p, bm_str text) {
+    p->s = (const unsigned char *)text.p->data;
+    p->n = (size_t)text.p->len;
+    p->i = 0;
+    p->err[0] = 0;
+}
+
+static void bm_jp_ws(bm_jp *p) {
+    while (p->i < p->n && (p->s[p->i] == ' ' || p->s[p->i] == '\t' || p->s[p->i] == '\n' || p->s[p->i] == '\r')) p->i++;
+}
+
+char bm_jp_peek(bm_jp *p) {
+    bm_jp_ws(p);
+    return p->i < p->n ? (char)p->s[p->i] : 0;
+}
+
+bool bm_jp_fail(bm_jp *p, const char *expected) {
+    if (p->err[0]) return false;
+    if (p->i >= p->n) snprintf(p->err, sizeof p->err, "Unexpected end of JSON input (expected %s)", expected);
+    else if (p->s[p->i] < 0x20 || p->s[p->i] >= 0x7f) snprintf(p->err, sizeof p->err, "Expected %s at position %zu of the JSON input", expected, p->i);
+    else snprintf(p->err, sizeof p->err, "Expected %s but found '%c' at position %zu of the JSON input", expected, p->s[p->i], p->i);
+    return false;
+}
+
+bool bm_jp_char(bm_jp *p, char c) {
+    if (bm_jp_peek(p) == c) { p->i++; return true; }
+    char what[4] = { '\'', c, '\'', 0 };
+    return bm_jp_fail(p, what);
+}
+
+bool bm_jp_try_char(bm_jp *p, char c) {
+    if (bm_jp_peek(p) == c) { p->i++; return true; }
+    return false;
+}
+
+bool bm_jp_word(bm_jp *p, const char *w) {
+    bm_jp_ws(p);
+    size_t n = strlen(w);
+    if (p->n - p->i >= n && memcmp(p->s + p->i, w, n) == 0) { p->i += n; return true; }
+    return bm_jp_fail(p, w);
+}
+
+static int bm_jp_hex(unsigned char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static void bm_sb_push_utf8(bm_sb *sb, uint32_t cp) {
+    char b[4];
+    if (cp < 0x80) { b[0] = (char)cp; bm_sb_push(sb, b, 1); }
+    else if (cp < 0x800) { b[0] = (char)(0xC0 | cp >> 6); b[1] = (char)(0x80 | (cp & 63)); bm_sb_push(sb, b, 2); }
+    else if (cp < 0x10000) { b[0] = (char)(0xE0 | cp >> 12); b[1] = (char)(0x80 | (cp >> 6 & 63)); b[2] = (char)(0x80 | (cp & 63)); bm_sb_push(sb, b, 3); }
+    else { b[0] = (char)(0xF0 | cp >> 18); b[1] = (char)(0x80 | (cp >> 12 & 63)); b[2] = (char)(0x80 | (cp >> 6 & 63)); b[3] = (char)(0x80 | (cp & 63)); bm_sb_push(sb, b, 4); }
+}
+
+static bool bm_jp_u4(bm_jp *p, uint32_t *out) {
+    if (p->n - p->i < 4) return bm_jp_fail(p, "4 hex digits");
+    uint32_t v = 0;
+    for (int k = 0; k < 4; k++) {
+        int h = bm_jp_hex(p->s[p->i + k]);
+        if (h < 0) return bm_jp_fail(p, "a hex digit");
+        v = v * 16 + (uint32_t)h;
+    }
+    p->i += 4;
+    *out = v;
+    return true;
+}
+
+bool bm_jp_string(bm_jp *p, bm_str *out) {
+    if (bm_jp_peek(p) != '"') return bm_jp_fail(p, "a string");
+    p->i++;
+    size_t start = p->i;
+    /* Fast path: no escapes. */
+    while (p->i < p->n && p->s[p->i] != '"' && p->s[p->i] != '\\' && p->s[p->i] >= 0x20) p->i++;
+    if (p->i < p->n && p->s[p->i] == '"') {
+        *out = bm_str_from((const char *)p->s + start, p->i - start);
+        p->i++;
+        return true;
+    }
+    bm_sb sb = {0};
+    bm_sb_push(&sb, (const char *)p->s + start, p->i - start);
+    while (p->i < p->n) {
+        unsigned char c = p->s[p->i];
+        if (c == '"') { p->i++; *out = bm_str_from_sb(&sb); return true; }
+        if (c < 0x20) { bm_sb_free(&sb); return bm_jp_fail(p, "a string character"); }
+        if (c != '\\') { bm_sb_push_char(&sb, (char)c); p->i++; continue; }
+        p->i++;
+        if (p->i >= p->n) break;
+        char e = (char)p->s[p->i++];
+        switch (e) {
+        case '"': bm_sb_push_char(&sb, '"'); break;
+        case '\\': bm_sb_push_char(&sb, '\\'); break;
+        case '/': bm_sb_push_char(&sb, '/'); break;
+        case 'b': bm_sb_push_char(&sb, '\b'); break;
+        case 'f': bm_sb_push_char(&sb, '\f'); break;
+        case 'n': bm_sb_push_char(&sb, '\n'); break;
+        case 'r': bm_sb_push_char(&sb, '\r'); break;
+        case 't': bm_sb_push_char(&sb, '\t'); break;
+        case 'u': {
+            uint32_t cp;
+            if (!bm_jp_u4(p, &cp)) { bm_sb_free(&sb); return false; }
+            if (cp >= 0xD800 && cp < 0xDC00 && p->n - p->i >= 6 && p->s[p->i] == '\\' && p->s[p->i + 1] == 'u') {
+                p->i += 2;
+                uint32_t lo;
+                if (!bm_jp_u4(p, &lo)) { bm_sb_free(&sb); return false; }
+                if (lo >= 0xDC00 && lo < 0xE000) cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                else { bm_sb_push_utf8(&sb, 0xFFFD); cp = lo; }
+            }
+            if (cp >= 0xD800 && cp < 0xE000) cp = 0xFFFD;
+            bm_sb_push_utf8(&sb, cp);
+            break;
+        }
+        default: bm_sb_free(&sb); p->i--; return bm_jp_fail(p, "a valid escape");
+        }
+    }
+    bm_sb_free(&sb);
+    return bm_jp_fail(p, "'\"'");
+}
+
+bool bm_jp_number(bm_jp *p, double *out) {
+    bm_jp_ws(p);
+    size_t start = p->i, i = p->i;
+    if (i < p->n && p->s[i] == '-') i++;
+    if (i < p->n && p->s[i] == '0') i++;
+    else if (i < p->n && p->s[i] >= '1' && p->s[i] <= '9') { while (i < p->n && p->s[i] >= '0' && p->s[i] <= '9') i++; }
+    else return bm_jp_fail(p, "a number");
+    if (i < p->n && p->s[i] == '.') {
+        i++;
+        if (!(i < p->n && p->s[i] >= '0' && p->s[i] <= '9')) { p->i = i; return bm_jp_fail(p, "a digit"); }
+        while (i < p->n && p->s[i] >= '0' && p->s[i] <= '9') i++;
+    }
+    if (i < p->n && (p->s[i] == 'e' || p->s[i] == 'E')) {
+        i++;
+        if (i < p->n && (p->s[i] == '+' || p->s[i] == '-')) i++;
+        if (!(i < p->n && p->s[i] >= '0' && p->s[i] <= '9')) { p->i = i; return bm_jp_fail(p, "a digit"); }
+        while (i < p->n && p->s[i] >= '0' && p->s[i] <= '9') i++;
+    }
+    /* Fast path (exact): up to 15 significant digits, no exponent part, few decimals:
+     * mantissa / 10^decimals is correctly rounded because both are exact doubles. */
+    {
+        uint64_t mant = 0;
+        int digits = 0, decimals = 0;
+        bool neg = false, simple = true, frac = false;
+        for (size_t j = start; j < i; j++) {
+            unsigned char c = p->s[j];
+            if (c == '-') neg = true;
+            else if (c == '.') frac = true;
+            else if (c >= '0' && c <= '9') {
+                if (mant || c != '0') digits++;
+                mant = mant * 10 + (uint64_t)(c - '0');
+                if (frac) decimals++;
+            } else { simple = false; break; }
+        }
+        static const double p10[] = { 1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22 };
+        if (simple && digits <= 15 && decimals <= 22) {
+            double x = (double)mant / p10[decimals];
+            *out = neg ? -x : x;
+            p->i = i;
+            return true;
+        }
+    }
+    char buf[64];
+    size_t len = i - start;
+    char *tmp = len < sizeof buf ? buf : bm_alloc(len + 1);
+    memcpy(tmp, p->s + start, len);
+    tmp[len] = 0;
+    *out = strtod(tmp, NULL);
+    if (tmp != buf) bm_free(tmp);
+    p->i = i;
+    return true;
+}
+
+bool bm_jp_skip(bm_jp *p) {
+    char c = bm_jp_peek(p);
+    switch (c) {
+    case '"': { bm_str s; if (!bm_jp_string(p, &s)) return false; bm_str_release(s); return true; }
+    case '{':
+        p->i++;
+        if (bm_jp_try_char(p, '}')) return true;
+        do {
+            bm_str k;
+            if (!bm_jp_string(p, &k)) return false;
+            bm_str_release(k);
+            if (!bm_jp_char(p, ':') || !bm_jp_skip(p)) return false;
+        } while (bm_jp_try_char(p, ','));
+        return bm_jp_char(p, '}');
+    case '[':
+        p->i++;
+        if (bm_jp_try_char(p, ']')) return true;
+        do {
+            if (!bm_jp_skip(p)) return false;
+        } while (bm_jp_try_char(p, ','));
+        return bm_jp_char(p, ']');
+    case 't': return bm_jp_word(p, "true");
+    case 'f': return bm_jp_word(p, "false");
+    case 'n': return bm_jp_word(p, "null");
+    default: { double d; return bm_jp_number(p, &d); }
+    }
+}
+
+bool bm_jp_end(bm_jp *p) {
+    if (bm_jp_peek(p) == 0) return true;
+    return bm_jp_fail(p, "the end of the input");
+}
+
+bool bm_jp_find_key(bm_jp *p, const char *key, bm_str *val) {
+    size_t saved = p->i;
+    char saved_err[sizeof p->err];
+    memcpy(saved_err, p->err, sizeof p->err);
+    bool found = false;
+    if (bm_jp_try_char(p, '{') && !bm_jp_try_char(p, '}')) {
+        do {
+            bm_str k;
+            if (!bm_jp_string(p, &k) || !bm_jp_char(p, ':')) break;
+            bool match = strcmp(k.p->data, key) == 0;
+            bm_str_release(k);
+            if (match && bm_jp_peek(p) == '"') { found = bm_jp_string(p, val); break; }
+            if (!bm_jp_skip(p)) break;
+        } while (bm_jp_try_char(p, ','));
+    }
+    p->i = saved;
+    memcpy(p->err, saved_err, sizeof p->err);
+    return found;
+}
+
+bm_str bm_jp_error(bm_jp *p) {
+    const char *e = p->err[0] ? p->err : "Invalid JSON";
+    return bm_str_from(e, strlen(e));
+}
+
+/* ================================================================== HTTP server */
+
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
+#include <signal.h>
+#include <stdatomic.h>
+#include <strings.h>
+#if defined(__APPLE__) || defined(__FreeBSD__)
+#include <sys/event.h>
+#define BM_KQUEUE 1
+#else
+#include <sys/epoll.h>
+#endif
+
+typedef struct bm_http_conn {
+    int fd;
+    char *in; size_t in_len, in_cap;
+    char *out; size_t out_len, out_cap, out_off;
+    bool close_after, want_write, want_read, stalled, continued;
+} bm_http_conn;
+
+static bm_http_conn *bm_http_cur;       /* the connection whose request is being handled */
+static bool bm_http_keep;               /* the current request allows keep-alive */
+static bool bm_http_head;               /* the current request is HEAD: send headers only */
+static char bm_http_date[64];           /* "date: ...\r\n", refreshed once a second */
+static time_t bm_http_date_at;
+/* With several workers, each process accepts only while it holds no more connections than
+ * the least-loaded worker (+1), so persistent connections spread evenly; counts live in a
+ * shared mapping made before fork. */
+static _Atomic int64_t *bm_http_loads;
+static bm_int bm_http_nworkers = 1, bm_http_worker;
+static pid_t bm_http_parent;   /* the supervisor, in worker processes */
+
+static bool bm_http_may_accept(void) {
+    if (!bm_http_loads) return true;
+    int64_t mine = atomic_load_explicit(&bm_http_loads[bm_http_worker], memory_order_relaxed);
+    for (bm_int i = 0; i < bm_http_nworkers; i++)
+        if (atomic_load_explicit(&bm_http_loads[i], memory_order_relaxed) + 1 < mine) return false;
+    return true;
+}
+
+static void bm_http_load_add(int64_t d) {
+    if (bm_http_loads) atomic_fetch_add_explicit(&bm_http_loads[bm_http_worker], d, memory_order_relaxed);
+}
+
+static void bm_http_out(bm_http_conn *c, const char *s, size_t n) {
+    if (c->out_cap - c->out_len < n) {
+        size_t cap = c->out_cap ? c->out_cap * 2 : 4096;
+        while (cap - c->out_len < n) cap *= 2;
+        c->out = bm_realloc(c->out, cap);
+        c->out_cap = cap;
+    }
+    memcpy(c->out + c->out_len, s, n);
+    c->out_len += n;
+}
+
+static const char *bm_http_reason(bm_int s) {
+    switch (s) {
+    case 200: return "OK"; case 201: return "Created"; case 202: return "Accepted"; case 204: return "No Content";
+    case 301: return "Moved Permanently"; case 302: return "Found"; case 304: return "Not Modified"; case 307: return "Temporary Redirect"; case 308: return "Permanent Redirect";
+    case 400: return "Bad Request"; case 401: return "Unauthorized"; case 403: return "Forbidden"; case 404: return "Not Found"; case 405: return "Method Not Allowed";
+    case 409: return "Conflict"; case 413: return "Payload Too Large"; case 415: return "Unsupported Media Type"; case 422: return "Unprocessable Entity"; case 429: return "Too Many Requests";
+    case 500: return "Internal Server Error"; case 501: return "Not Implemented"; case 502: return "Bad Gateway"; case 503: return "Service Unavailable";
+    default: return "";
+    }
+}
+
+static void bm_http_refresh_date(void) {
+    time_t now = time(NULL);
+    if (now == bm_http_date_at) return;
+    bm_http_date_at = now;
+    struct tm tm;
+    gmtime_r(&now, &tm);
+    strftime(bm_http_date, sizeof bm_http_date, "date: %a, %d %b %Y %H:%M:%S GMT\r\n", &tm);
+}
+
+static bool bm_has_header(bm_str block, const char *name) {
+    size_t n = strlen(name);
+    const char *s = block.p->data, *end = s + block.p->len;
+    while (s < end) {
+        if ((size_t)(end - s) > n && strncasecmp(s, name, n) == 0 && s[n] == ':') return true;
+        const char *nl = memchr(s, '\n', (size_t)(end - s));
+        if (!nl) break;
+        s = nl + 1;
+    }
+    return false;
+}
+
+void bm_native_httpRespond(bm_int status, bm_str headers, bm_str body) {
+    bm_http_conn *c = bm_http_cur;
+    if (!c) return;
+    char line[160], *p = line;
+    memcpy(p, "HTTP/1.1 ", 9);
+    p += 9;
+    if (status < 100 || status > 999) status = 500;
+    *p++ = (char)('0' + status / 100);
+    *p++ = (char)('0' + status / 10 % 10);
+    *p++ = (char)('0' + status % 10);
+    *p++ = ' ';
+    const char *reason = bm_http_reason(status);
+    size_t rl = strlen(reason);
+    memcpy(p, reason, rl);
+    p += rl;
+    *p++ = '\r';
+    *p++ = '\n';
+    /* 1xx, 204 and 304 responses carry no body (RFC 9110 §6.4.1) */
+    bool bodiless = status < 200 || status == 204 || status == 304;
+    if (!bodiless) {
+        memcpy(p, "content-length: ", 16);
+        p += 16;
+        char digits[24];
+        int nd = 0;
+        uint64_t len = (uint64_t)body.p->len;
+        do { digits[nd++] = (char)('0' + len % 10); len /= 10; } while (len);
+        while (nd) *p++ = digits[--nd];
+        *p++ = '\r';
+        *p++ = '\n';
+    }
+    bm_http_out(c, line, (size_t)(p - line));
+    if (!bodiless && !bm_has_header(headers, "content-type")) {
+        static const char ct[] = "content-type: text/plain;charset=utf-8\r\n";
+        bm_http_out(c, ct, sizeof ct - 1);
+    }
+    bm_http_out(c, bm_http_date, strlen(bm_http_date));
+    if (!bm_http_keep) {
+        static const char cl[] = "connection: close\r\n";
+        bm_http_out(c, cl, sizeof cl - 1);
+    }
+    bm_http_out(c, headers.p->data, (size_t)headers.p->len);
+    bm_http_out(c, "\r\n", 2);
+    if (!bodiless && !bm_http_head) bm_http_out(c, body.p->data, (size_t)body.p->len);
+    bm_http_cur = NULL; /* one response per request */
+}
+
+bm_int bm_native_headerIndex(bm_str block, bm_str name) {
+    size_t n = (size_t)name.p->len;
+    const char *base = block.p->data, *s = base, *end = s + block.p->len;
+    while (s < end) {
+        if ((size_t)(end - s) > n && strncasecmp(s, name.p->data, n) == 0 && s[n] == ':') {
+            const char *v = s + n + 1;
+            while (v < end && (*v == ' ' || *v == '\t')) v++;
+            return (bm_int)(v - base);
+        }
+        const char *nl = memchr(s, '\n', (size_t)(end - s));
+        if (!nl) break;
+        s = nl + 1;
+    }
+    return -1;
+}
+
+bm_str bm_native_headerValue(bm_str block, bm_int at) {
+    const char *base = block.p->data, *s = base + at, *end = base + block.p->len;
+    const char *e = s;
+    while (e < end && *e != '\r' && *e != '\n') e++;
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t')) e--;
+    return bm_str_from(s, (size_t)(e - s));
+}
+
+bm_str bm_native_headerRemove(bm_str block, bm_str name) {
+    size_t n = (size_t)name.p->len;
+    const char *s = block.p->data, *end = s + block.p->len;
+    bm_sb sb = {0};
+    while (s < end) {
+        const char *nl = memchr(s, '\n', (size_t)(end - s));
+        const char *next = nl ? nl + 1 : end;
+        if (!((size_t)(end - s) > n && strncasecmp(s, name.p->data, n) == 0 && s[n] == ':')) bm_sb_push(&sb, s, (size_t)(next - s));
+        s = next;
+    }
+    return bm_str_from_sb(&sb);
+}
+
+/* block + "name: value\r\n"; drops bytes that would let a name or value end the line early
+ * (CR, LF, NUL; and ':' or whitespace in the name), so user headers can't split a response. */
+bm_str bm_native_headerAppend(bm_str block, bm_str name, bm_str value) {
+    bm_sb sb = {0};
+    bm_sb_push(&sb, block.p->data, (size_t)block.p->len);
+    for (int64_t i = 0; i < name.p->len; i++) {
+        char ch = name.p->data[i];
+        if (ch != '\r' && ch != '\n' && ch != '\0' && ch != ':' && ch != ' ' && ch != '\t') bm_sb_push_char(&sb, ch);
+    }
+    bm_sb_push(&sb, ": ", 2);
+    for (int64_t i = 0; i < value.p->len; i++) {
+        char ch = value.p->data[i];
+        if (ch != '\r' && ch != '\n' && ch != '\0') bm_sb_push_char(&sb, ch);
+    }
+    bm_sb_push(&sb, "\r\n", 2);
+    return bm_str_from_sb(&sb);
+}
+
+BM_STR_LIT(bm_lit_get, "GET");
+BM_STR_LIT(bm_lit_post, "POST");
+
+#define BM_HTTP_MAX_HEAD (64 * 1024)
+#define BM_HTTP_MAX_BODY (64 * 1024 * 1024)
+#define BM_HTTP_OUT_HIGH (1024 * 1024)   /* stop handling pipelined requests until flushed */
+
+/* A canned error response; the connection closes after it is written. */
+static void bm_http_fail(bm_http_conn *c, const char *status) {
+    char buf[160];
+    int n = snprintf(buf, sizeof buf, "HTTP/1.1 %s\r\ncontent-length: 0\r\nconnection: close\r\n\r\n", status);
+    bm_http_out(c, buf, (size_t)n);
+    c->close_after = true;
+}
+
+static bool bm_http_token_eq(const char *v, const char *end, const char *word) {
+    size_t n = strlen(word);
+    while (v < end && (*v == ' ' || *v == '\t')) v++;
+    while (end > v && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r')) end--;
+    return (size_t)(end - v) == n && strncasecmp(v, word, n) == 0;
+}
+
+/* Decodes a chunked body starting at `p`; returns the bytes consumed (through the trailers),
+ * 0 if incomplete, or -1 if malformed / too large. */
+static long long bm_http_dechunk(const char *p, const char *end, bm_sb *out) {
+    const char *s = p;
+    for (;;) {
+        const char *nl = memchr(s, '\n', (size_t)(end - s));
+        if (!nl) return 0;
+        uint64_t size = 0;
+        const char *d = s;
+        int digits = 0;
+        for (; d < nl; d++, digits++) {
+            int v = *d >= '0' && *d <= '9' ? *d - '0' : (*d | 32) >= 'a' && (*d | 32) <= 'f' ? (*d | 32) - 'a' + 10 : -1;
+            if (v < 0) break;
+            size = size * 16 + (uint64_t)v;
+            if (size > BM_HTTP_MAX_BODY) return -1;
+        }
+        if (!digits || (*d != '\r' && *d != ';')) return -1;
+        s = nl + 1;
+        if (size == 0) {
+            /* trailers: lines until an empty one */
+            for (;;) {
+                const char *t = memchr(s, '\n', (size_t)(end - s));
+                if (!t) return 0;
+                bool empty = t == s || (t == s + 1 && *s == '\r');
+                s = t + 1;
+                if (empty) return (long long)(s - p);
+            }
+        }
+        if ((uint64_t)(end - s) < size + 2) return 0;
+        if (out->len + size > BM_HTTP_MAX_BODY) return -1;
+        bm_sb_push(out, s, (size_t)size);
+        s += size;
+        if (s[0] != '\r' || s[1] != '\n') return -1;
+        s += 2;
+    }
+}
+
+/* Handles every complete request in c->in (stopping early when the output backs up, which
+ * sets c->stalled); returns false if the connection must close at once. */
+static bool bm_http_process(bm_http_conn *c, bm_fn h) {
+    size_t pos = 0;
+    c->stalled = false;
+    while (pos < c->in_len && !c->close_after) {
+        if (c->out_len >= BM_HTTP_OUT_HIGH) { c->stalled = true; break; }
+        char *start = c->in + pos;
+        size_t avail = c->in_len - pos;
+        /* tolerate blank lines between requests (RFC 9112 §2.2) */
+        if (start[0] == '\r' || start[0] == '\n') { pos++; continue; }
+        char *hdr_end = NULL;
+        for (char *q = start; (q = memchr(q, '\n', avail - (size_t)(q - start))) != NULL; q++) {
+            if (q + 2 < start + avail && q[1] == '\r' && q[2] == '\n') { hdr_end = q + 3; break; }
+            if (q + 1 < start + avail && q[1] == '\n') { hdr_end = q + 2; break; }
+        }
+        if (!hdr_end) {
+            if (avail > BM_HTTP_MAX_HEAD) bm_http_fail(c, "431 Request Header Fields Too Large");
+            break;
+        }
+        if ((size_t)(hdr_end - start) > BM_HTTP_MAX_HEAD) { bm_http_fail(c, "431 Request Header Fields Too Large"); break; }
+        /* Request line: METHOD SP TARGET SP HTTP/1.x CRLF */
+        char *line_end = memchr(start, '\n', (size_t)(hdr_end - start));
+        char *eol = line_end > start && line_end[-1] == '\r' ? line_end - 1 : line_end;
+        char *sp1 = memchr(start, ' ', (size_t)(eol - start));
+        char *sp2 = sp1 ? memchr(sp1 + 1, ' ', (size_t)(eol - sp1 - 1)) : NULL;
+        if (!sp1 || sp1 == start || !sp2 || sp2 == sp1 + 1 || eol - sp2 != 9 || memcmp(sp2 + 1, "HTTP/1.", 7) != 0 || (sp2[8] != '0' && sp2[8] != '1')) {
+            bm_http_fail(c, "400 Bad Request");
+            break;
+        }
+        bool http10 = sp2[8] == '0';
+        char *headers = line_end + 1;
+        char *headers_end = hdr_end - (hdr_end[-2] == '\r' ? 2 : 1);
+        long long clen = -1;
+        bool keep = !http10, chunked = false, expect = false, bad = false;
+        for (char *s = headers; s < headers_end;) {
+            char *nl = memchr(s, '\n', (size_t)(hdr_end - s));
+            size_t len = (size_t)(nl - s);
+            if (len > 15 && strncasecmp(s, "content-length:", 15) == 0) {
+                const char *v = s + 15, *e = nl;
+                while (v < e && (*v == ' ' || *v == '\t')) v++;
+                while (e > v && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r')) e--;
+                long long n = 0;
+                if (v == e) bad = true;
+                for (; v < e; v++) {
+                    if (*v < '0' || *v > '9') { bad = true; break; }
+                    if (n <= BM_HTTP_MAX_BODY) n = n * 10 + (*v - '0'); /* saturates: over the cap → 413 */
+                }
+                if (clen >= 0 && clen != n) bad = true;
+                clen = n;
+            } else if (len > 18 && strncasecmp(s, "transfer-encoding:", 18) == 0) {
+                if (bm_http_token_eq(s + 18, nl, "chunked")) chunked = true;
+                else bad = true; /* other codings are not supported */
+            } else if (len > 11 && strncasecmp(s, "connection:", 11) == 0) {
+                if (bm_http_token_eq(s + 11, nl, "close")) keep = false;
+                else if (bm_http_token_eq(s + 11, nl, "keep-alive")) keep = true;
+            } else if (len > 7 && strncasecmp(s, "expect:", 7) == 0) {
+                expect = bm_http_token_eq(s + 7, nl, "100-continue");
+            }
+            s = nl + 1;
+        }
+        if (bad || (chunked && clen >= 0)) { bm_http_fail(c, "400 Bad Request"); break; }
+        if (clen > BM_HTTP_MAX_BODY) { bm_http_fail(c, "413 Payload Too Large"); break; }
+        char *in_end = c->in + c->in_len;
+        size_t consumed;
+        bm_str body;
+        if (chunked) {
+            bm_sb sb = {0};
+            long long n = bm_http_dechunk(hdr_end, in_end, &sb);
+            if (n < 0) { bm_sb_free(&sb); bm_http_fail(c, "400 Bad Request"); break; }
+            if (n == 0) {
+                bm_sb_free(&sb);
+                if (expect && !c->continued) { bm_http_out(c, "HTTP/1.1 100 Continue\r\n\r\n", 25); c->continued = true; }
+                break;
+            }
+            consumed = (size_t)(hdr_end - start) + (size_t)n;
+            body = bm_str_from_sb(&sb);
+        } else {
+            if (clen < 0) clen = 0;
+            if ((size_t)(in_end - hdr_end) < (size_t)clen) {
+                if (expect && !c->continued) { bm_http_out(c, "HTTP/1.1 100 Continue\r\n\r\n", 25); c->continued = true; }
+                break; /* body incomplete */
+            }
+            consumed = (size_t)(hdr_end - start) + (size_t)clen;
+            body = clen ? bm_str_from(hdr_end, (size_t)clen) : BM_EMPTY_STR;
+        }
+        c->continued = false;
+        size_t mlen = (size_t)(sp1 - start);
+        bm_str method = mlen == 3 && memcmp(start, "GET", 3) == 0 ? BM_LIT(bm_lit_get) : mlen == 4 && memcmp(start, "POST", 4) == 0 ? BM_LIT(bm_lit_post) : bm_str_from(start, mlen);
+        bm_str target = bm_str_from(sp1 + 1, (size_t)(sp2 - sp1 - 1));
+        bm_str hdrs = bm_str_from(headers, (size_t)(headers_end - headers));
+        bm_http_cur = c;
+        bm_http_keep = keep;
+        bm_http_head = mlen == 4 && memcmp(start, "HEAD", 4) == 0;
+        ((void (*)(void *, bm_str, bm_str, bm_str, bm_str))h.fn)(h.env, method, target, hdrs, body);
+        if (bm_http_cur) bm_native_httpRespond(500, BM_EMPTY_STR, BM_EMPTY_STR); /* no response */
+        bm_str_release(method);
+        bm_str_release(target);
+        bm_str_release(hdrs);
+        bm_str_release(body);
+        pos += consumed;
+        if (!keep) c->close_after = true;
+    }
+    if (pos) {
+        memmove(c->in, c->in + pos, c->in_len - pos);
+        c->in_len -= pos;
+    }
+    return true;
+}
+
+static bool bm_http_flush(bm_http_conn *c) {
+    while (c->out_off < c->out_len) {
+        ssize_t w = write(c->fd, c->out + c->out_off, c->out_len - c->out_off);
+        if (w < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return true;
+            if (errno == EINTR) continue;
+            return false;
+        }
+        c->out_off += (size_t)w;
+    }
+    c->out_off = c->out_len = 0;
+    return true;
+}
+
+static bm_http_conn bm_http_dead;   /* stands in for connections closed earlier in an event batch */
+
+static void bm_http_close(bm_http_conn *c) {
+    bm_http_load_add(-1);
+    close(c->fd);
+    bm_free(c->in);
+    bm_free(c->out);
+    bm_free(c);
+}
+
+static void bm_http_loop(int lfd, bm_fn h) {
+#ifdef BM_KQUEUE
+    int q = kqueue();
+    struct kevent ev;
+    EV_SET(&ev, lfd, EVFILT_READ, EV_ADD, 0, 0, NULL);
+    kevent(q, &ev, 1, NULL, 0, NULL);
+    struct kevent events[256];
+#else
+    int q = epoll_create1(0);
+    struct epoll_event ev = { .events = EPOLLIN, .data.ptr = NULL };
+    epoll_ctl(q, EPOLL_CTL_ADD, lfd, &ev);
+    struct epoll_event events[256];
+#endif
+#ifdef BM_KQUEUE
+    if (bm_http_parent) { /* a worker exits with its supervisor (Linux uses PR_SET_PDEATHSIG) */
+        EV_SET(&ev, bm_http_parent, EVFILT_PROC, EV_ADD, NOTE_EXIT, 0, &bm_http_dead);
+        if (kevent(q, &ev, 1, NULL, 0, NULL) != 0) _exit(0);
+    }
+#endif
+    for (;;) {
+        if (bm_out_len) bm_out_flush(); /* handler logs reach pipes and files promptly */
+#ifdef BM_KQUEUE
+        int n = kevent(q, NULL, 0, events, 256, NULL);
+#else
+        int n = epoll_wait(q, events, 256, -1);
+#endif
+        if (n < 0) { if (errno == EINTR) continue; break; }
+        bm_http_refresh_date();
+        for (int i = 0; i < n; i++) {
+#ifdef BM_KQUEUE
+            bm_http_conn *c = events[i].udata;
+            bool readable = events[i].filter == EVFILT_READ, broken = (events[i].flags & EV_ERROR) != 0;
+            bool eof = false;
+#else
+            bm_http_conn *c = events[i].data.ptr;
+            bool readable = events[i].events & (EPOLLIN | EPOLLRDHUP), broken = events[i].events & (EPOLLHUP | EPOLLERR);
+            bool eof = false;
+#endif
+            if (!c) {
+                while (bm_http_may_accept()) {
+                    int fd = accept(lfd, NULL, NULL);
+                    if (fd < 0) break;
+                    bm_http_load_add(1);
+                    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+                    int one = 1;
+                    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+                    bm_http_conn *nc = bm_alloc(sizeof *nc);
+                    memset(nc, 0, sizeof *nc);
+                    nc->fd = fd;
+                    nc->want_read = true;
+#ifdef BM_KQUEUE
+                    struct kevent cev;
+                    EV_SET(&cev, fd, EVFILT_READ, EV_ADD, 0, 0, nc);
+                    kevent(q, &cev, 1, NULL, 0, NULL);
+#else
+                    struct epoll_event cev = { .events = EPOLLIN | EPOLLRDHUP, .data.ptr = nc };
+                    epoll_ctl(q, EPOLL_CTL_ADD, fd, &cev);
+#endif
+                }
+                continue;
+            }
+            if (c == &bm_http_dead) {
+#ifdef BM_KQUEUE
+                if (events[i].filter == EVFILT_PROC) _exit(0);
+#endif
+                continue;
+            }
+            bool ok = !broken;
+            if (readable && c->want_read) {
+                for (;;) {
+                    if (c->in_cap - c->in_len < 4096) {
+                        c->in_cap = c->in_cap ? c->in_cap * 2 : 8192;
+                        c->in = bm_realloc(c->in, c->in_cap);
+                    }
+                    size_t room = c->in_cap - c->in_len;
+                    ssize_t r = read(c->fd, c->in + c->in_len, room);
+                    /* Level-triggered: a short read means the socket is drained, so skip the
+                     * read that would only return EAGAIN (one syscall per request saved). */
+                    if (r > 0) { c->in_len += (size_t)r; if ((size_t)r == room && c->in_len < BM_HTTP_MAX_BODY + BM_HTTP_MAX_HEAD) continue; break; }
+                    if (r == 0) { eof = true; break; }
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                    if (errno == EINTR) continue;
+                    ok = false;
+                    break;
+                }
+            }
+            /* handle, write, and handle again while flushing unblocks pipelined requests */
+            while (ok) {
+                if (c->in_len && !c->close_after) ok = bm_http_process(c, h);
+                if (ok && c->out_len) ok = bm_http_flush(c);
+                if (!(ok && c->stalled && c->out_len == 0)) break;
+            }
+            if (ok && c->out_len == 0 && (c->close_after || eof)) ok = false;
+            if (!ok) {
+                bm_http_close(c);
+#ifdef BM_KQUEUE
+                for (int j = i + 1; j < n; j++)
+                    if (events[j].udata == c) events[j].udata = &bm_http_dead;
+#endif
+                continue;
+            }
+            /* interest: write while output is pending; read unless output is backed up */
+            bool want_write = c->out_len > 0, want_read = !(c->stalled || eof || (c->close_after && c->out_len));
+#ifdef BM_KQUEUE
+            struct kevent mods[2];
+            int nm = 0;
+            if (want_write != c->want_write) EV_SET(&mods[nm++], c->fd, EVFILT_WRITE, want_write ? EV_ADD : EV_DELETE, 0, 0, c);
+            if (want_read != c->want_read) EV_SET(&mods[nm++], c->fd, EVFILT_READ, want_read ? EV_ENABLE : EV_DISABLE, 0, 0, c);
+            if (nm) kevent(q, mods, nm, NULL, 0, NULL);
+#else
+            if (want_write != c->want_write || want_read != c->want_read) {
+                struct epoll_event wev = { .events = (want_read ? EPOLLIN | EPOLLRDHUP : 0) | (want_write ? EPOLLOUT : 0), .data.ptr = c };
+                epoll_ctl(q, EPOLL_CTL_MOD, c->fd, &wev);
+            }
+#endif
+            c->want_write = want_write;
+            c->want_read = want_read;
+        }
+    }
+}
+
+/* ---- workers: the parent supervises; each child runs the event loop */
+
+static volatile sig_atomic_t bm_http_stop_sig;
+
+static pid_t *volatile bm_http_kids;
+static bm_int bm_http_nkids;
+
+/* May run on any thread (the program runs off the main thread), so it stops the workers
+ * itself; their exit wakes the supervisor's waitpid. */
+static void bm_http_on_stop(int sig) {
+    bm_http_stop_sig = sig;
+    pid_t *kids = bm_http_kids;
+    if (kids)
+        for (bm_int w = 0; w < bm_http_nkids; w++)
+            if (kids[w] > 0) kill(kids[w], SIGTERM);
+}
+
+static pid_t bm_http_spawn(int lfd, bm_int w, bm_fn handler) {
+    pid_t pid = fork();
+    if (pid != 0) return pid;
+    /* child */
+    signal(SIGTERM, SIG_DFL);
+    signal(SIGINT, SIG_DFL);
+    bm_http_worker = w;
+#ifdef __linux__
+    prctl(PR_SET_PDEATHSIG, SIGTERM);
+#endif
+    if (getppid() != bm_http_parent) _exit(0); /* the supervisor died before prctl */
+    bm_http_refresh_date();
+    bm_http_loop(lfd, handler);
+    _exit(1);
+}
+
+/* Forks `workers` children and keeps them running: a worker that dies (a trap in a handler)
+ * is replaced, after a second's pause if it died within a second of starting. SIGTERM and
+ * SIGINT stop the workers and then the supervisor. */
+static void bm_http_supervise(int lfd, bm_int workers, bm_fn handler) {
+    bm_http_parent = getpid();
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = bm_http_on_stop; /* no SA_RESTART: waitpid returns EINTR */
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGINT, &sa, NULL);
+    pid_t *kids = bm_alloc((size_t)workers * sizeof *kids);
+    time_t *born = bm_alloc((size_t)workers * sizeof *born);
+    for (bm_int w = 0; w < workers; w++) kids[w] = 0;
+    bm_http_nkids = workers;
+    bm_http_kids = kids;
+    for (bm_int w = 0; w < workers; w++) {
+        kids[w] = bm_http_spawn(lfd, w, handler);
+        born[w] = time(NULL);
+    }
+    while (!bm_http_stop_sig) {
+        int st;
+        pid_t pid = waitpid(-1, &st, 0);
+        if (pid < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        for (bm_int w = 0; w < workers; w++) {
+            if (kids[w] != pid) continue;
+            if (bm_http_stop_sig) break;
+            if (time(NULL) - born[w] < 1) sleep(1); /* crash loop: don't spin */
+            if (bm_http_loads) atomic_store(&bm_http_loads[w], 0);
+            kids[w] = bm_http_spawn(lfd, w, handler);
+            born[w] = time(NULL);
+        }
+    }
+    int sig = bm_http_stop_sig ? bm_http_stop_sig : SIGTERM;
+    for (bm_int w = 0; w < workers; w++) if (kids[w] > 0) kill(kids[w], SIGTERM);
+    while (waitpid(-1, NULL, 0) > 0 || errno == EINTR) {}
+    bm_out_flush();
+    signal(sig, SIG_DFL);
+    raise(sig);
+    _exit(128 + sig);
+}
+
+void bm_native_httpServe(bm_int port, bm_str host, bm_int workers, bm_fn handler) {
+    signal(SIGPIPE, SIG_IGN);
+    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (lfd < 0) { bm_native_fail(errno, "socket", host); return; }
+    int one = 1;
+    setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof addr);
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((uint16_t)port);
+    const char *h = host.p->len ? host.p->data : "0.0.0.0";
+    if (strcmp(h, "localhost") == 0) h = "127.0.0.1";
+    if (inet_pton(AF_INET, h, &addr.sin_addr) != 1) { bm_native_fail(EINVAL, "listen", host); close(lfd); return; }
+    if (bind(lfd, (struct sockaddr *)&addr, sizeof addr) != 0) {
+        bm_sb_push_cstr(&bm_native_err, errno == EADDRINUSE ? "EADDRINUSE: address already in use " : "listen failed ");
+        bm_sb_push_cstr(&bm_native_err, h);
+        bm_sb_push_char(&bm_native_err, ':');
+        bm_sb_push_int(&bm_native_err, port);
+        close(lfd);
+        return;
+    }
+    if (listen(lfd, 4096) != 0) { bm_native_fail(errno, "listen", host); close(lfd); return; }
+    fcntl(lfd, F_SETFL, fcntl(lfd, F_GETFL) | O_NONBLOCK);
+    bm_out_flush();
+    if (workers <= 1) {
+        bm_http_refresh_date();
+        bm_http_loop(lfd, handler);
+        return;
+    }
+    void *m = mmap(NULL, (size_t)workers * sizeof(int64_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
+    if (m != MAP_FAILED) { bm_http_loads = m; bm_http_nworkers = workers; }
+    bm_http_supervise(lfd, workers, handler);
 }

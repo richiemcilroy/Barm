@@ -42,6 +42,17 @@ typedef struct bm_sb {
 } bm_sb;
 
 void bm_sb_push(bm_sb *sb, const char *s, size_t n);
+void bm_sb_grow(bm_sb *sb, size_t need);          /* capacity >= need bytes */
+/* Inline fast paths for generated code. */
+static inline void bm_sb_add(bm_sb *sb, const char *s, size_t n) {
+    if (__builtin_expect(sb->cap - sb->len < n, 0)) bm_sb_grow(sb, sb->len + n);
+    memcpy(sb->data + sb->len, s, n);
+    sb->len += n;
+}
+static inline void bm_sb_add_char(bm_sb *sb, char c) {
+    if (__builtin_expect(sb->cap == sb->len, 0)) bm_sb_grow(sb, sb->len + 1);
+    sb->data[sb->len++] = c;
+}
 void bm_sb_push_cstr(bm_sb *sb, const char *s);
 void bm_sb_push_char(bm_sb *sb, char c);
 void bm_sb_free(bm_sb *sb);
@@ -244,6 +255,8 @@ void bm_inspect_str(bm_sb *sb, bm_str s, int depth);   /* depth 0 = top level: u
 void bm_inspect_arr(bm_sb *sb, bm_arr a, const bm_type *t, int depth);
 /* console.log formatting of a record: fields in declaration order. */
 void bm_inspect_record(bm_sb *sb, int depth, size_t n, const char *const *names, const bm_type *const *types, const void *const *fields);
+/* A class instance: `Name { a: 1 }` (`[Name]` past the depth limit). */
+void bm_inspect_object(bm_sb *sb, int depth, const char *cls, size_t n, const char *const *names, const bm_type *const *types, const void *const *fields);
 void bm_to_str_arr(bm_sb *sb, bm_arr a, const bm_type *t);   /* JS String([1,2]) == "1,2" */
 
 /* ------------------------------------------------------------------ output */
@@ -281,6 +294,7 @@ static inline void bm_env_release(bm_env *e) { if (e && e->rc > 0 && --e->rc == 
 /* Runs one test; a failing expect or a trap inside it marks it failed and returns.
  * Prints "ok   <name>" or "FAIL <name>\n  <message>\n  at <loc>". */
 void bm_test_run(const char *name, void (*fn)(void));
+bool bm_test_active(void);   /* inside bm_test_run (a trap fails the test instead of exiting) */
 _Noreturn void bm_expect_fail(bm_sb *message, const char *loc);   /* message: e.g. "expected 3, received 4"; takes (frees) the builder */
 int bm_test_summary(void);   /* prints "<n> passed, <m> failed"; returns exit status (0 if all passed) */
 
@@ -290,3 +304,58 @@ extern int bm_argc;
 extern char **bm_argv;
 
 #endif
+
+/* ------------------------------------------------------------------ system (used by the standard library) */
+
+/* Errors are reported through a per-process slot read by bm_native_takeError (Node-style messages:
+ * "ENOENT: no such file or directory, open 'x'"). */
+bm_str bm_native_takeError(void);
+bm_str bm_native_readFile(bm_str path);
+void bm_native_writeFile(bm_str path, bm_str data, bool append);
+bool bm_native_exists(bm_str path);
+struct bm_arr bm_native_readDir(bm_str path);          /* names, sorted */
+void bm_native_mkdir(bm_str path, bool recursive);
+void bm_native_unlink(bm_str path);
+void bm_native_rm(bm_str path, bool recursive, bool force);
+bm_str bm_native_cwd(void);
+struct bm_arr bm_process_argv(void);                   /* ["barm-binary-path", "program", args...] like Node's */
+bool bm_process_env(bm_str name, bm_str *out);
+_Noreturn void bm_process_exit(bm_int code);
+double bm_date_now(void);                              /* ms since the epoch */
+double bm_performance_now(void);                       /* ms since the program started */
+void bm_write_stdout(bm_str s);
+void bm_write_stderr(bm_str s);
+
+/* ------------------------------------------------------------------ JSON */
+
+void bm_json_quote(bm_sb *sb, bm_str s);               /* JSON.stringify of a string */
+void bm_json_number(bm_sb *sb, double x);              /* JS number, or null for NaN/Infinity */
+typedef struct bm_jp {
+    const unsigned char *s;
+    size_t n, i;
+    char err[160];                                     /* first error ("" if none) */
+} bm_jp;
+void bm_jp_init(bm_jp *p, bm_str text);
+char bm_jp_peek(bm_jp *p);                             /* next non-space byte, or 0 at the end */
+bool bm_jp_char(bm_jp *p, char c);                     /* consumes c (after spaces) or fails */
+bool bm_jp_try_char(bm_jp *p, char c);                 /* consumes c if it's next */
+bool bm_jp_word(bm_jp *p, const char *w);              /* null / true / false */
+bool bm_jp_string(bm_jp *p, bm_str *out);
+bool bm_jp_number(bm_jp *p, double *out);
+bool bm_jp_skip(bm_jp *p);                             /* any value */
+bool bm_jp_end(bm_jp *p);                              /* only spaces left */
+bool bm_jp_fail(bm_jp *p, const char *expected);       /* records "expected X at position N"; returns false */
+bool bm_jp_find_key(bm_jp *p, const char *key, bm_str *val);  /* string value of key in the object at the cursor (not consumed) */
+bm_str bm_jp_error(bm_jp *p);
+
+/* ------------------------------------------------------------------ HTTP server (std/http) */
+
+/* Serves HTTP/1.1 on host:port with `workers` processes (forked after binding), calling
+ * handler(env, method, target, headers, body) for each request; the handler answers with
+ * bm_native_httpRespond. Returns only on error (reported through bm_native_takeError). */
+void bm_native_httpServe(bm_int port, bm_str host, bm_int workers, bm_fn handler);
+void bm_native_httpRespond(bm_int status, bm_str headers, bm_str body);
+bm_int bm_native_headerIndex(bm_str block, bm_str name);   /* offset of the value, or -1 */
+bm_str bm_native_headerValue(bm_str block, bm_int at);
+bm_str bm_native_headerRemove(bm_str block, bm_str name);  /* the block without `name` lines */
+bm_str bm_native_headerAppend(bm_str block, bm_str name, bm_str value);
