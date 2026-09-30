@@ -434,7 +434,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         // recursion — including freeing long linked structures — has room without per-call checks.
         let _ = writeln!(
             self.funcs,
-            "static int bmg_argc; static char **bmg_argv; static int bmg_exit;\nstatic int bmg_program(void) {{\n    bm_init(bmg_argc, bmg_argv);\n{init}{main_body}}}\nstatic void *bmg_thread(void *arg) {{ (void)arg; bmg_exit = bmg_program(); return NULL; }}\nint main(int argc, char **argv) {{\n    bmg_argc = argc; bmg_argv = argv;\n    pthread_attr_t attr; pthread_t th;\n    if (pthread_attr_init(&attr) == 0 && pthread_attr_setstacksize(&attr, (size_t)1 << 30) == 0 && pthread_create(&th, &attr, bmg_thread, NULL) == 0) {{\n        pthread_join(th, NULL);\n        return bmg_exit;\n    }}\n    return bmg_program();\n}}"
+            "static int bmg_argc; static char **bmg_argv; static int bmg_exit;\nstatic int bmg_program(void) {{\n    bm_init(bmg_argc, bmg_argv);\n{init}{main_body}}}\nstatic void *bmg_thread(void *arg) {{ (void)arg; bmg_exit = bmg_program(); return NULL; }}\nint main(int argc, char **argv) {{\n    bmg_argc = argc; bmg_argv = argv;\n#if defined(__APPLE__)\n    /* Linked with a 512 MiB main stack (build.rs): run right here. */\n    if (pthread_get_stacksize_np(pthread_self()) >= ((size_t)256 << 20)) return bmg_program();\n#endif\n    pthread_attr_t attr; pthread_t th;\n    if (pthread_attr_init(&attr) == 0 && pthread_attr_setstacksize(&attr, (size_t)1 << 30) == 0 && BMG_THREAD_QOS(&attr) && pthread_create(&th, &attr, bmg_thread, NULL) == 0) {{\n        pthread_join(th, NULL);\n        return bmg_exit;\n    }}\n    return bmg_program();\n}}"
         );
     }
 
@@ -1634,6 +1634,10 @@ static inline void bmg_make_unique(bm_arr *a, const bm_type *t) {
 #define BMG_PUSH_U(T, arr, desc, val) do { bm_arr *bmp_a = (arr); T bmp_v = (val); bm_arrbuf *bmp_p = bmp_a->p; \
     if (__builtin_expect(bmp_p && bmp_a->len < bmp_p->cap, 1)) ((T *)(void *)bmp_p->data)[bmp_a->len++] = bmp_v; \
     else { T bmp_s = bmp_v; *bmp_a = bmg_push_slow(*bmp_a, (desc), &bmp_s); } } while (0)
+/* Push onto a unique array whose capacity is cached in `cap` (only pushes reallocate it). */
+#define BMG_PUSH_C(T, arr, capv, desc, val) do { bm_arr *bmp_a = (arr); T bmp_v = (val); \
+    if (__builtin_expect(bmp_a->len < (capv), 1)) ((T *)(void *)bmp_a->p->data)[bmp_a->len++] = bmp_v; \
+    else { T bmp_s = bmp_v; *bmp_a = bmg_push_slow(*bmp_a, (desc), &bmp_s); (capv) = bmp_a->p->cap; } } while (0)
 /* Mutable element access: copy-on-write, then a bounds-checked pointer. */
 static inline void *bmg_at_mut(bm_arr *a, const bm_type *t, size_t size, bm_int i, const char *loc) {
     bmg_make_unique(a, t);
@@ -1712,6 +1716,13 @@ static void bmg_sort_f64(double *a, bm_int n, bool desc) {
     if (zs) bm_free(zs);
 }
 
+/* The program thread keeps the main thread's scheduling class (macOS would otherwise demote it). */
+#if defined(__APPLE__)
+#include <pthread/qos.h>
+#define BMG_THREAD_QOS(a) (pthread_attr_set_qos_class_np((a), qos_class_self(), 0) == 0 || 1)
+#else
+#define BMG_THREAD_QOS(a) 1
+#endif
 /* Accumulator recursion elimination (tre_candidate): add a term to the running sum,
  * remembering the smallest and largest prefix sum; at the end, the total must make every
  * suffix sum (total - prefix) fit, as the recursion's own additions would have checked.

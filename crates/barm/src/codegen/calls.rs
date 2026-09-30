@@ -603,9 +603,15 @@ impl<'c, 'a> Gen<'c, 'a> {
                     if name == "push" {
                         // A local made unique before the loop: no ownership check per push.
                         let b = self.b();
-                        let unique = b.unique.iter().any(|k| b.locals.get(k).is_some_and(|l| l.access == lv));
-                        let mac = if unique { "BMG_PUSH_U" } else { "BMG_PUSH" };
-                        self.line(format!("{mac}({ect}, &{lv}, {d}, {code});"));
+                        let key = b.unique.iter().copied().find(|k| b.locals.get(k).is_some_and(|l| l.access == lv));
+                        match key.and_then(|k| b.push_caps.get(&k).cloned()) {
+                            // Only pushes can reallocate it in this loop: compare against a cached capacity.
+                            Some(cap) => self.line(format!("BMG_PUSH_C({ect}, &{lv}, {cap}, {d}, {code});")),
+                            None => {
+                                let mac = if key.is_some() { "BMG_PUSH_U" } else { "BMG_PUSH" };
+                                self.line(format!("{mac}({ect}, &{lv}, {d}, {code});"));
+                            }
+                        }
                     } else {
                         let tmpn = self.fresh("e");
                         self.line(format!("{ect} {tmpn} = {code};"));
