@@ -1106,17 +1106,30 @@ impl<'c, 'a> Gen<'c, 'a> {
     fn builtin(&mut self, ns: Option<&str>, name: &str, args: &[Arg], ty: TyId, span: Span) -> Val {
         match (ns, name) {
             (Some("console"), _) => {
-                let vals: Vec<Val> = args.iter().map(|a| self.expr(a.expr)).collect();
+                // A lone template literal is written straight into the line, not built as a string first.
+                let ast = self.ast(self.cur_m());
+                let template = match args {
+                    [a] => match &ast.expr(a.expr).kind {
+                        ExprKind::Template(parts, exprs) => Some((parts, exprs)),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let parts_vals = template.map(|(parts, exprs)| (parts, exprs.iter().map(|&x| self.expr(x)).collect::<Vec<Val>>()));
+                let vals: Vec<Val> = if parts_vals.is_some() { Vec::new() } else { args.iter().map(|a| self.expr(a.expr)).collect() };
                 let sbv = self.fresh("sb");
                 self.line(format!("bm_sb {sbv} = {{0}};"));
                 self.line("{");
                 self.bump(1);
                 self.line(format!("bm_sb *sb = &{sbv};"));
+                if let Some((parts, tvals)) = &parts_vals {
+                    self.template_into(parts, tvals);
+                }
                 for (i, v) in vals.iter().enumerate() {
                     if i > 0 {
                         self.line("bm_sb_push_char(sb, ' ');");
                     }
-                    let c = self.inspect_code(v.ty, &v.code, "0");
+                    let c = self.inspect_root(v.ty, &v.code, "0");
                     self.line(format!("{c};"));
                 }
                 self.bump(-1);
@@ -1436,7 +1449,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         match &expected {
             Some(x) => {
                 self.line("bm_sb_push_cstr(sb, \"expected \");");
-                let c = self.inspect_code(x.ty, &x.code, "1");
+                let c = self.inspect_root(x.ty, &x.code, "1");
                 self.line(format!("{c};"));
                 self.line("bm_sb_push_cstr(sb, \", received \");");
             }
@@ -1445,7 +1458,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.line(format!("bm_sb_push_cstr(sb, {});", c_string(what.as_bytes())));
             }
         }
-        let c = self.inspect_code(s.ty, &s.code, "1");
+        let c = self.inspect_root(s.ty, &s.code, "1");
         self.line(format!("{c};"));
         self.line(format!("bm_expect_fail(sb, {loc});"));
         self.bump(-1);

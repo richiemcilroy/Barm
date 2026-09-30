@@ -1540,6 +1540,19 @@ impl<'c, 'a> Gen<'c, 'a> {
     // ------------------------------------------------------------ expressions
 
     /// Emits an expression; the value has the checker's (instantiated) type for it.
+    /// Appends a template literal's text to `sb`, given its already evaluated interpolations.
+    pub(crate) fn template_into(&mut self, parts: &[String], vals: &[Val]) {
+        for (i, part) in parts.iter().enumerate() {
+            if !part.is_empty() {
+                self.line(format!("bm_sb_push(sb, {}, {});", c_string(part.as_bytes()), part.len()));
+            }
+            if let Some(v) = vals.get(i) {
+                let code = self.string_code(v.ty, &v.code);
+                self.line(format!("{code};"));
+            }
+        }
+    }
+
     pub(crate) fn expr(&mut self, e: ExprId) -> Val {
         let m = self.cur_m();
         let ast = self.ast(m);
@@ -1572,15 +1585,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.line(format!("bm_sb {sbv} = {{0}};"));
                 self.open("{");
                 self.line(format!("bm_sb *sb = &{sbv};"));
-                for (i, part) in parts.iter().enumerate() {
-                    if !part.is_empty() {
-                        self.line(format!("bm_sb_push(sb, {}, {});", c_string(part.as_bytes()), part.len()));
-                    }
-                    if let Some(v) = vals.get(i) {
-                        let code = self.string_code(v.ty, &v.code);
-                        self.line(format!("{code};"));
-                    }
-                }
+                self.template_into(parts, &vals);
                 self.close("}");
                 self.tmp(STR, &format!("bm_str_from_sb(&{sbv})"), true)
             }

@@ -70,6 +70,10 @@ typedef struct bm_type {
     void (*inspect)(bm_sb *sb, const void *p, int depth); /* console.log formatting (Node style) */
 } bm_type;
 
+/* console.log formatting of any value. The runtime's own descriptors leave `inspect` NULL (so a
+ * program that never inspects doesn't link the formatter); this handles them. */
+void bm_inspect_value(bm_sb *sb, const bm_type *t, const void *p, int depth);
+
 /* Descriptors for primitives. */
 extern const bm_type bm_type_int, bm_type_f64, bm_type_f32, bm_type_bool, bm_type_str, bm_type_undefined;
 extern const bm_type bm_type_promise;   /* every Promise<T> (a bm_promise *): Node's `Promise { ... }` */
@@ -87,12 +91,13 @@ typedef struct bm_str {
     bm_strbuf *p;      /* never NULL; the empty string is bm_empty_str */
 } bm_str;
 
-extern bm_strbuf bm_empty_strbuf;
-#define BM_EMPTY_STR ((bm_str){&bm_empty_strbuf})
+extern const bm_strbuf bm_empty_strbuf;
+#define BM_EMPTY_STR ((bm_str){(bm_strbuf *)&bm_empty_strbuf})
 
-/* A static literal: BM_STR_LIT(name, "text") declares `name` usable as BM_LIT(name). */
+/* A static literal: BM_STR_LIT(name, "text") declares `name` usable as BM_LIT(name). Immortal
+ * buffers are never written, so they're const (read-only pages, nothing in __data). */
 #define BM_STR_LIT(name, text) \
-    static struct { int32_t rc; int32_t len; char data[sizeof(text)]; } name = { -1, sizeof(text) - 1, text }
+    static const struct { int32_t rc; int32_t len; char data[sizeof(text)]; } name = { -1, sizeof(text) - 1, text }
 #define BM_LIT(name) ((bm_str){(bm_strbuf *)&(name)})
 
 static inline void bm_str_retain(bm_str s) { if (s.p->rc >= 0) s.p->rc++; }
