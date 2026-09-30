@@ -1747,6 +1747,8 @@ static void bmg_cyc_collect(void) {
  * escapes: the C compiler keeps its length (and pointer) in registers and can reason about it. */
 static __attribute__((noinline)) bm_arr bmg_push_slow(bm_arr a, const bm_type *t, void *elem) { bm_arr_push(&a, t, elem); return a; }
 static __attribute__((noinline)) bm_arrbuf *bmg_clone_buf(bm_arr a, const bm_type *t) { bm_arr_make_unique(&a, t, 0); return a.p; }
+/* Capacity for `n` elements, by value (taking the array's address would keep it in memory). */
+static __attribute__((noinline)) bm_arr bmg_reserve(bm_arr a, const bm_type *t, bm_int n) { bm_arr_make_unique(&a, t, n); return a; }
 /* Makes the buffer unique (copy-on-write) without changing the length. */
 static inline void bmg_make_unique(bm_arr *a, const bm_type *t) {
     if (a->p && __builtin_expect(a->p->rc != 1, 0)) a->p = bmg_clone_buf(*a, t);
@@ -1832,7 +1834,9 @@ static void bmg_lsd_bucket(uint64_t *k, size_t n, uint64_t *tmp, uint64_t diff) 
     }
     if (src != k) memcpy(k, src, n * sizeof *k);
 }
-static void bmg_radix_inplace(uint64_t *k, size_t n, uint64_t *tmp) {
+/* Scratch for bucket sorts, grown to the largest bucket met (often a few KiB). */
+typedef struct bmg_rx_tmp { uint64_t *p; size_t cap; } bmg_rx_tmp;
+static void bmg_radix_inplace(uint64_t *k, size_t n, bmg_rx_tmp *tmp) {
     if (n < 64) {
         for (size_t i = 1; i < n; i++) {
             uint64_t v = k[i];
@@ -1845,7 +1849,16 @@ static void bmg_radix_inplace(uint64_t *k, size_t n, uint64_t *tmp) {
     uint64_t diff = 0, k0 = k[0];
     for (size_t i = 1; i < n; i++) diff |= k[i] ^ k0;
     if (!diff) return;
-    if (n <= BMG_RX_SMALL) { bmg_lsd_bucket(k, n, tmp, diff); return; }
+    if (n <= BMG_RX_SMALL) {
+        if (tmp->cap < n) {
+            size_t cap = tmp->cap * 2 > n ? tmp->cap * 2 : n;
+            if (cap > BMG_RX_SMALL) cap = BMG_RX_SMALL;
+            tmp->p = bm_realloc(tmp->p, cap * sizeof(uint64_t));
+            tmp->cap = cap;
+        }
+        bmg_lsd_bucket(k, n, tmp->p, diff);
+        return;
+    }
     int top = 63 - __builtin_clzll(diff);
     int shift = top >= 10 ? top - 10 : 0;
     enum { B = 2048 };
@@ -1894,9 +1907,9 @@ static void bmg_sort_f64(double *a, bm_int n, bool desc) {
         uint64_t key = bmg_f64_key(x);
         k[i] = desc ? ~key : key;
     }
-    uint64_t *tmp = bm_alloc(sizeof(uint64_t) * (size_t)(n < BMG_RX_SMALL ? n : BMG_RX_SMALL));
-    bmg_radix_inplace(k, (size_t)n, tmp);
-    bm_free(tmp);
+    bmg_rx_tmp tmp = { NULL, 0 };
+    bmg_radix_inplace(k, (size_t)n, &tmp);
+    free(tmp.p);
     uint64_t kz = desc ? ~0x8000000000000000ull : 0x8000000000000000ull;
     bm_int zi = 0;
     for (bm_int i = 0; i < n; i++) {

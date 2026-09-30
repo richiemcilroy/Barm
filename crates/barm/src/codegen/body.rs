@@ -920,6 +920,103 @@ impl<'c, 'a> Gen<'c, 'a> {
         Some((ik, xk))
     }
 
+    /// `for (let i = a; i < n; i++) { ...; xs.push(v); ... }` whose body always runs to the end
+    /// (no break, continue, return, throw or `try`) and pushes onto `xs` as a statement of its
+    /// own: the loop adds at least `n - i` elements, so the array grows to that size once, like
+    /// a C program that knows its size up front.
+    fn reserve_for_pushes(&mut self, init: Option<StmtId>, cond: Option<ExprId>, step: Option<ExprId>, body: StmtId) {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let facts = self.facts(m);
+        let local = |e: ExprId| match (&ast.expr(e).kind, facts.idents.get(&e)) {
+            (ExprKind::Ident(_), Some(IdentFact::Local(k))) => Some(*k),
+            _ => None,
+        };
+        let Some(init) = init else { return };
+        let StmtKind::Let { name_span, .. } = &ast.stmt(init).kind else { return };
+        if facts.bindings.get(&init).copied() != Some(INT) {
+            return;
+        }
+        let ik = name_span.start;
+        let Some(cond) = cond else { return };
+        let ExprKind::Binary(BinOp::Lt, l, r) = &ast.expr(cond).kind else { return };
+        if local(*l) != Some(ik) || facts.expr_ty.get(*r as usize).copied() != Some(INT) {
+            return;
+        }
+        let bound = match &ast.expr(*r).kind {
+            ExprKind::Int(_) => None,
+            _ => match local(*r) {
+                Some(k) => Some(k),
+                None => return,
+            },
+        };
+        let step_ok = match step.map(|s| &ast.expr(s).kind) {
+            Some(ExprKind::Update { target, inc: true, .. }) => local(*target) == Some(ik),
+            Some(ExprKind::Assign(AssignOp::Op(BinOp::Add), t, v)) => local(*t) == Some(ik) && matches!(ast.expr(*v).kind, ExprKind::Int(1)),
+            _ => false,
+        };
+        if !step_ok {
+            return;
+        }
+        let StmtKind::Block(ss) = &ast.stmt(body).kind else { return };
+        // Every iteration reaches every top-level statement.
+        fn exits(ast: &ast::Ast, s: StmtId) -> bool {
+            match &ast.stmt(s).kind {
+                StmtKind::Break | StmtKind::Continue | StmtKind::Return(_) | StmtKind::Throw(_) | StmtKind::Try { .. } => true,
+                StmtKind::If(_, t, e) => exits(ast, *t) || e.is_some_and(|e| exits(ast, e)),
+                StmtKind::While(_, b) | StmtKind::DoWhile(b, _) | StmtKind::For { body: b, .. } | StmtKind::ForOf { body: b, .. } => exits(ast, *b),
+                StmtKind::Block(xs) => xs.iter().any(|&x| exits(ast, x)),
+                StmtKind::Switch(..) => true,
+                _ => false,
+            }
+        }
+        if ss.iter().any(|&x| exits(ast, x)) {
+            return;
+        }
+        let mut all = Vec::new();
+        collect_exprs_stmt(ast, body, &mut all);
+        if all.iter().any(|&e| match &ast.expr(e).kind {
+            ExprKind::Try(_) => true,
+            ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } => local(*t) == Some(ik) || (bound.is_some() && local(*t) == bound),
+            ExprKind::Call { args, .. } => args.iter().any(|a| a.by_ref.is_some() && (local(a.expr) == Some(ik) || (bound.is_some() && local(a.expr) == bound))),
+            _ => false,
+        }) {
+            return;
+        }
+        let lit = match &ast.expr(*r).kind {
+            ExprKind::Int(v) => Some(format!("INT64_C({v})")),
+            _ => None,
+        };
+        let pushed: Vec<u32> = ss.iter().filter_map(|&x| {
+            let StmtKind::Expr(e) = &ast.stmt(x).kind else { return None };
+            let ExprKind::Call { callee, args, .. } = &ast.expr(*e).kind else { return None };
+            let ExprKind::Member { obj, name, optional: false, .. } = &ast.expr(*callee).kind else { return None };
+            if self.sym(*name) != "push" || args.len() != 1 {
+                return None;
+            }
+            local(*obj)
+        }).collect();
+        for xk in pushed {
+            let Some(cv) = self.b().push_caps.get(&xk).cloned() else { continue };
+            let (Some(xl), Some(il)) = (self.b().locals.get(&xk).cloned(), self.b().locals.get(&ik).cloned()) else { continue };
+            let Ty::Array(et) = self.tget(xl.ty) else { continue };
+            let n = match bound {
+                Some(k) => match self.b().locals.get(&k) {
+                    Some(l) => l.access.clone(),
+                    None => continue,
+                },
+                None => match &lit {
+                    Some(l) => l.clone(),
+                    None => continue,
+                },
+            };
+            let d = self.desc(et);
+            let (xs, i) = (xl.access, il.access);
+            self.line(format!("if ({n} > {i} && bm_arr_len({xs}) + ({n} - {i}) > {cv}) {{ {xs} = bmg_reserve({xs}, {d}, bm_arr_len({xs}) + ({n} - {i})); {cv} = {xs}.p->cap; }}"));
+            return;
+        }
+    }
+
     fn unhoist(&mut self, keys: Vec<u32>) {
         for k in keys {
             self.b().unique.remove(&k);
@@ -1153,6 +1250,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 let loop_exprs: Vec<ExprId> = [cond, step].into_iter().flatten().copied().collect();
                 let hoisted = self.hoist_unique(&[*body], &loop_exprs);
+                self.reserve_for_pushes(*init, *cond, *step, *body);
                 let bounds = self.counted_loop(*init, *cond, *step, *body);
                 self.open("for (;;) {");
                 if let Some(c) = cond {
