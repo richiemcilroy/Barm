@@ -1628,7 +1628,12 @@ static inline void bmg_make_unique(bm_arr *a, const bm_type *t) {
 /* Typed push: inline fast path when the buffer is unique with spare capacity. */
 #define BMG_PUSH(T, arr, desc, val) do { bm_arr *bmp_a = (arr); T bmp_v = (val); bm_arrbuf *bmp_p = bmp_a->p; \
     if (__builtin_expect(bmp_p && bmp_p->rc == 1 && bmp_a->len < bmp_p->cap, 1)) ((T *)(void *)bmp_p->data)[bmp_a->len++] = bmp_v; \
-    else *bmp_a = bmg_push_slow(*bmp_a, (desc), &bmp_v); } while (0)
+    else { T bmp_s = bmp_v; /* addressable only on the slow path: no spill per push */ \
+        *bmp_a = bmg_push_slow(*bmp_a, (desc), &bmp_s); } } while (0)
+/* Push onto an array known to be uniquely owned (made unique before the loop). */
+#define BMG_PUSH_U(T, arr, desc, val) do { bm_arr *bmp_a = (arr); T bmp_v = (val); bm_arrbuf *bmp_p = bmp_a->p; \
+    if (__builtin_expect(bmp_p && bmp_a->len < bmp_p->cap, 1)) ((T *)(void *)bmp_p->data)[bmp_a->len++] = bmp_v; \
+    else { T bmp_s = bmp_v; *bmp_a = bmg_push_slow(*bmp_a, (desc), &bmp_s); } } while (0)
 /* Mutable element access: copy-on-write, then a bounds-checked pointer. */
 static inline void *bmg_at_mut(bm_arr *a, const bm_type *t, size_t size, bm_int i, const char *loc) {
     bmg_make_unique(a, t);

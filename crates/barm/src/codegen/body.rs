@@ -76,6 +76,9 @@ pub(crate) struct Body {
     /// Accumulator recursion elimination (see `Gen::tre_candidate`): `return a + f(args)`
     /// becomes "add a, rebind the parameters, jump to the top".
     pub tre: Option<Tre>,
+    /// (index local, array local) pairs of enclosing `for (let i = 0; i < xs.length; i++)`
+    /// loops whose bodies change neither: `xs[i]` there is in bounds.
+    pub in_bounds: Vec<(u32, u32)>,
 }
 
 /// A function whose `return a + f(args)` self-calls run as a loop: the function (module,
@@ -228,6 +231,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             children: Vec::new(),
             finallies: Vec::new(),
             tre: None,
+            in_bounds: Vec::new(),
         });
     }
 
@@ -414,6 +418,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             children: Vec::new(),
             finallies: Vec::new(),
             tre: self.pending_tre.take(),
+            in_bounds: Vec::new(),
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
             let access = if inout { format!("(*p{i})") } else { format!("p{i}") };
@@ -725,6 +730,14 @@ impl<'c, 'a> Gen<'c, 'a> {
         let facts = self.facts(m);
         let mut written: FxSet<u32> = FxSet::default();
         for &e in &all {
+            // `xs.push(v)` in the loop: pushes then skip the ownership check.
+            if let ExprKind::Call { callee, .. } = &ast.expr(e).kind
+                && let ExprKind::Member { obj, name, optional: false, .. } = &ast.expr(*callee).kind
+                && self.sym(*name) == "push"
+                && let (ExprKind::Ident(_), Some(IdentFact::Local(k))) = (&ast.expr(*obj).kind, facts.idents.get(obj))
+            {
+                written.insert(*k);
+            }
             if let ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } = &ast.expr(e).kind {
                 let mut cur = *t;
                 loop {
@@ -756,6 +769,64 @@ impl<'c, 'a> Gen<'c, 'a> {
             added.push(k);
         }
         added
+    }
+
+    /// `for (let i = 0; i < xs.length; i++)` (or `i += 1`) whose body never assigns `i` and
+    /// uses `xs` only as `xs[...]` and `xs.length` (so its length can't change): (i, xs).
+    fn counted_loop(&self, init: Option<StmtId>, cond: Option<ExprId>, step: Option<ExprId>, body: StmtId) -> Option<(u32, u32)> {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let facts = self.facts(m);
+        let local = |e: ExprId| match (&ast.expr(e).kind, facts.idents.get(&e)) {
+            (ExprKind::Ident(_), Some(IdentFact::Local(k))) => Some(*k),
+            _ => None,
+        };
+        let StmtKind::Let { name_span, init: Some(i0), .. } = &ast.stmt(init?).kind else { return None };
+        if !matches!(ast.expr(*i0).kind, ExprKind::Int(0)) || facts.bindings.get(&init?).copied() != Some(INT) {
+            return None;
+        }
+        let ik = name_span.start;
+        let ExprKind::Binary(BinOp::Lt, l, r) = &ast.expr(cond?).kind else { return None };
+        if local(*l) != Some(ik) {
+            return None;
+        }
+        let ExprKind::Member { obj, name, optional: false, .. } = &ast.expr(*r).kind else { return None };
+        if self.sym(*name) != "length" {
+            return None;
+        }
+        let xk = local(*obj)?;
+        if !matches!(self.tget(facts.expr_ty[*obj as usize]), Ty::Array(_)) {
+            return None;
+        }
+        let step_ok = match &ast.expr(step?).kind {
+            ExprKind::Update { target, inc: true, .. } => local(*target) == Some(ik),
+            ExprKind::Assign(AssignOp::Op(BinOp::Add), t, v) => local(*t) == Some(ik) && matches!(ast.expr(*v).kind, ExprKind::Int(1)),
+            _ => false,
+        };
+        if !step_ok {
+            return None;
+        }
+        let mut all = Vec::new();
+        collect_exprs_stmt(ast, body, &mut all);
+        let mut allowed = FxSet::default();
+        for &e in &all {
+            match &ast.expr(e).kind {
+                // `i` must not change; `xs` itself neither (elements may).
+                ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } if local(*t) == Some(ik) || local(*t) == Some(xk) => return None,
+                ExprKind::Call { args, .. } if args.iter().any(|a| a.by_ref.is_some() && (local(a.expr) == Some(ik) || local(a.expr) == Some(xk))) => return None,
+                ExprKind::Index { obj, .. } if local(*obj) == Some(xk) => {
+                    allowed.insert(*obj);
+                }
+                ExprKind::Member { obj, name, .. } if local(*obj) == Some(xk) && self.sym(*name) == "length" => {
+                    allowed.insert(*obj);
+                }
+                _ => {}
+            }
+        }
+        if all.iter().any(|&e| local(e) == Some(xk) && !allowed.contains(&e)) {
+            return None;
+        }
+        Some((ik, xk))
     }
 
     fn unhoist(&mut self, keys: Vec<u32>) {
@@ -952,11 +1023,18 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 let loop_exprs: Vec<ExprId> = [cond, step].into_iter().flatten().copied().collect();
                 let hoisted = self.hoist_unique(&[*body], &loop_exprs);
+                let bounds = self.counted_loop(*init, *cond, *step, *body);
                 self.open("for (;;) {");
                 if let Some(c) = cond {
                     self.cond_break(*c);
                 }
+                if let Some(pair) = bounds {
+                    self.b().in_bounds.push(pair);
+                }
                 self.loop_body(*body, &cont);
+                if bounds.is_some() {
+                    self.b().in_bounds.pop();
+                }
                 self.line(format!("{cont}:;"));
                 if let Some(st) = step {
                     self.push_temps();
@@ -1639,11 +1717,20 @@ impl<'c, 'a> Gen<'c, 'a> {
                 if let ExprKind::Index { obj, index, optional: false } = &ast.expr(*x).kind {
                     let ot = self.ty(*obj);
                     if let Ty::Array(et) = self.tget(ot) {
+                        let in_bounds = match (self.ident_fact(m, *obj), self.ident_fact(m, *index)) {
+                            (Some(IdentFact::Local(xk)), Some(IdentFact::Local(ik))) => self.b().in_bounds.contains(&(ik, xk)),
+                            _ => false,
+                        };
                         let a = self.expr(*obj);
                         let i = self.expr(*index);
                         let i = self.int_code(i);
-                        let loc = self.loc(span);
                         let ect = self.ctype(et);
+                        if in_bounds {
+                            // `xs[i]` in `for (let i = 0; i < xs.length; i++)`: always in bounds.
+                            let v = Val::plain(format!("((({ect} *)bm_arr_data({}))[{i}])", a.code), et);
+                            return self.coerce(v, ty);
+                        }
+                        let loc = self.loc(span);
                         let v = Val::plain(format!("(*({ect} *)bm_arr_at({}, sizeof({ect}), {i}, {loc}))", a.code), et);
                         return self.coerce(v, ty);
                     }
@@ -2864,6 +2951,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             children: Vec::new(),
             finallies: Vec::new(),
             tre: None,
+            in_bounds: Vec::new(),
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
             let access = if inout { format!("(*p{i})") } else { format!("p{i}") };
