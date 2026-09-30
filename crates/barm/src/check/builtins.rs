@@ -383,7 +383,7 @@ impl<'a> Checker<'a> {
             "process" => vec!["argv", "env", "exit", "cwd", "platform", "stdout", "stderr"],
             "Date" | "performance" => vec!["now"],
             "JSON" => vec!["stringify", "parse"],
-            "Promise" => vec!["resolve", "reject"],
+            "Promise" => vec!["resolve", "reject", "all", "race"],
             _ => vec!["log", "error", "warn", "info"],
         };
         if known.contains(&n.as_str()) {
@@ -435,9 +435,63 @@ impl<'a> Checker<'a> {
                 let v = expected.map(|(v, _)| v).unwrap_or(NEVER);
                 self.types.promise(v, e)
             }
+            // `Promise.all(ps)`: every value, in order (rejects with the first rejection);
+            // `Promise.race(ps)`: the first to settle.
+            "all" | "race" => {
+                let [a] = args else {
+                    self.report(Diagnostic::new("T0201", span, format!("`Promise.{name}` takes 1 argument (an array of promises), found {}", args.len())));
+                    self.check_args_loose(args);
+                    return ERROR;
+                };
+                let hint = expected.and_then(|(v, e)| {
+                    let elem = if name == "all" {
+                        match *self.types.get(v) {
+                            Ty::Array(x) => x,
+                            _ => return None,
+                        }
+                    } else {
+                        v
+                    };
+                    let p = self.types.promise(elem, e);
+                    Some(self.types.array(p))
+                });
+                let t = self.expr(a.expr, hint);
+                let s = self.ast().expr(a.expr).span;
+                let Ty::Array(elem) = *self.types.get(t) else {
+                    if t != ERROR {
+                        let shown = self.show(t);
+                        self.report(Diagnostic::new("T0001", s, format!("`Promise.{name}` takes an array of promises, found `{shown}`")));
+                    }
+                    return ERROR;
+                };
+                let (mut values, mut errors) = (Vec::new(), Vec::new());
+                for m in self.flat_members(elem) {
+                    match *self.types.get(m) {
+                        Ty::Promise(v, e) => {
+                            values.push(v);
+                            if e != NEVER {
+                                errors.push(e);
+                            }
+                        }
+                        Ty::Error => return ERROR,
+                        _ => {
+                            let shown = self.show(elem);
+                            self.report(
+                                Diagnostic::new("T0001", s, format!("`Promise.{name}` takes an array of promises, found `{shown}[]`"))
+                                    .note("instead", "wrap plain values: `Promise.resolve(value)`"),
+                            );
+                            return ERROR;
+                        }
+                    }
+                }
+                let v = self.types.union(&values);
+                let e = if errors.is_empty() { NEVER } else { self.types.union(&errors) };
+                let v = if name == "all" { self.types.array(v) } else { v };
+                self.types.promise(v, e)
+            }
             _ => {
                 self.check_args_loose(args);
-                self.unknown_ns_member("Promise", name, &["resolve", "reject"], name_span);
+                self.unknown_ns_member("Promise", name, &["resolve", "reject", "all", "race"], name_span);
                 ERROR
             }
         }

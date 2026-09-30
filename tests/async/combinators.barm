@@ -1,0 +1,60 @@
+// Promise.all and Promise.race: values in order, the first rejection or winner, and the ticks
+// they take relative to other tasks (a ticker logs where each result lands).
+class Oops extends Error {}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function later(v: int, ms: number): Promise<int> {
+  await sleep(ms)
+  return v
+}
+
+async function fails(ms: number): Promise<int> throws Oops {
+  await sleep(ms)
+  throw new Oops("failed after " + String(ms))
+}
+
+async function now(v: int): Promise<int> {
+  return v
+}
+
+const log: string[] = []
+
+async function ticker(n: int) {
+  for (let i = 0; i < n; i++) {
+    log.push("t" + String(i))
+    await undefined
+  }
+}
+
+async function main() {
+  // All settled already: how many ticks until the result?
+  const t = ticker(6)
+  const quick = await Promise.all([now(1), now(2), now(3)])
+  log.push("all=" + quick.join(","))
+  await t
+  console.log(log.join(" "))
+
+  const values = await Promise.all([later(1, 30), later(2, 10), later(3, 20)])
+  console.log("in order:", values.join(","))
+
+  const none = await Promise.all(([] as Promise<int>[]))
+  console.log("empty:", none.length)
+
+  try {
+    await Promise.all([later(1, 10), fails(20), fails(40)])
+  } catch (e) {
+    console.log("all rejected:", e.message)
+  }
+
+  console.log("race:", await Promise.race([later(1, 40), later(2, 10), later(3, 20)]))
+  try {
+    console.log(await Promise.race([later(1, 30), fails(10)]))
+  } catch (e) {
+    console.log("race rejected:", e.message)
+  }
+  const names = await Promise.all(["a", "b"].map(async (s) => s.toUpperCase()))
+  console.log(names.join(""))
+}

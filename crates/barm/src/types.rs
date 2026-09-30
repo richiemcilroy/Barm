@@ -374,6 +374,25 @@ impl Types {
         }
         out.sort();
         out.dedup();
+        // Promises can't be told apart, so several promise types merge into one:
+        // `Promise<A, E1> | Promise<B, E2>` is `Promise<A | B, E1 | E2>`.
+        if out.iter().filter(|&&m| matches!(self.get(m), Ty::Promise(..))).count() > 1 {
+            let (mut values, mut errors) = (Vec::new(), Vec::new());
+            out.retain(|&m| match *self.get(m) {
+                Ty::Promise(v, e) => {
+                    values.push(v);
+                    errors.push(e);
+                    false
+                }
+                _ => true,
+            });
+            let v = self.union(&values);
+            let e = self.union(&errors);
+            let merged = self.promise(v, e);
+            out.push(merged);
+            out.sort();
+            out.dedup();
+        }
         if out.contains(&STR) {
             let types = &*self;
             out.retain(|&m| !matches!(types.get(m), Ty::StrLit(_)));

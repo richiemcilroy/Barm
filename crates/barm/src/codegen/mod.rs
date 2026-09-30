@@ -383,8 +383,8 @@ impl<'c, 'a> Gen<'c, 'a> {
     fn finish_program(&mut self, main_body: String) {
         // Rejections nobody handled are reported like uncaught errors.
         self.needs_uncaught = true;
-        self.helpers_after.push("static void bmg_async_release(void *e) { bmg_obj_release(e); }\nstatic void bmg_async_report(void *e) { bmg_err = e; bmg_obj_retain(e); bmg_uncaught(); }\n".to_string());
-        let _ = writeln!(self.protos, "static void bmg_async_release(void *e);\nstatic void bmg_async_report(void *e);");
+        self.helpers_after.push("static void bmg_async_retain(void *e) { bmg_obj_retain(e); }\nstatic void bmg_async_release(void *e) { bmg_obj_release(e); }\nstatic void bmg_async_report(void *e) { bmg_err = e; bmg_obj_retain(e); bmg_uncaught(); }\n".to_string());
+        let _ = writeln!(self.protos, "static void bmg_async_retain(void *e);\nstatic void bmg_async_release(void *e);\nstatic void bmg_async_report(void *e);");
         if self.needs_uncaught {
             let uncaught = self.uncaught_fn();
             self.helpers_after.push(uncaught);
@@ -426,7 +426,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.helpers_after.push(dispatch);
         self.helpers_after.push(tables);
         let mut init = std::mem::take(&mut self.const_init);
-        init.insert_str(0, "    bm_async_init(bmg_async_release, bmg_async_report);\n");
+        init.insert_str(0, "    bm_async_init(bmg_async_retain, bmg_async_release, bmg_async_report);\n");
         // The program runs on a thread with a 1 GiB stack (reserved, committed as used): deep
         // recursion — including freeing long linked structures — has room without per-call checks.
         let _ = writeln!(
@@ -1033,6 +1033,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 format!("({{ if (({place}) != NULL) {inner}; else bm_sb_push_cstr(sb, \"undefined\"); }})")
             }
             Ty::Map(..) | Ty::Set(_) => format!("({})->to_str(sb, &({place}))", self.desc(t)),
+            Ty::Promise(..) => "bm_sb_push_cstr(sb, \"[object Promise]\")".into(),
             _ => {
                 self.ensure_helper(t, H_STR);
                 format!("ts_{}(sb, &({place}))", self.box_name(t))
@@ -1051,6 +1052,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::Bool | Ty::Undefined | Ty::Void | Ty::Never => {
                 self.string_code(t, place)
             }
+            Ty::Promise(..) => format!("bm_type_promise.inspect(sb, &({place}), {depth})"),
             Ty::Array(e) => {
                 let d = self.desc(e);
                 format!("bm_inspect_arr(sb, {place}, {d}, {depth})")
@@ -1090,6 +1092,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::U32 => return "&bm_type_u32".into(),
             Ty::U64 => return "&bm_type_u64".into(),
             Ty::Undefined | Ty::Void | Ty::Never | Ty::Error | Ty::Unknown => return "&bm_type_undefined".into(),
+            Ty::Promise(..) => return "&bm_type_promise".into(),
             _ => {}
         }
         let key = self.desc_key(t);
