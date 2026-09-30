@@ -41,3 +41,8 @@ harness = false
 name = "async"
 path = "../../tests/async.rs"
 harness = false
+
+[[test]]
+name = "fetch"
+path = "../../tests/fetch.rs"
+harness = false

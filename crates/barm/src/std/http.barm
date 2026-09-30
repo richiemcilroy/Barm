@@ -42,12 +42,17 @@ export class Headers {
     return h
   }
 
+  // Every value of `name`, joined with ", " (as the Fetch standard combines them).
   get(name: string): string | undefined {
-    const at = __native.headerIndex(this.raw, name)
-    if (at < 0) {
+    if (__native.headerIndex(this.raw, name) < 0) {
       return undefined
     }
-    return __native.headerValue(this.raw, at)
+    return __native.headerGet(this.raw, name)
+  }
+
+  // Each Set-Cookie header on its own (`get` would join them).
+  getSetCookie(): string[] {
+    return __native.headerValues(this.raw, "set-cookie")
   }
 
   has(name: string): bool {
@@ -66,23 +71,39 @@ export class Headers {
     this.raw = __native.headerRemove(this.raw, name)
   }
 
-  // `f(value, name)` for each header (names in lower case, as in the Fetch API).
+  // `f(value, name)` for each header, as the Fetch API iterates them: names in lower case and
+  // sorted, repeated names combined (Set-Cookie excepted).
   forEach(f: (value: string, name: string) => void): void {
-    for (const line of this.raw.split("\r\n")) {
-      const colon = line.indexOf(":")
-      if (colon > 0) {
-        f(line.slice(colon + 1).trim(), line.slice(0, colon).toLowerCase())
-      }
+    const e = __native.headerEntries(this.raw)
+    for (let i = 0; i + 1 < e.length; i += 2) {
+      f(e[i + 1]!, e[i]!)
     }
+  }
+
+  keys(): string[] {
+    const e = __native.headerEntries(this.raw)
+    const out: string[] = []
+    for (let i = 0; i < e.length; i += 2) {
+      out.push(e[i]!)
+    }
+    return out
+  }
+
+  values(): string[] {
+    const e = __native.headerEntries(this.raw)
+    const out: string[] = []
+    for (let i = 1; i < e.length; i += 2) {
+      out.push(e[i]!)
+    }
+    return out
   }
 
   toJSON(): Record<string, string> {
     const out: Record<string, string> = {}
-    for (const line of this.raw.split("\r\n")) {
-      const colon = line.indexOf(":")
-      if (colon > 0) {
-        out.set(line.slice(0, colon).toLowerCase(), line.slice(colon + 1).trim())
-      }
+    const e = __native.headerEntries(this.raw)
+    for (let i = 0; i + 1 < e.length; i += 2) {
+      const prev = out.get(e[i]!)
+      out.set(e[i]!, prev === undefined ? e[i + 1]! : prev + ", " + e[i + 1]!)
     }
     return out
   }
@@ -288,7 +309,43 @@ export class URL {
   }
 }
 
-export type RequestInit = { method?: string, headers?: HeadersInit, body?: string }
+// A body: text (sent as is), form fields (`application/x-www-form-urlencoded`), or bytes.
+export type BodyInit = string | URLSearchParams | u8[]
+export type RequestRedirect = "follow" | "manual" | "error"
+export type RequestInit = {
+  method?: string
+  headers?: HeadersInit
+  body?: BodyInit
+  // fetch(): what to do with a 3xx response (default "follow", up to 20 times)
+  redirect?: RequestRedirect
+  // fetch(): cancels the request (it rejects with the signal's reason)
+  signal?: AbortSignal
+  // fetch() (Bun): decode gzip and deflate bodies (default true)
+  decompress?: bool
+  // accepted for compatibility; connections are always pooled
+  keepalive?: bool
+}
+
+function bodyText(b: BodyInit): string {
+  if (typeof b === "string") {
+    return b
+  }
+  if (b instanceof URLSearchParams) {
+    return b.toString()
+  }
+  return __native.bytesToString(b)
+}
+
+// The Content-Type a body implies when the headers don't give one.
+function bodyType(b: BodyInit): string {
+  return b instanceof URLSearchParams ? "application/x-www-form-urlencoded;charset=UTF-8" : ""
+}
+
+// Methods are sent upper-cased, as Bun does ("patch" → "PATCH"; the Fetch standard would keep
+// it, and servers answer 405).
+function normalizeMethod(m: string): string {
+  return m.toUpperCase()
+}
 
 export class Request {
   private verb: string
@@ -300,12 +357,16 @@ export class Request {
 
   constructor(input: string, init?: RequestInit) {
     const m = init?.method
-    this.verb = m === undefined ? "GET" : m.toUpperCase()
+    this.verb = m === undefined ? "GET" : normalizeMethod(m)
     this.target = input
     this.fromWire = false
     const h = init?.headers
     this.rawHeaders = h === undefined ? "" : new Headers(h).wire()
-    this.rawBody = init?.body ?? ""
+    const b = init?.body
+    this.rawBody = b === undefined ? "" : bodyText(b)
+    if (b !== undefined && bodyType(b) !== "" && __native.headerIndex(this.rawHeaders, "content-type") < 0) {
+      this.rawHeaders = __native.headerAppend(this.rawHeaders, "Content-Type", bodyType(b))
+    }
   }
 
   get method(): string {
@@ -339,6 +400,15 @@ export class Request {
     }
   }
 
+  // Internal: the header block and body, as sent.
+  wireHeaders(): string {
+    return this.rawHeaders
+  }
+
+  wireBody(): string {
+    return this.rawBody
+  }
+
   // Internal: fills in a request read from the wire.
   wire(method: string, target: string, headers: string, body: string): void {
     this.verb = method
@@ -369,15 +439,33 @@ export class Response {
   private bodyText: string
   // without a body there's no default Content-Type
   private hasBody: bool
+  private used: bool
+  private finalUrl: string
+  private wasRedirected: bool
 
-  constructor(body?: string, init?: ResponseInit) {
-    this.bodyText = body ?? ""
+  constructor(body?: BodyInit, init?: ResponseInit) {
+    this.bodyText = body === undefined ? "" : bodyText(body)
     this.hasBody = body !== undefined
     const status = init?.status
     this.status = status === undefined ? 200 : Math.trunc(status)
     this.statusText = init?.statusText ?? ""
     const h = init?.headers
     this.rawHeaders = h === undefined ? "" : new Headers(h).wire()
+    if (body !== undefined && bodyType(body) !== "" && __native.headerIndex(this.rawHeaders, "content-type") < 0) {
+      this.rawHeaders = __native.headerAppend(this.rawHeaders, "Content-Type", bodyType(body))
+    }
+    this.used = false
+    this.finalUrl = ""
+    this.wasRedirected = false
+  }
+
+  // Internal: the response to fetch() request `id`.
+  static fetched(id: int): Response {
+    const r = new Response(__native.fetchBody(id), { status: __native.fetchStatus(id), statusText: __native.fetchStatusText(id) })
+    r.rawHeaders = __native.fetchHeaders(id)
+    r.finalUrl = __native.fetchUrl(id)
+    r.wasRedirected = __native.fetchRedirected(id)
+    return r
   }
 
   get headers(): Headers {
@@ -388,17 +476,71 @@ export class Response {
     return this.status >= 200 && this.status < 300
   }
 
-  text(): Promise<string> {
-    return Promise.resolve(this.bodyText)
+  // The URL that answered, after redirects ("" for a response made in the program).
+  get url(): string {
+    return this.finalUrl
   }
 
-  json<T>(): Promise<T, SyntaxError> {
+  get redirected(): bool {
+    return this.wasRedirected
+  }
+
+  get type(): string {
+    return "default"
+  }
+
+  // The body has been read (it can be read once).
+  get bodyUsed(): bool {
+    return this.used
+  }
+
+  // The body as text (invalid UTF-8 becomes U+FFFD, a leading BOM is dropped).
+  text(): Promise<string, TypeError> {
+    if (this.used) {
+      return Promise.reject(new FetchError("Body already used", "ERR_BODY_ALREADY_USED"))
+    }
+    this.used = true
+    return Promise.resolve(__native.utf8Clean(this.bodyText))
+  }
+
+  // The body parsed as JSON, checked against the type the context expects.
+  json<T>(): Promise<T, SyntaxError | TypeError> {
+    if (this.used) {
+      return Promise.reject(new FetchError("Body already used", "ERR_BODY_ALREADY_USED"))
+    }
+    this.used = true
     try {
-      const value: T = JSON.parse(this.bodyText)
+      const value: T = JSON.parse(__native.utf8Clean(this.bodyText))
       return Promise.resolve(value)
     } catch (e) {
       return Promise.reject(e)
     }
+  }
+
+  // The body's bytes (Bun's `bytes()`; a `u8[]` stands in for Uint8Array).
+  bytes(): Promise<u8[], TypeError> {
+    if (this.used) {
+      return Promise.reject(new FetchError("Body already used", "ERR_BODY_ALREADY_USED"))
+    }
+    this.used = true
+    return Promise.resolve(__native.stringToBytes(this.bodyText))
+  }
+
+  arrayBuffer(): Promise<u8[], TypeError> {
+    return this.bytes()
+  }
+
+  // A copy that can be read separately.
+  clone(): Response throws TypeError {
+    if (this.used) {
+      throw new FetchError("Body already used", "ERR_BODY_ALREADY_USED")
+    }
+    const r = new Response(this.bodyText, { status: this.status, statusText: this.statusText })
+    r.rawHeaders = this.rawHeaders
+    r.hasBody = this.hasBody
+    r.finalUrl = this.finalUrl
+    r.wasRedirected = this.wasRedirected
+    return r
   }
 
   // `data` as JSON, with `Content-Type: application/json;charset=utf-8`.
@@ -674,6 +816,228 @@ export function serve(options: ServeOptions): Server {
   __native.httpWorkers(options.workers ?? 1)
   server.bound(id, __native.httpPort(id))
   return server
+}
+
+// A web platform error: `name` says which ("AbortError", "TimeoutError", ...).
+export class DOMException extends Error {
+  readonly code: int
+
+  constructor(message?: string, name?: string) {
+    super(message ?? "")
+    const n = name ?? "Error"
+    this.name = n
+    this.code = n === "AbortError" ? 20 : n === "TimeoutError" ? 23 : 0
+  }
+}
+
+// Says when to stop: `fetch` rejects with `reason` once the signal is aborted.
+export class AbortSignal {
+  private flag: bool
+  private why: Error | undefined
+  private listeners: (() => void)[]
+  // fetch() requests to cancel
+  private watching: int[]
+  onabort: (() => void) | undefined
+
+  constructor() {
+    this.flag = false
+    this.why = undefined
+    this.listeners = []
+    this.watching = []
+    this.onabort = undefined
+  }
+
+  get aborted(): bool {
+    return this.flag
+  }
+
+  get reason(): Error | undefined {
+    return this.why
+  }
+
+  throwIfAborted(): void throws Error {
+    const why = this.why
+    if (why !== undefined) {
+      throw why
+    }
+  }
+
+  // `listener` runs once, when the signal aborts ("abort" is the only event).
+  addEventListener(event: string, listener: () => void): void {
+    if (event === "abort") {
+      this.listeners.push(listener)
+    }
+  }
+
+  // A signal that is already aborted.
+  static abort(reason?: Error): AbortSignal {
+    const s = new AbortSignal()
+    s.fire(reason ?? new DOMException("The operation was aborted.", "AbortError"))
+    return s
+  }
+
+  // A signal that aborts with a TimeoutError after `ms` milliseconds (the timer doesn't keep
+  // the program running by itself).
+  static timeout(ms: number): AbortSignal {
+    const s = new AbortSignal()
+    const id = setTimeout(() => {
+      s.fire(new DOMException("The operation timed out.", "TimeoutError"))
+    }, ms)
+    __native.timerUnref(id)
+    return s
+  }
+
+  // A signal that aborts when any of `signals` does, with its reason.
+  static any(signals: AbortSignal[]): AbortSignal {
+    const s = new AbortSignal()
+    for (const each of signals) {
+      const why = each.why
+      if (why !== undefined) {
+        s.fire(why)
+        return s
+      }
+    }
+    for (const each of signals) {
+      each.addEventListener("abort", () => {
+        const why = each.why
+        if (why !== undefined) {
+          s.fire(why)
+        }
+      })
+    }
+    return s
+  }
+
+  // Internal: aborts with `reason` (once).
+  fire(reason: Error): void {
+    if (this.flag) {
+      return
+    }
+    this.flag = true
+    this.why = reason
+    for (const id of this.watching) {
+      __native.fetchAbort(id)
+    }
+    this.watching = []
+    const on = this.onabort
+    if (on !== undefined) {
+      on()
+    }
+    const ls = this.listeners
+    this.listeners = []
+    for (const l of ls) {
+      l()
+    }
+  }
+
+  // Internal: fetch() request `id` is cancelled when this aborts, until it has finished.
+  watch(id: int): void {
+    this.watching.push(id)
+  }
+
+  unwatch(id: int): void {
+    if (this.watching.includes(id)) {
+      this.watching = this.watching.filter((w) => w !== id)
+    }
+  }
+}
+
+export class AbortController {
+  readonly signal: AbortSignal
+
+  constructor() {
+    this.signal = new AbortSignal()
+  }
+
+  // Aborts the signal with `reason` (a DOMException "AbortError" if not given).
+  abort(reason?: Error): void {
+    this.signal.fire(reason ?? new DOMException("The operation was aborted.", "AbortError"))
+  }
+}
+
+// A failed fetch(): a TypeError with Bun's message and `code` ("ConnectionRefused",
+// "ENOTFOUND", "TooManyRedirects", "UnexpectedRedirect", "ECONNRESET", ...).
+export class FetchError extends TypeError {
+  readonly code: string
+
+  constructor(message: string, code: string) {
+    super(message)
+    this.name = "TypeError"
+    this.code = code
+  }
+}
+
+// Bun's fetch(): an HTTP/1.1 request on a pooled keep-alive connection, resolving once the
+// whole response has arrived. Rejects with a FetchError when the request fails (an HTTP error
+// status still resolves), or with the signal's reason when it is aborted.
+export async function fetch(input: string | URL | Request, init?: RequestInit): Promise<Response> throws Error {
+  let method = "GET"
+  let url = ""
+  let headers = ""
+  let body = ""
+  if (typeof input === "string") {
+    url = input
+  } else if (input instanceof URL) {
+    url = input.href
+  } else {
+    url = input.url
+    method = input.method
+    headers = input.wireHeaders()
+    body = input.wireBody()
+  }
+  let redirect = 0
+  let flags = 1
+  let signal: AbortSignal | undefined = undefined
+  if (init !== undefined) {
+    const m = init.method
+    if (m !== undefined) {
+      method = normalizeMethod(m)
+    }
+    const h = init.headers
+    if (h !== undefined) {
+      headers = new Headers(h).wire()
+    }
+    const b = init.body
+    if (b !== undefined) {
+      body = bodyText(b)
+      const t = bodyType(b)
+      if (t !== "" && __native.headerIndex(headers, "content-type") < 0) {
+        headers = __native.headerAppend(headers, "Content-Type", t)
+      }
+    }
+    const r = init.redirect
+    redirect = r === "manual" ? 1 : r === "error" ? 2 : 0
+    if (init.decompress === false) {
+      flags = 0
+    }
+    signal = init.signal
+  }
+  if ((method === "GET" || method === "HEAD") && body !== "") {
+    throw new FetchError("fetch() request with GET/HEAD method cannot have body.", "ERR_INVALID_ARG_VALUE")
+  }
+  if (signal !== undefined) {
+    try signal.throwIfAborted()
+  }
+  const id = __native.fetchStart(method, url, headers, body, redirect, flags)
+  if (signal !== undefined) {
+    signal.watch(id)
+  }
+  const result = await __native.fetchWait(id)
+  if (signal !== undefined) {
+    signal.unwatch(id)
+  }
+  if (result !== 0) {
+    const message = __native.fetchErrorMessage(id)
+    const code = __native.fetchErrorCode(id)
+    __native.fetchFree(id)
+    if (result === -2 && signal !== undefined) {
+      try signal.throwIfAborted()
+    }
+    throw new FetchError(message, code)
+  }
+  const res = Response.fetched(id)
+  __native.fetchFree(id)
+  return res
 }
 
 // The `Bun` global (only `Bun.serve` so far).

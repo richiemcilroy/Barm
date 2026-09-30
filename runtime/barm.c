@@ -3162,6 +3162,7 @@ typedef struct {
     uint64_t every;   /* setInterval: period in ms (0: once) */
     bm_int id;
     bm_fn cb;         /* fn NULL: cleared */
+    bool weak;        /* unref'd (AbortSignal.timeout): doesn't keep the program running */
 } bm_timer;
 
 static bm_timer *bm_timers;
@@ -3242,7 +3243,7 @@ bm_int bm_set_timer(bm_fn cb, double ms, bool repeat) {
     if (!(ms >= 1 && ms <= 2147483647.0)) ms = 1;
     uint64_t delay = (uint64_t)ms;
     bm_env_retain(cb.env);
-    bm_timer t = {bm_loop_now() + delay, ++bm_timer_seq, repeat ? delay : 0, ++bm_timer_ids, cb};
+    bm_timer t = {bm_loop_now() + delay, ++bm_timer_seq, repeat ? delay : 0, ++bm_timer_ids, cb, false};
     bm_timer_push(t);
     bm_live_timers++;
     return t.id;
@@ -3253,6 +3254,18 @@ void bm_clear_timer(bm_int id) {
         if (bm_timers[i].id == id && bm_timers[i].cb.fn) {
             bm_env_release(bm_timers[i].cb.env);
             bm_timers[i].cb.fn = NULL;
+            if (!bm_timers[i].weak) bm_live_timers--;
+            return;
+        }
+    }
+}
+
+/* Node's timer.unref(): the timer still fires while other work keeps the program running,
+ * but doesn't keep it running by itself. */
+void bm_native_timerUnref(bm_int id) {
+    for (size_t i = 0; i < bm_ntimers; i++) {
+        if (bm_timers[i].id == id && bm_timers[i].cb.fn && !bm_timers[i].weak) {
+            bm_timers[i].weak = true;
             bm_live_timers--;
             return;
         }
@@ -3274,7 +3287,7 @@ static void bm_fire_timers(void) {
             fn(t.cb.env);
             bm_env_release(t.cb.env);
         } else {
-            bm_live_timers--;
+            if (!t.weak) bm_live_timers--;
             fn(t.cb.env);
             bm_env_release(t.cb.env);
         }
@@ -3375,7 +3388,7 @@ typedef struct bm_http_server {
 static bm_http_server bm_http_servers[BM_HTTP_MAX_SERVERS];
 static int bm_http_nservers, bm_http_active;
 static bm_int bm_http_want_workers = 1;
-static int bm_http_q = -1;               /* the running loop's kqueue/epoll */
+static int bm_http_q = -1;               /* the event loop's kqueue/epoll (created on first use) */
 static bm_http_conn *bm_http_conns;      /* open connections (for stop) */
 static bm_http_conn *bm_http_cur;       /* the connection whose request is being handled */
 static bool bm_http_keep;               /* the current request allows keep-alive */
@@ -3940,6 +3953,30 @@ static void bm_http_detach(bm_http_conn *c) {
 /* ---- servers: registered by listen (at any time), served by bm_http_run after the program */
 
 
+/* Other I/O on the loop (the fetch client): its events' udata is a bm_io pointer with bit 0
+ * set. bm_io_refs counts what keeps the loop running (requests in flight, DNS lookups); idle
+ * pooled connections don't. After each batch of events the loop calls bm_io_after_batch (which
+ * frees handles closed during the batch). Not static: nothing binds the loop to the client's
+ * code, so programs that never fetch don't link it. */
+typedef struct bm_io bm_io;
+struct bm_io { void (*ready)(bm_io *h, bool readable, bool writable, bool broken); };
+int bm_io_refs;
+void (*bm_io_after_batch)(void);
+void (*bm_io_after_fork)(void);
+
+static int bm_loop_queue(void) {
+    if (bm_http_q < 0) {
+#ifdef BM_KQUEUE
+        bm_http_q = kqueue();
+#else
+        bm_http_q = epoll_create1(EPOLL_CLOEXEC);
+#endif
+        if (bm_http_q < 0) bm_trap("can't create the event loop", NULL);
+        fcntl(bm_http_q, F_SETFD, FD_CLOEXEC);
+    }
+    return bm_http_q;
+}
+
 static bool bm_http_is_server(void *p) {
     return (char *)p >= (char *)bm_http_servers && (char *)p < (char *)(bm_http_servers + BM_HTTP_MAX_SERVERS);
 }
@@ -4054,11 +4091,10 @@ static char bm_http_timer_tag;   /* the loop's timer event (the next setTimeout)
 /* Runs the event loop until every server has stopped and its connections have closed; timers
  * and microtasks run in it too. */
 static void bm_http_loop(void) {
+    bm_loop_queue();
 #ifdef BM_KQUEUE
-    bm_http_q = kqueue();
     struct kevent events[256];
 #else
-    bm_http_q = epoll_create1(0);
     struct epoll_event events[256];
 #endif
     for (int i = 0; i < bm_http_nservers; i++)
@@ -4070,7 +4106,7 @@ static void bm_http_loop(void) {
         if (kevent(bm_http_q, &ev, 1, NULL, 0, NULL) != 0) _exit(0);
     }
 #endif
-    while (bm_http_active > 0 || bm_http_conns) {
+    while (bm_http_active > 0 || bm_http_conns || bm_io_refs > 0) {
         bm_run_microtasks();
         /* connections whose late responses are ready */
         while (bm_http_dirty) {
@@ -4080,11 +4116,11 @@ static void bm_http_loop(void) {
             bm_http_service(c, false, false);
             bm_run_microtasks();
         }
-        if (!(bm_http_active > 0 || bm_http_conns)) break;
+        if (!(bm_http_active > 0 || bm_http_conns || bm_io_refs > 0)) break;
         if (bm_out_len) bm_out_flush(); /* handler logs reach pipes and files promptly */
         while (bm_ntimers && !bm_timers[0].cb.fn) (void)bm_timer_pop();
         /* wait for I/O, or until the next timer is due */
-        bool timed = bm_live_timers > 0;
+        bool timed = bm_ntimers > 0; /* unref'd timers fire too while the loop runs */
         uint64_t now_ms = bm_loop_update();
         uint64_t due = timed ? bm_timers[0].when : 0;
 #ifdef BM_KQUEUE
@@ -4115,6 +4151,15 @@ static void bm_http_loop(void) {
             bool readable = events[i].events & (EPOLLIN | EPOLLRDHUP), broken = events[i].events & (EPOLLHUP | EPOLLERR);
 #endif
             if (tag == &bm_http_timer_tag) continue;
+            if ((uintptr_t)tag & 1) {
+                bm_io *h = (bm_io *)((uintptr_t)tag - 1);
+#ifdef BM_KQUEUE
+                h->ready(h, events[i].filter == EVFILT_READ, events[i].filter == EVFILT_WRITE, broken);
+#else
+                h->ready(h, (events[i].events & (EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR)) != 0, (events[i].events & (EPOLLOUT | EPOLLERR)) != 0, false);
+#endif
+                continue;
+            }
             if (bm_http_is_server(tag)) {
                 bm_http_accept(tag);
                 continue;
@@ -4136,9 +4181,9 @@ static void bm_http_loop(void) {
                 }
             }
         }
+        if (bm_io_after_batch) bm_io_after_batch();
     }
-    close(bm_http_q);
-    bm_http_q = -1;
+    /* the queue stays: pooled client connections are still registered with it */
 }
 
 /* ---- workers: the parent supervises; each child runs the event loop */
@@ -4169,6 +4214,9 @@ static pid_t bm_http_spawn(bm_int w) {
     prctl(PR_SET_PDEATHSIG, SIGTERM);
 #endif
     if (getppid() != bm_http_parent) _exit(0); /* the supervisor died before prctl */
+    /* the parent's event queue (epoll's is shared after fork) and client state aren't ours */
+    if (bm_http_q >= 0) { close(bm_http_q); bm_http_q = -1; }
+    if (bm_io_after_fork) bm_io_after_fork();
     /* Give back the free malloc pages inherited from the program's setup. */
 #if defined(__APPLE__)
     malloc_zone_pressure_relief(NULL, 0);
@@ -4241,13 +4289,13 @@ static void bm_http_supervise(bm_int workers) {
     _exit(128 + sig);
 }
 
-static bool bm_http_busy(void) { return bm_http_active > 0 || bm_http_conns; }
+static bool bm_http_busy(void) { return bm_http_active > 0 || bm_http_conns || bm_io_refs > 0; }
 
 void bm_http_run(void) {
     if (!bm_http_busy()) return;
     bm_out_flush();
     bm_int workers = bm_http_want_workers;
-    if (workers <= 1) {
+    if (workers <= 1 || bm_http_active == 0) {
         bm_http_refresh_date();
         bm_http_loop();
         return;
@@ -4681,4 +4729,1690 @@ bm_str bm_native_urlPart(bm_str href, bm_int k) {
     if (k == 3) return bm_str_from(p, (size_t)(q - p));
     if (k == 4) return hash - q > 1 ? bm_str_from(q, (size_t)(hash - q)) : BM_EMPTY_STR;
     return end - hash > 1 ? bm_str_from(hash, (size_t)(end - hash)) : BM_EMPTY_STR;
+}
+
+/* ================================================================== HTTP client (fetch) */
+
+/* fetch() runs natively on the event loop: DNS lookups on a small thread pool (cached), pooled
+ * keep-alive connections per origin, a request writer and an incremental HTTP/1.1 response
+ * parser, redirects, and gzip/deflate decoding. The standard library (std/http) wraps it:
+ * fetchStart begins a request and returns its id, fetchWait gives a Promise<int> that settles
+ * once the whole response has arrived (0) or the request failed (< 0), and the other natives
+ * read the result. Nothing here is referenced unless a program calls fetch. */
+
+#include <limits.h>
+#include <netdb.h>
+#include <pthread.h>
+#include <stdarg.h>
+#include <sys/uio.h>
+
+/* ---- inflate (RFC 1951) with gzip (RFC 1952) and zlib (RFC 1950) wrappers */
+
+#define BM_ZFAST 10
+typedef struct {
+    uint16_t fast[1 << BM_ZFAST];   /* (length << 9) | symbol for codes of <= BM_ZFAST bits */
+    uint16_t firstcode[16];
+    int32_t maxcode[17];
+    uint16_t firstsym[16];
+    uint8_t size[288];
+    uint16_t value[288];
+} bm_zhuff;
+
+typedef struct {
+    const uint8_t *p, *end;
+    uint64_t bits;
+    int nbits;
+    int pad;             /* zero bytes fed past the end (reading them means the input was cut short) */
+    bm_sb *out;
+    bm_zhuff len, dist;
+} bm_z;
+
+static int bm_zrev(int v, int bits) {
+    v = ((v & 0xAAAA) >> 1) | ((v & 0x5555) << 1);
+    v = ((v & 0xCCCC) >> 2) | ((v & 0x3333) << 2);
+    v = ((v & 0xF0F0) >> 4) | ((v & 0x0F0F) << 4);
+    v = ((v & 0xFF00) >> 8) | ((v & 0x00FF) << 8);
+    return v >> (16 - bits);
+}
+
+static bool bm_zbuild(bm_zhuff *z, const uint8_t *sizes_of, int num) {
+    int sizes[17] = {0}, next[16];
+    memset(z->fast, 0, sizeof z->fast);
+    for (int i = 0; i < num; i++) sizes[sizes_of[i]]++;
+    sizes[0] = 0;
+    for (int i = 1; i < 16; i++) if (sizes[i] > (1 << i)) return false;
+    int code = 0, k = 0;
+    for (int i = 1; i < 16; i++) {
+        next[i] = code;
+        z->firstcode[i] = (uint16_t)code;
+        z->firstsym[i] = (uint16_t)k;
+        code += sizes[i];
+        if (sizes[i] && code - 1 >= (1 << i)) return false;
+        z->maxcode[i] = code << (16 - i);
+        code <<= 1;
+        k += sizes[i];
+    }
+    z->maxcode[16] = 0x10000;
+    for (int i = 0; i < num; i++) {
+        int s = sizes_of[i];
+        if (!s) continue;
+        int c = next[s] - z->firstcode[s] + z->firstsym[s];
+        z->size[c] = (uint8_t)s;
+        z->value[c] = (uint16_t)i;
+        if (s <= BM_ZFAST) {
+            uint16_t f = (uint16_t)((s << 9) | i);
+            for (int j = bm_zrev(next[s], s); j < (1 << BM_ZFAST); j += 1 << s) z->fast[j] = f;
+        }
+        next[s]++;
+    }
+    return true;
+}
+
+/* At least 56 bits in the buffer afterwards (zeros past the end, counted in `pad`). */
+static inline void bm_zrefill(bm_z *z) {
+    if (z->end - z->p >= 8) {
+        uint64_t v;
+        memcpy(&v, z->p, 8);
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+        v = __builtin_bswap64(v);
+#endif
+        z->bits |= v << z->nbits;
+        z->p += (63 - z->nbits) >> 3;
+        z->nbits |= 56;
+        return;
+    }
+    while (z->nbits <= 56) {
+        if (z->p < z->end) z->bits |= (uint64_t)*z->p++ << z->nbits;
+        else z->pad++;
+        z->nbits += 8;
+    }
+}
+
+static inline uint32_t bm_zbits(bm_z *z, int n) {
+    uint32_t v = (uint32_t)(z->bits & ((1ull << n) - 1));
+    z->bits >>= n;
+    z->nbits -= n;
+    return v;
+}
+
+static inline int bm_zdecode(bm_z *z, const bm_zhuff *h) {
+    int f = h->fast[z->bits & ((1 << BM_ZFAST) - 1)];
+    if (f) {
+        int s = f >> 9;
+        z->bits >>= s;
+        z->nbits -= s;
+        return f & 511;
+    }
+    int k = bm_zrev((int)(z->bits & 0xffff), 16), s;
+    for (s = BM_ZFAST + 1; s < 16; s++) if (k < h->maxcode[s]) break;
+    if (s >= 16) return -1;
+    int b = (k >> (16 - s)) - h->firstcode[s] + h->firstsym[s];
+    if (b >= 288 || h->size[b] != s) return -1;
+    z->bits >>= s;
+    z->nbits -= s;
+    return h->value[b];
+}
+
+static const uint16_t bm_zlen_base[29] = {3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258};
+static const uint8_t bm_zlen_extra[29] = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0};
+static const uint16_t bm_zdist_base[30] = {1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577};
+static const uint8_t bm_zdist_extra[30] = {0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13};
+
+static bool bm_zblock(bm_z *z) {
+    bm_sb *o = z->out;
+    for (;;) {
+        bm_zrefill(z);
+        int sym = bm_zdecode(z, &z->len);
+        if (sym < 256) {
+            if (sym < 0) return false;
+            if (__builtin_expect(o->len == o->cap, 0)) bm_sb_grow(o, o->len + 1);
+            o->data[o->len++] = (char)sym;
+            continue;
+        }
+        if (sym == 256) return true;
+        sym -= 257;
+        if (sym >= 29) return false;
+        size_t len = bm_zlen_base[sym] + bm_zbits(z, bm_zlen_extra[sym]);
+        int ds = bm_zdecode(z, &z->dist);
+        if (ds < 0 || ds >= 30) return false;
+        size_t dist = bm_zdist_base[ds] + bm_zbits(z, bm_zdist_extra[ds]);
+        if (dist > o->len) return false;
+        if (o->cap - o->len < len) bm_sb_grow(o, o->len + len);
+        char *d = o->data + o->len, *s = d - dist;
+        if (dist >= len) memcpy(d, s, len);
+        else if (dist == 1) memset(d, *s, len);
+        else for (size_t i = 0; i < len; i++) d[i] = s[i];
+        o->len += len;
+    }
+}
+
+static bool bm_zdynamic(bm_z *z) {
+    static const uint8_t order[19] = {16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15};
+    bm_zrefill(z);
+    int hlit = (int)bm_zbits(z, 5) + 257, hdist = (int)bm_zbits(z, 5) + 1, hclen = (int)bm_zbits(z, 4) + 4;
+    uint8_t cl[19] = {0}, lens[286 + 32];
+    for (int i = 0; i < hclen; i++) {
+        bm_zrefill(z);
+        cl[order[i]] = (uint8_t)bm_zbits(z, 3);
+    }
+    bm_zhuff h;
+    if (!bm_zbuild(&h, cl, 19)) return false;
+    int n = 0;
+    while (n < hlit + hdist) {
+        bm_zrefill(z);
+        int c = bm_zdecode(z, &h);
+        if (c < 0 || c >= 19) return false;
+        if (c < 16) { lens[n++] = (uint8_t)c; continue; }
+        int rep, v = 0;
+        if (c == 16) {
+            if (n == 0) return false;
+            rep = 3 + (int)bm_zbits(z, 2);
+            v = lens[n - 1];
+        } else if (c == 17) {
+            rep = 3 + (int)bm_zbits(z, 3);
+        } else {
+            rep = 11 + (int)bm_zbits(z, 7);
+        }
+        if (n + rep > hlit + hdist) return false;
+        memset(lens + n, v, (size_t)rep);
+        n += rep;
+    }
+    return bm_zbuild(&z->len, lens, hlit) && bm_zbuild(&z->dist, lens + hlit, hdist);
+}
+
+/* Inflates a raw deflate stream starting at p, appending to out; *used = bytes consumed. */
+static bool bm_inflate(const uint8_t *p, size_t n, bm_sb *out, size_t *used) {
+    bm_z z;
+    memset(&z, 0, sizeof z);
+    z.p = p;
+    z.end = p + n;
+    z.out = out;
+    static bm_zhuff fixed_len, fixed_dist;
+    static bool fixed_ready;
+    int final;
+    do {
+        bm_zrefill(&z);
+        final = (int)bm_zbits(&z, 1);
+        int type = (int)bm_zbits(&z, 2);
+        if (type == 0) {
+            bm_zbits(&z, z.nbits & 7);
+            /* give back the whole bytes still in the bit buffer, then copy the block */
+            int back = z.nbits / 8 - z.pad;
+            if (back < 0) return false;
+            z.p -= back;
+            z.bits = 0;
+            z.nbits = 0;
+            z.pad = 0;
+            if (z.end - z.p < 4) return false;
+            size_t len = (size_t)z.p[0] | (size_t)z.p[1] << 8, nlen = (size_t)z.p[2] | (size_t)z.p[3] << 8;
+            if ((len ^ 0xffff) != nlen || (size_t)(z.end - z.p - 4) < len) return false;
+            bm_sb_push(out, (const char *)z.p + 4, len);
+            z.p += 4 + len;
+        } else if (type == 1) {
+            if (!fixed_ready) {
+                uint8_t l[288], d[30];
+                for (int i = 0; i < 288; i++) l[i] = (uint8_t)(i < 144 ? 8 : i < 256 ? 9 : i < 280 ? 7 : 8);
+                for (int i = 0; i < 30; i++) d[i] = 5;
+                bm_zbuild(&fixed_len, l, 288);
+                bm_zbuild(&fixed_dist, d, 30);
+                fixed_ready = true;
+            }
+            z.len = fixed_len;
+            z.dist = fixed_dist;
+            if (!bm_zblock(&z)) return false;
+        } else if (type == 2) {
+            if (!bm_zdynamic(&z) || !bm_zblock(&z)) return false;
+        } else {
+            return false;
+        }
+        if (z.pad > z.nbits / 8) return false; /* read past the end: cut short */
+    } while (!final);
+    *used = (size_t)(z.p - p) - (size_t)(z.nbits / 8 - z.pad);
+    return true;
+}
+
+static uint32_t bm_crc32(uint32_t crc, const uint8_t *p, size_t n) {
+    static uint32_t table[256];
+    if (!table[1]) {
+        for (uint32_t i = 0; i < 256; i++) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+            table[i] = c;
+        }
+    }
+    crc = ~crc;
+    while (n--) crc = table[(crc ^ *p++) & 0xff] ^ (crc >> 8);
+    return ~crc;
+}
+
+/* A gzip body (every member), else false. */
+static bool bm_gunzip(const uint8_t *p, size_t n, bm_sb *out) {
+    bool any = false;
+    while (n >= 18 && p[0] == 0x1f && p[1] == 0x8b) {
+        if (p[2] != 8) return false;
+        int flags = p[3];
+        size_t i = 10;
+        if (flags & 4) { if (n < i + 2) return false; i += 2 + ((size_t)p[i] | (size_t)p[i + 1] << 8); }
+        if (flags & 8) { while (i < n && p[i]) i++; i++; }
+        if (flags & 16) { while (i < n && p[i]) i++; i++; }
+        if (flags & 2) i += 2;
+        if (i >= n) return false;
+        size_t start = out->len, used;
+        if (!bm_inflate(p + i, n - i, out, &used)) return false;
+        i += used;
+        if (n - i < 8) return false;
+        uint32_t crc = (uint32_t)p[i] | (uint32_t)p[i + 1] << 8 | (uint32_t)p[i + 2] << 16 | (uint32_t)p[i + 3] << 24;
+        uint32_t size = (uint32_t)p[i + 4] | (uint32_t)p[i + 5] << 8 | (uint32_t)p[i + 6] << 16 | (uint32_t)p[i + 7] << 24;
+        if (bm_crc32(0, (const uint8_t *)out->data + start, out->len - start) != crc || (uint32_t)(out->len - start) != size) return false;
+        p += i + 8;
+        n -= i + 8;
+        any = true;
+    }
+    return any;
+}
+
+/* "deflate" is zlib-wrapped in the standard, but some servers send it raw: accept both. */
+static bool bm_zlib_or_raw(const uint8_t *p, size_t n, bm_sb *out) {
+    size_t used;
+    if (n >= 2 && (p[0] & 0x0f) == 8 && (p[0] >> 4) <= 7 && ((p[0] << 8) | p[1]) % 31 == 0 && !(p[1] & 0x20)) {
+        if (!bm_inflate(p + 2, n - 2, out, &used) || n - 2 - used < 4) return false;
+        const uint8_t *a = p + 2 + used;
+        uint32_t want = (uint32_t)a[0] << 24 | (uint32_t)a[1] << 16 | (uint32_t)a[2] << 8 | a[3];
+        uint32_t s1 = 1, s2 = 0;
+        for (size_t i = 0; i < out->len;) {
+            size_t block = out->len - i < 5552 ? out->len - i : 5552;
+            for (size_t e = i + block; i < e; i++) { s1 += (uint8_t)out->data[i]; s2 += s1; }
+            s1 %= 65521;
+            s2 %= 65521;
+        }
+        return ((s2 << 16) | s1) == want;
+    }
+    return bm_inflate(p, n, out, &used);
+}
+
+/* ---- DNS: getaddrinfo on a few lazily started threads (64 KiB stacks), results cached */
+
+#define BM_DNS_MAX_ADDRS 8
+#define BM_DNS_TTL_MS 30000
+typedef struct bm_addrs {
+    int n;
+    struct sockaddr_storage a[BM_DNS_MAX_ADDRS];
+    socklen_t len[BM_DNS_MAX_ADDRS];
+} bm_addrs;
+
+struct bm_fr;
+typedef struct bm_dns {
+    struct bm_dns *next;       /* cache chain */
+    struct bm_dns *job_next;   /* job or done queue */
+    char *host;
+    bool resolving;
+    int err;                   /* getaddrinfo's error (0: found) */
+    bm_addrs addrs;
+    uint64_t expires;
+    struct bm_fr *waiters;     /* requests waiting for this lookup */
+} bm_dns;
+
+#define BM_DNS_BUCKETS 64
+static bm_dns *bm_dns_cache[BM_DNS_BUCKETS];
+static pthread_mutex_t bm_dns_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t bm_dns_cv = PTHREAD_COND_INITIALIZER;
+static bm_dns *bm_dns_jobs, *bm_dns_done;
+static int bm_dns_threads, bm_dns_idle;
+static int bm_dns_pipe[2] = {-1, -1};
+
+static uint32_t bm_hash_cstr(const char *s) {
+    uint32_t h = 2166136261u;
+    while (*s) h = (h ^ (uint8_t)*s++) * 16777619u;
+    return h;
+}
+
+static void bm_addrs_from(bm_addrs *out, struct addrinfo *ai) {
+    out->n = 0;
+    /* IPv4 first: a server bound to 0.0.0.0 doesn't answer on ::1 */
+    for (int pass = 0; pass < 2; pass++)
+        for (struct addrinfo *a = ai; a && out->n < BM_DNS_MAX_ADDRS; a = a->ai_next) {
+            if ((a->ai_family == AF_INET) != (pass == 0)) continue;
+            if (a->ai_family != AF_INET && a->ai_family != AF_INET6) continue;
+            memcpy(&out->a[out->n], a->ai_addr, a->ai_addrlen);
+            out->len[out->n++] = a->ai_addrlen;
+        }
+}
+
+static void *bm_dns_worker(void *arg) {
+    (void)arg;
+    pthread_mutex_lock(&bm_dns_mu);
+    for (;;) {
+        while (!bm_dns_jobs) {
+            bm_dns_idle++;
+            pthread_cond_wait(&bm_dns_cv, &bm_dns_mu);
+            bm_dns_idle--;
+        }
+        bm_dns *d = bm_dns_jobs;
+        bm_dns_jobs = d->job_next;
+        pthread_mutex_unlock(&bm_dns_mu);
+        struct addrinfo hints, *res = NULL;
+        memset(&hints, 0, sizeof hints);
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_flags = AI_ADDRCONFIG;
+        const char *h = d->host;
+        char bare[256];
+        size_t hl = strlen(h);
+        if (hl >= 2 && h[0] == '[' && h[hl - 1] == ']' && hl - 2 < sizeof bare) { memcpy(bare, h + 1, hl - 2); bare[hl - 2] = 0; h = bare; }
+        int err = getaddrinfo(h, NULL, &hints, &res);
+        if (!err) {
+            bm_addrs_from(&d->addrs, res);
+            if (d->addrs.n == 0) err = EAI_NONAME;
+            freeaddrinfo(res);
+        }
+        d->err = err;
+        pthread_mutex_lock(&bm_dns_mu);
+        d->job_next = bm_dns_done;
+        bm_dns_done = d;
+        pthread_mutex_unlock(&bm_dns_mu);
+        char one = 1;
+        ssize_t w = write(bm_dns_pipe[1], &one, 1);
+        (void)w;
+        pthread_mutex_lock(&bm_dns_mu);
+    }
+    return NULL;
+}
+
+static void bm_dns_ready(bm_io *h, bool readable, bool writable, bool broken);
+/* `ready` is set when the first lookup starts: a statically initialized code pointer here would
+ * land in clang's merged globals next to the event loop's, and keep all of this linked. */
+static bm_io bm_dns_io;
+
+static void bm_io_add(int fd, bm_io *h, bool read, bool write) {
+    int q = bm_loop_queue();
+    void *tag = (void *)((uintptr_t)h | 1);
+#ifdef BM_KQUEUE
+    struct kevent ev[2];
+    int n = 0;
+    if (read) EV_SET(&ev[n++], fd, EVFILT_READ, EV_ADD, 0, 0, tag);
+    if (write) EV_SET(&ev[n++], fd, EVFILT_WRITE, EV_ADD, 0, 0, tag);
+    kevent(q, ev, n, NULL, 0, NULL);
+#else
+    struct epoll_event ev = { .events = (read ? EPOLLIN | EPOLLRDHUP : 0) | (write ? EPOLLOUT : 0), .data.ptr = tag };
+    epoll_ctl(q, EPOLL_CTL_ADD, fd, &ev);
+#endif
+}
+
+static void bm_dns_start_thread(void) {
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 64 * 1024 > PTHREAD_STACK_MIN ? 64 * 1024 : PTHREAD_STACK_MIN);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_t t;
+    if (pthread_create(&t, &attr, bm_dns_worker, NULL) == 0) bm_dns_threads++;
+    pthread_attr_destroy(&attr);
+}
+
+static void bm_dns_queue(bm_dns *d) {
+    if (bm_dns_pipe[0] < 0) {
+        bm_dns_io.ready = bm_dns_ready;
+        if (pipe(bm_dns_pipe) != 0) bm_trap("can't create a pipe for DNS lookups", NULL);
+        for (int i = 0; i < 2; i++) {
+            fcntl(bm_dns_pipe[i], F_SETFL, fcntl(bm_dns_pipe[i], F_GETFL) | O_NONBLOCK);
+            fcntl(bm_dns_pipe[i], F_SETFD, FD_CLOEXEC);
+        }
+        bm_io_add(bm_dns_pipe[0], &bm_dns_io, true, false);
+    }
+    bm_io_refs++;
+    pthread_mutex_lock(&bm_dns_mu);
+    d->job_next = bm_dns_jobs;
+    bm_dns_jobs = d;
+    if (bm_dns_idle == 0 && bm_dns_threads < 4) bm_dns_start_thread();
+    else pthread_cond_signal(&bm_dns_cv);
+    pthread_mutex_unlock(&bm_dns_mu);
+}
+
+/* ---- requests and connections */
+
+typedef struct bm_fc bm_fc;
+typedef struct bm_origin {
+    struct bm_origin *next;
+    char *key;                 /* "host:port" */
+    bm_fc *idle;               /* idle connections, most recently used first */
+    int nidle;
+} bm_origin;
+
+enum { BM_FR_HEAD, BM_FR_FIXED, BM_FR_CHUNK_SIZE, BM_FR_CHUNK_DATA, BM_FR_CHUNK_END, BM_FR_TRAILERS, BM_FR_UNTIL_CLOSE, BM_FR_DONE };
+enum { BM_FETCH_FOLLOW, BM_FETCH_MANUAL, BM_FETCH_ERROR };
+enum { BM_FETCH_DECOMPRESS = 1 };
+
+typedef struct bm_fr {
+    bm_int id;
+    int result;                /* 1 running, 0 done, < 0 failed */
+    bm_promise *done;          /* Promise<int> from fetchWait */
+    struct bm_fr *dns_next;    /* waiting on a lookup */
+    /* the request */
+    bm_str method, headers, body, url;
+    int redirect_mode, redirects;
+    bool decompress;
+    char *host;                /* hostname (IPv6 in brackets) */
+    char *key;                 /* "host:port", the pool key */
+    int port;
+    bm_sb head;                /* the serialized request head */
+    size_t sent;               /* bytes of head + body written */
+    bm_fc *c;
+    bool retried;
+    /* the response */
+    int state, status;
+    bool keep, discard, head_only, got_any;
+    int enc;                   /* 1 gzip, 2 deflate */
+    int64_t remaining;
+    bm_sb status_text, rheaders, rbody, location;
+    bool redirected;
+    const char *code;          /* failure: Bun's error code */
+    bm_sb message;
+} bm_fr;
+
+struct bm_fc {
+    bm_io io;
+    int fd;
+    bool reading, writing, registered;
+    bool connecting, reused, dead;
+    bm_origin *origin;
+    bm_fc *next;               /* idle list, or the list of closed handles */
+    bm_fr *r;                  /* the request in progress (NULL when idle) */
+    bm_addrs addrs;            /* where to connect */
+    int ai;                    /* the address being tried */
+    int err;                   /* the last connect error */
+    int port;
+    char *in;
+    size_t in_off, in_len, in_cap;
+};
+
+#define BM_ORIGIN_BUCKETS 64
+static bm_origin *bm_origins[BM_ORIGIN_BUCKETS];
+static bm_fc *bm_fc_graveyard;
+/* Requests by id: slot + 1 in the low 32 bits, a generation above (stale ids find nothing). */
+static bm_fr **bm_fr_table;
+static bm_int *bm_fr_free;          /* free slots */
+static bm_int bm_fr_cap, bm_fr_nfree;
+static uint32_t bm_fr_gen;
+
+static void bm_fr_step(bm_fr *r);
+static void bm_fc_ready(bm_io *h, bool readable, bool writable, bool broken);
+
+static void bm_fc_reap(void) {
+    while (bm_fc_graveyard) {
+        bm_fc *c = bm_fc_graveyard;
+        bm_fc_graveyard = c->next;
+        bm_free(c->in);
+        bm_free(c);
+    }
+}
+
+static void bm_fc_interest(bm_fc *c, bool read, bool write) {
+    if (c->registered && read == c->reading && write == c->writing) return;
+    int q = bm_loop_queue();
+    void *tag = (void *)((uintptr_t)&c->io | 1);
+#ifdef BM_KQUEUE
+    struct kevent ev[2];
+    int n = 0;
+    if (!c->registered || read != c->reading) EV_SET(&ev[n++], c->fd, EVFILT_READ, !c->registered ? (read ? EV_ADD : EV_ADD | EV_DISABLE) : read ? EV_ENABLE : EV_DISABLE, 0, 0, tag);
+    if (write != c->writing) EV_SET(&ev[n++], c->fd, EVFILT_WRITE, write ? EV_ADD : EV_DELETE, 0, 0, tag);
+    if (n) kevent(q, ev, n, NULL, 0, NULL);
+#else
+    struct epoll_event ev = { .events = (read ? EPOLLIN | EPOLLRDHUP : 0) | (write ? EPOLLOUT : 0), .data.ptr = tag };
+    epoll_ctl(q, c->registered ? EPOLL_CTL_MOD : EPOLL_CTL_ADD, c->fd, &ev);
+#endif
+    c->registered = true;
+    c->reading = read;
+    c->writing = write;
+}
+
+static void bm_fc_close(bm_fc *c) {
+    if (c->dead) return;
+    c->dead = true;
+    if (c->fd >= 0) close(c->fd); /* also leaves the event queue */
+    c->fd = -1;
+    c->next = bm_fc_graveyard;
+    bm_fc_graveyard = c;
+}
+
+static bm_origin *bm_origin_get(const char *key) {
+    uint32_t b = bm_hash_cstr(key) % BM_ORIGIN_BUCKETS;
+    for (bm_origin *o = bm_origins[b]; o; o = o->next)
+        if (strcmp(o->key, key) == 0) return o;
+    bm_origin *o = bm_alloc(sizeof *o);
+    memset(o, 0, sizeof *o);
+    size_t n = strlen(key);
+    o->key = bm_alloc(n + 1);
+    memcpy(o->key, key, n + 1);
+    o->next = bm_origins[b];
+    bm_origins[b] = o;
+    return o;
+}
+
+static void bm_origin_unlink(bm_fc *c) {
+    bm_origin *o = c->origin;
+    for (bm_fc **pp = &o->idle; *pp; pp = &(*pp)->next)
+        if (*pp == c) { *pp = c->next; o->nidle--; return; }
+}
+
+/* ---- failure */
+
+static void bm_fr_settle(bm_fr *r, int result) {
+    if (r->result != 1) return;
+    r->result = result;
+    bm_io_refs--;
+    if (r->done) {
+        bm_int v = result;
+        bm_promise_resolve(r->done, &v);
+    }
+}
+
+static void bm_fr_fail(bm_fr *r, const char *code, const char *fmt, ...) {
+    if (r->result != 1) return;
+    r->code = code;
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    bm_sb_push(&r->message, buf, n < 0 ? 0 : (size_t)n < sizeof buf ? (size_t)n : sizeof buf - 1);
+    if (r->c) {
+        bm_fc *c = r->c;
+        r->c = NULL;
+        c->r = NULL;
+        bm_fc_close(c);
+    }
+    bm_fr_settle(r, -1);
+}
+
+static const char BM_FETCH_VERBOSE[] = "For more information, pass `verbose: true` in the second argument to fetch()";
+
+/* ---- the request line and headers */
+
+static bool bm_hdr_has(bm_str block, const char *name) { return bm_has_header(block, name); }
+
+static void bm_base64(bm_sb *sb, const char *s, size_t n) {
+    static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    for (size_t i = 0; i < n; i += 3) {
+        uint32_t v = (uint32_t)(uint8_t)s[i] << 16 | (i + 1 < n ? (uint32_t)(uint8_t)s[i + 1] << 8 : 0) | (i + 2 < n ? (uint8_t)s[i + 2] : 0);
+        bm_sb_push_char(sb, tbl[v >> 18 & 63]);
+        bm_sb_push_char(sb, tbl[v >> 12 & 63]);
+        bm_sb_push_char(sb, i + 1 < n ? tbl[v >> 6 & 63] : '=');
+        bm_sb_push_char(sb, i + 2 < n ? tbl[v & 63] : '=');
+    }
+}
+
+/* Splits r->url (a normalized href) into host, port and target and writes the request head.
+ * False (after failing r) if it isn't an http URL. */
+static bool bm_fr_prepare(bm_fr *r) {
+    const char *s = r->url.p->data, *end = s + r->url.p->len;
+    bool https = r->url.p->len >= 8 && memcmp(s, "https://", 8) == 0;
+    if (!https && !(r->url.p->len >= 7 && memcmp(s, "http://", 7) == 0)) {
+        bm_fr_fail(r, "ERR_INVALID_ARG_VALUE", "protocol must be http: or https:");
+        return false;
+    }
+    if (https) {
+        bm_fr_fail(r, "ERR_TLS_UNSUPPORTED", "https: URLs aren't supported yet (TLS is coming): %s", s);
+        return false;
+    }
+    const char *a = s + 7, *auth_end = a;
+    while (auth_end < end && *auth_end != '/' && *auth_end != '?' && *auth_end != '#') auth_end++;
+    const char *host = a, *userinfo = NULL, *userinfo_end = NULL;
+    for (const char *x = a; x < auth_end; x++) if (*x == '@') { userinfo = a; userinfo_end = x; host = x + 1; }
+    const char *hend = host;
+    if (hend < auth_end && *hend == '[') { while (hend < auth_end && *hend != ']') hend++; if (hend < auth_end) hend++; }
+    while (hend < auth_end && *hend != ':') hend++;
+    int port = 80;
+    if (hend < auth_end) port = atoi(hend + 1);
+    bm_free(r->host);
+    bm_free(r->key);
+    size_t hl = (size_t)(hend - host);
+    r->host = bm_alloc(hl + 1);
+    memcpy(r->host, host, hl);
+    r->host[hl] = 0;
+    r->port = port;
+    r->key = bm_alloc(hl + 8);
+    snprintf(r->key, hl + 8, "%s:%d", r->host, port);
+    const char *target = auth_end, *hash = memchr(target, '#', (size_t)(end - target));
+    if (!hash) hash = end;
+    bm_sb *h = &r->head;
+    h->len = 0;
+    bm_sb_push(h, r->method.p->data, (size_t)r->method.p->len);
+    bm_sb_push_char(h, ' ');
+    if (target == hash || *target != '/') bm_sb_push_char(h, '/');
+    bm_sb_push(h, target, (size_t)(hash - target));
+    bm_sb_push(h, " HTTP/1.1\r\n", 11);
+    bm_sb_push(h, r->headers.p->data, (size_t)r->headers.p->len);
+    /* Bun's defaults, after the caller's headers */
+    if (!bm_hdr_has(r->headers, "connection")) bm_sb_push(h, "Connection: keep-alive\r\n", 24);
+    if (!bm_hdr_has(r->headers, "user-agent")) bm_sb_push(h, "User-Agent: Barm/0.0.1\r\n", 24);
+    if (!bm_hdr_has(r->headers, "accept")) bm_sb_push(h, "Accept: */*\r\n", 13);
+    if (!bm_hdr_has(r->headers, "host")) {
+        bm_sb_push(h, "Host: ", 6);
+        bm_sb_push(h, host, (size_t)(auth_end - host));
+        bm_sb_push(h, "\r\n", 2);
+    }
+    if (r->decompress && !bm_hdr_has(r->headers, "accept-encoding")) bm_sb_push(h, "Accept-Encoding: gzip, deflate\r\n", 32);
+    if (userinfo && !bm_hdr_has(r->headers, "authorization")) {
+        bm_str ui = bm_native_urlDecode(bm_str_from(userinfo, (size_t)(userinfo_end - userinfo)), false);
+        bm_sb_push(h, "Authorization: Basic ", 21);
+        bm_base64(h, ui.p->data, (size_t)ui.p->len);
+        bm_sb_push(h, "\r\n", 2);
+        bm_str_release(ui);
+    }
+    const char *m = r->method.p->data;
+    /* as Bun: every method but GET and HEAD says its length, even when it's 0 */
+    bool wants_length = r->body.p->len > 0 || (strcmp(m, "GET") != 0 && strcmp(m, "HEAD") != 0);
+    if (wants_length && !bm_hdr_has(r->headers, "content-length") && !bm_hdr_has(r->headers, "transfer-encoding")) {
+        char cl[48];
+        int n = snprintf(cl, sizeof cl, "Content-Length: %d\r\n", (int)r->body.p->len);
+        bm_sb_push(h, cl, (size_t)n);
+    }
+    bm_sb_push(h, "\r\n", 2);
+    r->head_only = strcmp(m, "HEAD") == 0;
+    return true;
+}
+
+/* ---- writing */
+
+static bool bm_fc_write(bm_fc *c) {
+    bm_fr *r = c->r;
+    size_t hn = r->head.len, bn = (size_t)r->body.p->len;
+    while (r->sent < hn + bn) {
+        struct iovec iov[2];
+        int n = 0;
+        if (r->sent < hn) iov[n++] = (struct iovec){ r->head.data + r->sent, hn - r->sent };
+        size_t bo = r->sent > hn ? r->sent - hn : 0;
+        if (bn > bo) iov[n++] = (struct iovec){ r->body.p->data + bo, bn - bo };
+        struct msghdr mh;
+        memset(&mh, 0, sizeof mh);
+        mh.msg_iov = iov;
+        mh.msg_iovlen = n;
+#ifdef MSG_NOSIGNAL
+        ssize_t w = sendmsg(c->fd, &mh, MSG_NOSIGNAL);
+#else
+        ssize_t w = sendmsg(c->fd, &mh, 0);
+#endif
+        if (w > 0) { r->sent += (size_t)w; continue; }
+        if (w < 0 && errno == EINTR) continue;
+        if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) { bm_fc_interest(c, true, true); return true; }
+        return false;
+    }
+    bm_fc_interest(c, true, false);
+    return true;
+}
+
+/* ---- the response */
+
+static int bm_hex(char ch) { return ch >= '0' && ch <= '9' ? ch - '0' : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : ch >= 'A' && ch <= 'F' ? ch - 'A' + 10 : -1; }
+
+static bool bm_ieq(const char *a, size_t n, const char *lit) {
+    size_t m = strlen(lit);
+    if (n != m) return false;
+    for (size_t i = 0; i < n; i++) if ((a[i] | 0x20) != lit[i]) return false;
+    return true;
+}
+
+/* A token list header ("Connection: keep-alive, Upgrade") holds `word`. */
+static bool bm_has_token(const char *v, size_t n, const char *word) {
+    size_t wl = strlen(word);
+    for (size_t i = 0; i < n;) {
+        while (i < n && (v[i] == ' ' || v[i] == '\t' || v[i] == ',')) i++;
+        size_t s = i;
+        while (i < n && v[i] != ',') i++;
+        size_t e = i;
+        while (e > s && (v[e - 1] == ' ' || v[e - 1] == '\t')) e--;
+        if (e - s == wl) {
+            size_t k = 0;
+            while (k < wl && (v[s + k] | 0x20) == word[k]) k++;
+            if (k == wl) return true;
+        }
+    }
+    return false;
+}
+
+static bool bm_redirect_status(int s) { return s == 301 || s == 302 || s == 303 || s == 307 || s == 308; }
+
+/* Parses a response head (status line and header lines, `n` bytes up to the blank line). */
+static bool bm_fr_head(bm_fr *r, const char *p, size_t n) {
+    const char *end = p + n, *eol = memchr(p, '\n', n);
+    if (!eol || eol - p < 12 || memcmp(p, "HTTP/1.", 7) != 0 || (p[7] != '0' && p[7] != '1') || p[8] != ' ') return false;
+    bool http10 = p[7] == '0';
+    if (p[9] < '1' || p[9] > '9' || p[10] < '0' || p[10] > '9' || p[11] < '0' || p[11] > '9') return false;
+    r->status = (p[9] - '0') * 100 + (p[10] - '0') * 10 + (p[11] - '0');
+    const char *reason = p + 12, *reason_end = eol;
+    if (reason_end > reason && reason_end[-1] == '\r') reason_end--;
+    if (reason < reason_end && *reason == ' ') reason++;
+    r->status_text.len = 0;
+    bm_sb_push(&r->status_text, reason, (size_t)(reason_end - reason));
+    r->rheaders.len = 0;
+    r->location.len = 0;
+    r->enc = 0;
+    int64_t length = -1;
+    bool chunked = false, te = false, close = http10, keepalive_seen = false;
+    for (const char *l = eol + 1; l < end;) {
+        const char *le = memchr(l, '\n', (size_t)(end - l));
+        if (!le) le = end;
+        const char *lend = le > l && le[-1] == '\r' ? le - 1 : le;
+        if (lend == l) break;
+        const char *colon = memchr(l, ':', (size_t)(lend - l));
+        if (!colon || colon == l) return false;
+        for (const char *x = l; x < colon; x++) if ((unsigned char)*x <= ' ' || *x == 0x7f) return false;
+        const char *v = colon + 1, *ve = lend;
+        while (v < ve && (*v == ' ' || *v == '\t')) v++;
+        while (ve > v && (ve[-1] == ' ' || ve[-1] == '\t')) ve--;
+        size_t nl = (size_t)(colon - l), vl = (size_t)(ve - v);
+        bm_sb_push(&r->rheaders, l, nl);
+        bm_sb_push(&r->rheaders, ": ", 2);
+        bm_sb_push(&r->rheaders, v, vl);
+        bm_sb_push(&r->rheaders, "\r\n", 2);
+        if (bm_ieq(l, nl, "content-length")) {
+            int64_t cl = 0;
+            if (vl == 0) return false;
+            for (size_t i = 0; i < vl; i++) {
+                if (v[i] < '0' || v[i] > '9' || cl > (INT64_MAX - 9) / 10) return false;
+                cl = cl * 10 + (v[i] - '0');
+            }
+            if (length >= 0 && length != cl) return false;
+            length = cl;
+        } else if (bm_ieq(l, nl, "transfer-encoding")) {
+            te = true;
+            /* chunked must be the last coding */
+            size_t k = vl;
+            while (k > 0 && v[k - 1] != ',') k--;
+            const char *last = v + k;
+            while (last < ve && (*last == ' ' || *last == '\t')) last++;
+            chunked = bm_ieq(last, (size_t)(ve - last), "chunked");
+        } else if (bm_ieq(l, nl, "connection")) {
+            if (bm_has_token(v, vl, "close")) close = true;
+            if (bm_has_token(v, vl, "keep-alive")) keepalive_seen = true;
+        } else if (bm_ieq(l, nl, "content-encoding")) {
+            r->enc = bm_ieq(v, vl, "gzip") || bm_ieq(v, vl, "x-gzip") ? 1 : bm_ieq(v, vl, "deflate") ? 2 : 0;
+        } else if (bm_ieq(l, nl, "location")) {
+            r->location.len = 0;
+            bm_sb_push(&r->location, v, vl);
+        }
+        l = le + 1;
+    }
+    if (http10 && keepalive_seen) close = false;
+    r->keep = !close;
+    int s = r->status;
+    bool no_body = r->head_only || s == 204 || s == 304 || (s >= 100 && s < 200);
+    if (no_body) {
+        r->state = BM_FR_DONE;
+    } else if (te) {
+        if (chunked) r->state = BM_FR_CHUNK_SIZE;
+        else { r->state = BM_FR_UNTIL_CLOSE; r->keep = false; }
+    } else if (length >= 0) {
+        r->remaining = length;
+        r->state = length ? BM_FR_FIXED : BM_FR_DONE;
+    } else {
+        r->state = BM_FR_UNTIL_CLOSE;
+        r->keep = false;
+    }
+    r->discard = r->redirect_mode != BM_FETCH_MANUAL && bm_redirect_status(s) && r->location.len > 0;
+    if (!r->discard && length > 0 && r->state == BM_FR_FIXED) {
+        if (length > INT32_MAX) return false;
+        bm_sb_grow(&r->rbody, (size_t)(length < (64 << 20) ? length : (64 << 20)));
+    }
+    return true;
+}
+
+static void bm_fr_take(bm_fr *r, const char *p, size_t n) {
+    if (!r->discard) bm_sb_push(&r->rbody, p, n);
+}
+
+/* Consumes what it can of the connection's input. 1: the response is complete, 0: needs more,
+ * -1: malformed. */
+static int bm_fr_parse(bm_fr *r, bm_fc *c) {
+    for (;;) {
+        char *p = c->in + c->in_off;
+        size_t n = c->in_len - c->in_off;
+        switch (r->state) {
+        case BM_FR_HEAD: {
+            if (n == 0) return 0;
+            /* the blank line ends the head */
+            const char *e = NULL;
+            for (const char *x = p; (x = memchr(x, '\n', (size_t)(p + n - x))) != NULL; x++) {
+                if (x + 1 < p + n && x[1] == '\n') { e = x + 2; break; }
+                if (x + 2 < p + n && x[1] == '\r' && x[2] == '\n') { e = x + 3; break; }
+            }
+            if (!e) return n > BM_HTTP_MAX_HEAD ? -1 : 0;
+            if (!bm_fr_head(r, p, (size_t)(e - p))) return -1;
+            c->in_off += (size_t)(e - p);
+            if (r->status >= 100 && r->status < 200) {
+                if (r->status == 101) return -1;
+                r->state = BM_FR_HEAD; /* an interim response: the real one follows */
+                continue;
+            }
+            if (r->state == BM_FR_DONE) return 1;
+            continue;
+        }
+        case BM_FR_FIXED: {
+            if (n == 0) return 0;
+            size_t take = (int64_t)n < r->remaining ? n : (size_t)r->remaining;
+            bm_fr_take(r, p, take);
+            c->in_off += take;
+            r->remaining -= (int64_t)take;
+            if (r->remaining == 0) { r->state = BM_FR_DONE; return 1; }
+            continue;
+        }
+        case BM_FR_CHUNK_SIZE: {
+            char *nl = memchr(p, '\n', n);
+            if (!nl) return n > 4096 ? -1 : 0;
+            int64_t size = 0;
+            const char *x = p;
+            int digits = 0;
+            for (int d; (d = bm_hex(*x)) >= 0; x++, digits++) {
+                if (size > (INT64_MAX >> 4)) return -1;
+                size = size * 16 + d;
+            }
+            if (!digits) return -1;
+            c->in_off += (size_t)(nl + 1 - p);
+            if (size == 0) { r->state = BM_FR_TRAILERS; continue; }
+            if (!r->discard && (int64_t)r->rbody.len + size > INT32_MAX) return -1;
+            r->remaining = size;
+            r->state = BM_FR_CHUNK_DATA;
+            continue;
+        }
+        case BM_FR_CHUNK_DATA: {
+            if (n == 0) return 0;
+            size_t take = (int64_t)n < r->remaining ? n : (size_t)r->remaining;
+            bm_fr_take(r, p, take);
+            c->in_off += take;
+            r->remaining -= (int64_t)take;
+            if (r->remaining == 0) r->state = BM_FR_CHUNK_END;
+            continue;
+        }
+        case BM_FR_CHUNK_END: {
+            if (n == 0) return 0;
+            if (p[0] == '\n') { c->in_off += 1; r->state = BM_FR_CHUNK_SIZE; continue; }
+            if (n < 2) return 0;
+            if (p[0] != '\r' || p[1] != '\n') return -1;
+            c->in_off += 2;
+            r->state = BM_FR_CHUNK_SIZE;
+            continue;
+        }
+        case BM_FR_TRAILERS: {
+            char *nl = memchr(p, '\n', n);
+            if (!nl) return n > BM_HTTP_MAX_HEAD ? -1 : 0;
+            bool blank = nl == p || (nl == p + 1 && p[0] == '\r');
+            c->in_off += (size_t)(nl + 1 - p);
+            if (blank) { r->state = BM_FR_DONE; return 1; }
+            continue;
+        }
+        case BM_FR_UNTIL_CLOSE: {
+            if (n) { bm_fr_take(r, p, n); c->in_off += n; }
+            if (!r->discard && r->rbody.len > INT32_MAX) return -1;
+            return 0;
+        }
+        default:
+            return 1;
+        }
+    }
+}
+
+/* ---- connections */
+
+static void bm_fc_release(bm_fc *c, bool reusable) {
+    c->r = NULL;
+    if (!reusable || c->dead) { bm_fc_close(c); return; }
+    bm_origin *o = c->origin;
+    if (o->nidle >= 256) { bm_fc_close(c); return; }
+    c->reused = true;
+    c->in_off = c->in_len = 0;
+    if (c->in_cap > 16384) { bm_free(c->in); c->in = NULL; c->in_cap = 0; }
+    /* idle: watch for the server closing it */
+    bm_fc_interest(c, true, false);
+    c->next = o->idle;
+    o->idle = c;
+    o->nidle++;
+}
+
+static bool bm_fc_open(bm_fc *c) {
+    for (; c->ai < c->addrs.n; c->ai++) {
+        struct sockaddr_storage *sa = &c->addrs.a[c->ai];
+        if (sa->ss_family == AF_INET) ((struct sockaddr_in *)sa)->sin_port = htons((uint16_t)c->port);
+        else ((struct sockaddr_in6 *)sa)->sin6_port = htons((uint16_t)c->port);
+        int fd = socket(sa->ss_family, SOCK_STREAM, 0);
+        if (fd < 0) continue;
+        fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+        fcntl(fd, F_SETFD, FD_CLOEXEC);
+        int one = 1;
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+#ifdef SO_NOSIGPIPE
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#endif
+        c->fd = fd;
+        c->registered = c->reading = c->writing = false;
+        int rc = connect(fd, (struct sockaddr *)sa, c->addrs.len[c->ai]);
+        if (rc == 0) { c->connecting = false; return true; }
+        if (errno == EINPROGRESS || errno == EINTR) {
+            c->connecting = true;
+            bm_fc_interest(c, false, true);
+            return true;
+        }
+        c->err = errno;
+        close(fd);
+        c->fd = -1;
+    }
+    return false;
+}
+
+static void bm_fr_connect_failed(bm_fr *r, int err) {
+    if (err == ECONNREFUSED) bm_fr_fail(r, "ConnectionRefused", "Unable to connect. Is the computer able to access the url?");
+    else if (err == ETIMEDOUT) bm_fr_fail(r, "ConnectionTimeout", "Unable to connect. Is the computer able to access the url?");
+    else bm_fr_fail(r, "ConnectionRefused", "Unable to connect. Is the computer able to access the url?");
+}
+
+static void bm_fr_send(bm_fr *r, bm_fc *c) {
+    r->c = c;
+    c->r = r;
+    r->sent = 0;
+    r->state = BM_FR_HEAD;
+    r->got_any = false;
+    if (!bm_fc_write(c)) {
+        /* a pooled connection the server closed: try once more on a new one */
+        bool retry = c->reused && !r->retried;
+        c->r = NULL;
+        r->c = NULL;
+        bm_fc_close(c);
+        if (retry) { r->retried = true; bm_fr_step(r); }
+        else bm_fr_fail(r, "ECONNRESET", "The socket connection was closed unexpectedly. %s", BM_FETCH_VERBOSE);
+    }
+}
+
+/* Connects to the resolved addresses (DNS done). */
+static void bm_fr_connect(bm_fr *r, const bm_addrs *addrs) {
+    bm_fc *c = bm_alloc(sizeof *c);
+    memset(c, 0, sizeof *c);
+    c->io.ready = bm_fc_ready;
+    c->fd = -1;
+    c->addrs = *addrs;
+    c->port = r->port;
+    c->origin = bm_origin_get(r->key);
+    c->err = ECONNREFUSED;
+    if (!bm_fc_open(c)) {
+        int err = c->err;
+        bm_free(c);
+        bm_fr_connect_failed(r, err);
+        return;
+    }
+    if (c->connecting) { r->c = c; c->r = r; return; }
+    bm_fr_send(r, c);
+}
+
+static void bm_dns_resolved(bm_dns *d) {
+    bm_fr *w = d->waiters;
+    d->waiters = NULL;
+    while (w) {
+        bm_fr *next = w->dns_next;
+        w->dns_next = NULL;
+        if (w->result == 1) {
+            if (d->err) bm_fr_fail(w, "ENOTFOUND", "getaddrinfo ENOTFOUND %s", w->host);
+            else bm_fr_connect(w, &d->addrs);
+        }
+        w = next;
+    }
+}
+
+static void bm_dns_ready(bm_io *h, bool readable, bool writable, bool broken) {
+    (void)h; (void)writable; (void)broken;
+    if (!readable) return;
+    char buf[64];
+    while (read(bm_dns_pipe[0], buf, sizeof buf) > 0) {}
+    pthread_mutex_lock(&bm_dns_mu);
+    bm_dns *done = bm_dns_done;
+    bm_dns_done = NULL;
+    pthread_mutex_unlock(&bm_dns_mu);
+    for (bm_dns *d = done, *next; d; d = next) {
+        next = d->job_next;
+        d->resolving = false;
+        d->expires = bm_loop_update() + (d->err ? 1000 : BM_DNS_TTL_MS);
+        bm_io_refs--;
+        bm_dns_resolved(d);
+    }
+}
+
+static bool bm_numeric_host(const char *host, bm_addrs *out) {
+    out->n = 0;
+    struct sockaddr_in *v4 = (struct sockaddr_in *)&out->a[0];
+    memset(v4, 0, sizeof *v4);
+    if (inet_pton(AF_INET, host, &v4->sin_addr) == 1) {
+        v4->sin_family = AF_INET;
+        out->len[0] = sizeof *v4;
+        out->n = 1;
+        return true;
+    }
+    size_t hl = strlen(host);
+    if (hl >= 2 && host[0] == '[' && host[hl - 1] == ']' && hl < 64) {
+        char bare[64];
+        memcpy(bare, host + 1, hl - 2);
+        bare[hl - 2] = 0;
+        struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)&out->a[0];
+        memset(v6, 0, sizeof *v6);
+        if (inet_pton(AF_INET6, bare, &v6->sin6_addr) == 1) {
+            v6->sin6_family = AF_INET6;
+            out->len[0] = sizeof *v6;
+            out->n = 1;
+            return true;
+        }
+    }
+    if (strcmp(host, "localhost") == 0) {
+        memset(&out->a[0], 0, sizeof out->a[0]);
+        memset(&out->a[1], 0, sizeof out->a[1]);
+        struct sockaddr_in *a = (struct sockaddr_in *)&out->a[0];
+        a->sin_family = AF_INET;
+        a->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        out->len[0] = sizeof *a;
+        struct sockaddr_in6 *b = (struct sockaddr_in6 *)&out->a[1];
+        b->sin6_family = AF_INET6;
+        b->sin6_addr = in6addr_loopback;
+        out->len[1] = sizeof *b;
+        out->n = 2;
+        return true;
+    }
+    return false;
+}
+
+/* Sends r on a pooled connection, or looks up its host and connects. */
+static void bm_fr_step(bm_fr *r) {
+    bm_origin *o = bm_origin_get(r->key);
+    while (o->idle) {
+        bm_fc *c = o->idle;
+        o->idle = c->next;
+        o->nidle--;
+        if (c->dead) continue;
+        bm_fr_send(r, c);
+        return;
+    }
+    bm_addrs addrs;
+    if (bm_numeric_host(r->host, &addrs)) { bm_fr_connect(r, &addrs); return; }
+    uint32_t b = bm_hash_cstr(r->host) % BM_DNS_BUCKETS;
+    bm_dns *d = bm_dns_cache[b];
+    while (d && strcmp(d->host, r->host) != 0) d = d->next;
+    if (d && !d->resolving && d->expires > bm_loop_update()) {
+        if (d->err) bm_fr_fail(r, "ENOTFOUND", "getaddrinfo ENOTFOUND %s", r->host);
+        else bm_fr_connect(r, &d->addrs);
+        return;
+    }
+    if (!d) {
+        d = bm_alloc(sizeof *d);
+        memset(d, 0, sizeof *d);
+        size_t hl = strlen(r->host);
+        d->host = bm_alloc(hl + 1);
+        memcpy(d->host, r->host, hl + 1);
+        d->next = bm_dns_cache[b];
+        bm_dns_cache[b] = d;
+    }
+    r->dns_next = d->waiters;
+    d->waiters = r;
+    if (!d->resolving) {
+        d->resolving = true;
+        bm_dns_queue(d);
+    }
+}
+
+static void bm_fr_reset_response(bm_fr *r) {
+    r->state = BM_FR_HEAD;
+    r->status = 0;
+    r->rbody.len = 0;
+    r->discard = false;
+}
+
+/* The whole response is in: follow a redirect, or decode the body and settle. */
+static void bm_fr_complete(bm_fr *r) {
+    int s = r->status;
+    if (r->redirect_mode != BM_FETCH_MANUAL && bm_redirect_status(s) && r->location.len > 0) {
+        if (r->redirect_mode == BM_FETCH_ERROR) {
+            bm_fr_fail(r, "UnexpectedRedirect", "UnexpectedRedirect fetching \"%s\". %s", r->url.p->data, BM_FETCH_VERBOSE);
+            return;
+        }
+        if (++r->redirects > 20) {
+            bm_fr_fail(r, "TooManyRedirects", "The response redirected too many times. %s", BM_FETCH_VERBOSE);
+            return;
+        }
+        bm_str loc = bm_str_from(r->location.data, r->location.len);
+        bm_str next = bm_native_urlNormalize(loc, r->url);
+        bm_str_release(loc);
+        if (next.p->len == 0) {
+            bm_fr_fail(r, "InvalidRedirectURL", "The redirect URL \"%.*s\" is invalid", (int)r->location.len, r->location.data);
+            return;
+        }
+        const char *m = r->method.p->data;
+        if ((s == 303 && strcmp(m, "GET") != 0 && strcmp(m, "HEAD") != 0) || ((s == 301 || s == 302) && strcmp(m, "POST") == 0)) {
+            bm_str_release(r->method);
+            r->method = bm_str_from("GET", 3);
+            bm_str_release(r->body);
+            r->body = BM_EMPTY_STR;
+            static const char *const body_headers[] = {"content-type", "content-length", "content-encoding", "content-language", "content-location", "transfer-encoding"};
+            for (size_t i = 0; i < sizeof body_headers / sizeof *body_headers; i++) {
+                bm_str name = bm_str_from(body_headers[i], strlen(body_headers[i]));
+                bm_str h2 = bm_native_headerRemove(r->headers, name);
+                bm_str_release(r->headers);
+                bm_str_release(name);
+                r->headers = h2;
+            }
+        }
+        /* another origin doesn't get the credentials */
+        char *old_key = r->key;
+        r->key = NULL;
+        bm_str_release(r->url);
+        r->url = next;
+        if (!bm_fr_prepare(r)) { bm_free(old_key); return; }
+        if (strcmp(old_key, r->key) != 0) {
+            static const char *const creds[] = {"authorization", "proxy-authorization", "cookie"};
+            bool removed = false;
+            for (size_t i = 0; i < 3; i++) {
+                if (!bm_hdr_has(r->headers, creds[i])) continue;
+                bm_str name = bm_str_from(creds[i], strlen(creds[i]));
+                bm_str h2 = bm_native_headerRemove(r->headers, name);
+                bm_str_release(r->headers);
+                bm_str_release(name);
+                r->headers = h2;
+                removed = true;
+            }
+            if (removed) bm_fr_prepare(r);
+        }
+        bm_free(old_key);
+        r->redirected = true;
+        r->retried = false;
+        bm_fr_reset_response(r);
+        bm_fr_step(r);
+        return;
+    }
+    if (r->decompress && r->enc && r->rbody.len) {
+        bm_sb out = {0};
+        bool ok = r->enc == 1 ? bm_gunzip((const uint8_t *)r->rbody.data, r->rbody.len, &out) : bm_zlib_or_raw((const uint8_t *)r->rbody.data, r->rbody.len, &out);
+        if (!ok || out.len > INT32_MAX) {
+            bm_sb_free(&out);
+            bm_fr_fail(r, "ZlibError", "ZlibError fetching \"%s\". %s", r->url.p->data, BM_FETCH_VERBOSE);
+            return;
+        }
+        bm_sb_free(&r->rbody);
+        r->rbody = out;
+    }
+    bm_fr_settle(r, 0);
+}
+
+static void bm_fc_ready(bm_io *h, bool readable, bool writable, bool broken) {
+    bm_fc *c = (bm_fc *)h;
+    if (c->dead) return;
+    bm_fr *r = c->r;
+    if (!r) {
+        /* idle: the server closed it (or sent something unasked for) */
+        if (readable || broken) {
+            bm_origin_unlink(c);
+            bm_fc_close(c);
+        }
+        return;
+    }
+    if (c->connecting) {
+        if (!writable && !broken) return;
+        int err = 0;
+        socklen_t el = sizeof err;
+        if (getsockopt(c->fd, SOL_SOCKET, SO_ERROR, &err, &el) != 0) err = errno;
+        if (!err) {
+            /* an event left over from an address given up on: this one may still be connecting */
+            struct sockaddr_storage peer;
+            socklen_t pl = sizeof peer;
+            if (getpeername(c->fd, (struct sockaddr *)&peer, &pl) != 0) {
+                if (errno == ENOTCONN) return;
+                err = errno;
+            }
+        }
+        if (err) {
+            close(c->fd);
+            c->fd = -1;
+            c->ai++;
+            if (bm_fc_open(c)) {
+                if (!c->connecting) bm_fr_send(r, c);
+                return;
+            }
+            c->r = NULL;
+            r->c = NULL;
+            bm_fc_close(c);
+            bm_fr_connect_failed(r, c->err ? c->err : err);
+            return;
+        }
+        c->connecting = false;
+        bm_fr_send(r, c);
+        return;
+    }
+    if (writable && r->sent < r->head.len + (size_t)r->body.p->len) {
+        if (!bm_fc_write(c)) {
+            bool retry = c->reused && !r->retried && !r->got_any;
+            c->r = NULL;
+            r->c = NULL;
+            bm_fc_close(c);
+            if (retry) { r->retried = true; bm_fr_step(r); }
+            else bm_fr_fail(r, "ECONNRESET", "The socket connection was closed unexpectedly. %s", BM_FETCH_VERBOSE);
+            return;
+        }
+    }
+    if (!readable && !broken) return;
+    bool eof = false, error = false;
+    for (;;) {
+        /* a known-length body goes straight into its buffer */
+        if (r->state == BM_FR_FIXED && c->in_off == c->in_len && !r->discard) {
+            size_t want = (size_t)(r->remaining < (1 << 20) ? r->remaining : (1 << 20));
+            if (r->rbody.cap - r->rbody.len < want) bm_sb_grow(&r->rbody, r->rbody.len + want);
+            ssize_t n = read(c->fd, r->rbody.data + r->rbody.len, want);
+            if (n > 0) {
+                r->got_any = true;
+                r->rbody.len += (size_t)n;
+                r->remaining -= n;
+                if (r->remaining == 0) { r->state = BM_FR_DONE; break; }
+                if ((size_t)n == want) continue;
+                break;
+            }
+            if (n == 0) { eof = true; break; }
+            if (errno == EINTR) continue;
+            if (errno != EAGAIN && errno != EWOULDBLOCK) error = true;
+            break;
+        }
+        if (c->in_off == c->in_len) c->in_off = c->in_len = 0;
+        if (c->in_cap - c->in_len < 16384) {
+            if (c->in_off) {
+                memmove(c->in, c->in + c->in_off, c->in_len - c->in_off);
+                c->in_len -= c->in_off;
+                c->in_off = 0;
+            }
+            if (c->in_cap - c->in_len < 16384) {
+                size_t cap = c->in_cap ? c->in_cap * 2 : 65536;
+                c->in = bm_realloc(c->in, cap);
+                c->in_cap = cap;
+            }
+        }
+        size_t room = c->in_cap - c->in_len;
+        ssize_t n = read(c->fd, c->in + c->in_len, room);
+        if (n > 0) {
+            r->got_any = true;
+            c->in_len += (size_t)n;
+            int st = bm_fr_parse(r, c);
+            if (st < 0) {
+                bm_fr_fail(r, "Malformed_HTTP_Response", "Malformed_HTTP_Response fetching \"%s\". %s", r->url.p->data, BM_FETCH_VERBOSE);
+                return;
+            }
+            if (st > 0) break;
+            if ((size_t)n == room) continue;
+            break;
+        }
+        if (n == 0) { eof = true; break; }
+        if (errno == EINTR) continue;
+        if (errno != EAGAIN && errno != EWOULDBLOCK) error = true;
+        break;
+    }
+    if (r->state == BM_FR_DONE) {
+        bool leftover = c->in_off < c->in_len;
+        r->c = NULL;
+        bm_fc_release(c, r->keep && !leftover && !eof && !error);
+        bm_fr_complete(r);
+        return;
+    }
+    if (eof || error) {
+        if (r->state == BM_FR_UNTIL_CLOSE && eof) {
+            r->state = BM_FR_DONE;
+            r->c = NULL;
+            bm_fc_release(c, false);
+            bm_fr_complete(r);
+            return;
+        }
+        bool retry = c->reused && !r->retried && !r->got_any;
+        c->r = NULL;
+        r->c = NULL;
+        bm_fc_close(c);
+        if (retry) { r->retried = true; bm_fr_reset_response(r); bm_fr_step(r); return; }
+        bm_fr_fail(r, "ECONNRESET", "The socket connection was closed unexpectedly. %s", BM_FETCH_VERBOSE);
+    }
+}
+
+/* ---- after fork (a server worker): the parent's connections, lookups and threads aren't ours */
+
+static void bm_fetch_after_fork(void) {
+    pthread_mutex_init(&bm_dns_mu, NULL);
+    pthread_cond_init(&bm_dns_cv, NULL);
+    bm_dns_threads = bm_dns_idle = 0;
+    bm_dns_jobs = bm_dns_done = NULL;
+    if (bm_dns_pipe[0] >= 0) { close(bm_dns_pipe[0]); close(bm_dns_pipe[1]); bm_dns_pipe[0] = bm_dns_pipe[1] = -1; }
+    for (int b = 0; b < BM_DNS_BUCKETS; b++) bm_dns_cache[b] = NULL;
+    for (int b = 0; b < BM_ORIGIN_BUCKETS; b++) {
+        for (bm_origin *o = bm_origins[b]; o; o = o->next) {
+            for (bm_fc *c = o->idle; c; c = c->next) if (c->fd >= 0) close(c->fd);
+            o->idle = NULL;
+            o->nidle = 0;
+        }
+    }
+    for (bm_int i = 0; i < bm_fr_cap; i++) {
+        bm_fr *r = bm_fr_table[i];
+        if (r && r->result == 1) {
+            if (r->c && r->c->fd >= 0) { close(r->c->fd); r->c->fd = -1; }
+            r->c = NULL;
+            r->result = -1;
+            r->code = "ECONNRESET";
+        }
+    }
+    bm_io_refs = 0;
+}
+
+/* ---- natives */
+
+static bm_fr *bm_fr_get(bm_int id) {
+    bm_int i = (id & 0xffffffff) - 1;
+    if (i < 0 || i >= bm_fr_cap) return NULL;
+    bm_fr *r = bm_fr_table[i];
+    return r && r->id == id ? r : NULL;
+}
+
+bm_int bm_native_fetchStart(bm_str method, bm_str url, bm_str headers, bm_str body, bm_int redirect, bm_int flags) {
+    bm_io_after_batch = bm_fc_reap;
+    bm_io_after_fork = bm_fetch_after_fork;
+    signal(SIGPIPE, SIG_IGN);
+    if (bm_fr_nfree == 0) {
+        bm_int cap = bm_fr_cap ? bm_fr_cap * 2 : 16;
+        bm_fr_table = bm_realloc(bm_fr_table, (size_t)cap * sizeof *bm_fr_table);
+        bm_fr_free = bm_realloc(bm_fr_free, (size_t)cap * sizeof *bm_fr_free);
+        for (bm_int i = cap - 1; i >= bm_fr_cap; i--) { bm_fr_table[i] = NULL; bm_fr_free[bm_fr_nfree++] = i; }
+        bm_fr_cap = cap;
+    }
+    bm_int slot = bm_fr_free[--bm_fr_nfree];
+    bm_fr *r = bm_alloc(sizeof *r);
+    memset(r, 0, sizeof *r);
+    r->id = (bm_int)(((uint64_t)++bm_fr_gen << 32) | (uint64_t)(slot + 1));
+    bm_fr_table[slot] = r;
+    r->result = 1;
+    bm_io_refs++;
+    bm_str_retain(method);
+    bm_str_retain(headers);
+    bm_str_retain(body);
+    r->method = method;
+    r->headers = headers;
+    r->body = body;
+    r->redirect_mode = (int)redirect;
+    r->decompress = (flags & BM_FETCH_DECOMPRESS) != 0;
+    r->url = bm_native_urlNormalize(url, BM_EMPTY_STR);
+    if (r->url.p->len == 0) {
+        bm_fr_fail(r, "ERR_INVALID_URL", "fetch() URL is invalid");
+        return r->id;
+    }
+    /* the fragment isn't sent, and isn't part of the response URL */
+    const char *hash = memchr(r->url.p->data, '#', (size_t)r->url.p->len);
+    if (hash) {
+        bm_str cut = bm_str_from(r->url.p->data, (size_t)(hash - r->url.p->data));
+        bm_str_release(r->url);
+        r->url = cut;
+    }
+    if (bm_fr_prepare(r)) bm_fr_step(r);
+    return r->id;
+}
+
+bm_promise *bm_native_fetchWait(bm_int id) {
+    bm_promise *p = bm_promise_new(&bm_type_int);
+    bm_fr *r = bm_fr_get(id);
+    if (!r) {
+        bm_int v = -1;
+        bm_promise_resolve(p, &v);
+        return p;
+    }
+    if (r->result != 1) {
+        bm_int v = r->result;
+        bm_promise_resolve(p, &v);
+        return p;
+    }
+    bm_promise_retain(p);
+    r->done = p;
+    return p;
+}
+
+bm_int bm_native_fetchStatus(bm_int id) { bm_fr *r = bm_fr_get(id); return r ? r->status : 0; }
+bm_str bm_native_fetchStatusText(bm_int id) { bm_fr *r = bm_fr_get(id); return r ? bm_str_from(r->status_text.data, r->status_text.len) : BM_EMPTY_STR; }
+bm_str bm_native_fetchHeaders(bm_int id) { bm_fr *r = bm_fr_get(id); return r ? bm_str_from(r->rheaders.data, r->rheaders.len) : BM_EMPTY_STR; }
+bm_str bm_native_fetchUrl(bm_int id) {
+    bm_fr *r = bm_fr_get(id);
+    if (!r) return BM_EMPTY_STR;
+    bm_str_retain(r->url);
+    return r->url;
+}
+bool bm_native_fetchRedirected(bm_int id) { bm_fr *r = bm_fr_get(id); return r && r->redirected; }
+bm_str bm_native_fetchBody(bm_int id) {
+    bm_fr *r = bm_fr_get(id);
+    return r ? bm_str_from_sb(&r->rbody) : BM_EMPTY_STR;
+}
+bm_str bm_native_fetchErrorCode(bm_int id) {
+    bm_fr *r = bm_fr_get(id);
+    return r && r->code ? bm_str_from(r->code, strlen(r->code)) : BM_EMPTY_STR;
+}
+bm_str bm_native_fetchErrorMessage(bm_int id) {
+    bm_fr *r = bm_fr_get(id);
+    return r ? bm_str_from(r->message.data, r->message.len) : BM_EMPTY_STR;
+}
+
+/* Abandons a request in flight (AbortSignal): its connection is closed, and fetchWait's promise
+ * settles with -2. */
+void bm_native_fetchAbort(bm_int id) {
+    bm_fr *r = bm_fr_get(id);
+    if (!r || r->result != 1) return;
+    if (r->c) {
+        bm_fc *c = r->c;
+        r->c = NULL;
+        c->r = NULL;
+        bm_fc_close(c);
+    }
+    /* a lookup keeps going (others may want it); this request stops waiting for it */
+    for (int b = 0; b < BM_DNS_BUCKETS; b++)
+        for (bm_dns *d = bm_dns_cache[b]; d; d = d->next)
+            for (bm_fr **pp = &d->waiters; *pp; pp = &(*pp)->dns_next)
+                if (*pp == r) { *pp = r->dns_next; goto unlinked; }
+unlinked:
+    r->code = "AbortError";
+    bm_fr_settle(r, -2);
+}
+
+void bm_native_fetchFree(bm_int id) {
+    bm_fr *r = bm_fr_get(id);
+    if (!r) return;
+    if (r->result == 1) bm_native_fetchAbort(id);
+    bm_int slot = (id & 0xffffffff) - 1;
+    bm_fr_table[slot] = NULL;
+    bm_fr_free[bm_fr_nfree++] = slot;
+    if (r->done) bm_promise_release(r->done);
+    bm_str_release(r->method);
+    bm_str_release(r->headers);
+    bm_str_release(r->body);
+    bm_str_release(r->url);
+    bm_free(r->host);
+    bm_free(r->key);
+    bm_sb_free(&r->head);
+    bm_sb_free(&r->status_text);
+    bm_sb_free(&r->rheaders);
+    bm_sb_free(&r->rbody);
+    bm_sb_free(&r->location);
+    bm_sb_free(&r->message);
+    bm_free(r);
+}
+
+/* ---- bodies: bytes <-> strings, and text() decoding */
+
+bm_str bm_native_bytesToString(bm_arr bytes) {
+    return bm_str_from((const char *)bm_arr_data(bytes), (size_t)bytes.len);
+}
+
+bm_arr bm_native_stringToBytes(bm_str s) {
+    bm_arr a = bm_arr_with_capacity(&bm_type_u8, s.p->len);
+    if (s.p->len) memcpy(bm_arr_data(a), s.p->data, (size_t)s.p->len);
+    a.len = s.p->len;
+    return a;
+}
+
+/* WHATWG "UTF-8 decode": drops a leading BOM and replaces each maximal invalid subsequence
+ * with U+FFFD. Returns s itself when it is already clean. */
+bm_str bm_native_utf8Clean(bm_str s) {
+    const uint8_t *p = (const uint8_t *)s.p->data;
+    size_t n = (size_t)s.p->len, i = 0;
+    bool bom = n >= 3 && p[0] == 0xEF && p[1] == 0xBB && p[2] == 0xBF;
+    if (bom) i = 3;
+    /* validate first: most bodies are fine */
+    size_t j = i;
+    bool valid = true;
+    while (j < n) {
+        if (j + 8 <= n) {
+            uint64_t w;
+            memcpy(&w, p + j, 8);
+            if (!(w & 0x8080808080808080ull)) { j += 8; continue; }
+        }
+        uint8_t b = p[j];
+        if (b < 0x80) { j++; continue; }
+        size_t need = b >= 0xC2 && b <= 0xDF ? 1 : b >= 0xE0 && b <= 0xEF ? 2 : b >= 0xF0 && b <= 0xF4 ? 3 : 0;
+        if (!need || j + need >= n) { valid = false; break; }
+        uint8_t lo = b == 0xE0 ? 0xA0 : b == 0xF0 ? 0x90 : 0x80, hi = b == 0xED ? 0x9F : b == 0xF4 ? 0x8F : 0xBF;
+        if (p[j + 1] < lo || p[j + 1] > hi) { valid = false; break; }
+        size_t k = 2;
+        for (; k <= need; k++) if (p[j + k] < 0x80 || p[j + k] > 0xBF) break;
+        if (k <= need) { valid = false; break; }
+        j += need + 1;
+    }
+    if (valid) {
+        if (!bom) { bm_str_retain(s); return s; }
+        return bm_str_from((const char *)p + 3, n - 3);
+    }
+    bm_sb out = {0};
+    bm_sb_grow(&out, n + 16);
+    bm_sb_push(&out, (const char *)p + i, j - i);
+    static const char fffd[3] = {(char)0xEF, (char)0xBF, (char)0xBD};
+    i = j;
+    while (i < n) {
+        uint8_t b = p[i];
+        if (b < 0x80) { bm_sb_push_char(&out, (char)b); i++; continue; }
+        size_t need = b >= 0xC2 && b <= 0xDF ? 1 : b >= 0xE0 && b <= 0xEF ? 2 : b >= 0xF0 && b <= 0xF4 ? 3 : 0;
+        if (!need) { bm_sb_push(&out, fffd, 3); i++; continue; }
+        uint8_t lo = b == 0xE0 ? 0xA0 : b == 0xF0 ? 0x90 : 0x80, hi = b == 0xED ? 0x9F : b == 0xF4 ? 0x8F : 0xBF;
+        size_t k = 1;
+        while (k <= need && i + k < n) {
+            uint8_t c = p[i + k];
+            if (c < lo || c > hi) break;
+            lo = 0x80;
+            hi = 0xBF;
+            k++;
+        }
+        if (k == need + 1) { bm_sb_push(&out, (const char *)p + i, k); i += k; }
+        else { bm_sb_push(&out, fffd, 3); i += k; } /* the maximal subpart becomes one U+FFFD */
+    }
+    return bm_str_from_sb(&out);
+}
+
+/* ---- Headers: combined values and sorted entries, as the Fetch standard defines them */
+
+/* Every `name` line's value, joined with ", " ("" if none). */
+bm_str bm_native_headerGet(bm_str block, bm_str name) {
+    const char *s = block.p->data, *end = s + block.p->len;
+    size_t n = (size_t)name.p->len;
+    bm_sb out = {0};
+    int found = 0;
+    const char *first = NULL;
+    size_t first_len = 0;
+    while (s < end) {
+        const char *nl = memchr(s, '\n', (size_t)(end - s));
+        const char *le = nl ? nl : end;
+        if ((size_t)(le - s) > n && strncasecmp(s, name.p->data, n) == 0 && s[n] == ':') {
+            const char *v = s + n + 1, *ve = le;
+            if (ve > v && ve[-1] == '\r') ve--;
+            while (v < ve && (*v == ' ' || *v == '\t')) v++;
+            while (ve > v && (ve[-1] == ' ' || ve[-1] == '\t')) ve--;
+            if (found == 0) { first = v; first_len = (size_t)(ve - v); }
+            else {
+                if (found == 1) bm_sb_push(&out, first, first_len);
+                bm_sb_push(&out, ", ", 2);
+                bm_sb_push(&out, v, (size_t)(ve - v));
+            }
+            found++;
+        }
+        if (!nl) break;
+        s = nl + 1;
+    }
+    if (found == 1) return bm_str_from(first, first_len);
+    return bm_str_from_sb(&out);
+}
+
+typedef struct { const char *name, *value; size_t nlen, vlen, order; } bm_hdr_line;
+
+static int bm_hdr_cmp(const void *a, const void *b) {
+    const bm_hdr_line *x = a, *y = b;
+    size_t n = x->nlen < y->nlen ? x->nlen : y->nlen;
+    int c = strncasecmp(x->name, y->name, n);
+    if (c) return c;
+    if (x->nlen != y->nlen) return x->nlen < y->nlen ? -1 : 1;
+    return x->order < y->order ? -1 : x->order > y->order;
+}
+
+/* [name, value, name, value, ...]: names lower-cased and sorted, repeated names combined
+ * (except set-cookie, one entry per cookie). */
+bm_arr bm_native_headerEntries(bm_str block) {
+    const char *s = block.p->data, *end = s + block.p->len;
+    size_t cap = 16, n = 0;
+    bm_hdr_line *lines = bm_alloc(cap * sizeof *lines);
+    while (s < end) {
+        const char *nl = memchr(s, '\n', (size_t)(end - s));
+        const char *le = nl ? nl : end;
+        const char *colon = memchr(s, ':', (size_t)(le - s));
+        if (colon && colon > s) {
+            const char *v = colon + 1, *ve = le;
+            if (ve > v && ve[-1] == '\r') ve--;
+            while (v < ve && (*v == ' ' || *v == '\t')) v++;
+            while (ve > v && (ve[-1] == ' ' || ve[-1] == '\t')) ve--;
+            if (n == cap) { cap *= 2; lines = bm_realloc(lines, cap * sizeof *lines); }
+            lines[n] = (bm_hdr_line){ s, v, (size_t)(colon - s), (size_t)(ve - v), n };
+            n++;
+        }
+        if (!nl) break;
+        s = nl + 1;
+    }
+    qsort(lines, n, sizeof *lines, bm_hdr_cmp);
+    bm_arr out = bm_arr_with_capacity(&bm_type_str, (bm_int)(n * 2));
+    bm_str *o = bm_arr_data(out);
+    size_t k = 0;
+    for (size_t i = 0; i < n;) {
+        size_t j = i + 1;
+        bool cookie = lines[i].nlen == 10 && strncasecmp(lines[i].name, "set-cookie", 10) == 0;
+        if (!cookie)
+            while (j < n && lines[j].nlen == lines[i].nlen && strncasecmp(lines[j].name, lines[i].name, lines[i].nlen) == 0) j++;
+        char *lower = bm_alloc(lines[i].nlen);
+        for (size_t c = 0; c < lines[i].nlen; c++) { char ch = lines[i].name[c]; lower[c] = (char)(ch >= 'A' && ch <= 'Z' ? ch + 32 : ch); }
+        o[k++] = bm_str_from(lower, lines[i].nlen);
+        bm_free(lower);
+        if (j == i + 1) {
+            o[k++] = bm_str_from(lines[i].value, lines[i].vlen);
+        } else {
+            bm_sb v = {0};
+            for (size_t x = i; x < j; x++) {
+                if (x > i) bm_sb_push(&v, ", ", 2);
+                bm_sb_push(&v, lines[x].value, lines[x].vlen);
+            }
+            o[k++] = bm_str_from_sb(&v);
+        }
+        i = j;
+    }
+    out.len = (bm_int)k;
+    bm_free(lines);
+    return out;
+}
+
+/* Each `name` line's value, in order (getSetCookie). */
+bm_arr bm_native_headerValues(bm_str block, bm_str name) {
+    const char *s = block.p->data, *end = s + block.p->len;
+    size_t n = (size_t)name.p->len;
+    bm_arr out = BM_EMPTY_ARR;
+    while (s < end) {
+        const char *nl = memchr(s, '\n', (size_t)(end - s));
+        const char *le = nl ? nl : end;
+        if ((size_t)(le - s) > n && strncasecmp(s, name.p->data, n) == 0 && s[n] == ':') {
+            const char *v = s + n + 1, *ve = le;
+            if (ve > v && ve[-1] == '\r') ve--;
+            while (v < ve && (*v == ' ' || *v == '\t')) v++;
+            while (ve > v && (ve[-1] == ' ' || ve[-1] == '\t')) ve--;
+            bm_str *slot = bm_arr_reserve_tail(&out, &bm_type_str, 1);
+            *slot = bm_str_from(v, (size_t)(ve - v));
+            out.len++;
+        }
+        if (!nl) break;
+        s = nl + 1;
+    }
+    return out;
 }

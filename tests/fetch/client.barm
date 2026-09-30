@@ -1,0 +1,206 @@
+// fetch() against the scripted server in tests/fetch.rs. The same program runs under Bun, and
+// the outputs must match (URLs print as BASE/ALT: the port changes from run to run).
+import { readFileSync } from "node:fs"
+
+const base = process.env.BASE ?? "http://127.0.0.1:1"
+const alt = process.env.ALT ?? "http://localhost:1"
+const fixtureText = try readFileSync("tests/fetch/fixture.txt", "utf8")
+
+function clean(s: string): string {
+  return s.replaceAll(base, "BASE").replaceAll(alt, "ALT")
+}
+
+function describe(e: Error): string {
+  if (e instanceof FetchError) {
+    return `${e.name} ${e.code}: ${clean(e.message)}`
+  }
+  return `${e.name}: ${e.message}`
+}
+
+// Status, status text, redirected, final URL and body, or the error.
+async function show(label: string, p: Promise<Response, Error>): Promise<void> {
+  try {
+    const r = await p
+    const body = await r.text()
+    console.log(`${label}: ${r.status} ${JSON.stringify(r.statusText)} ok=${r.ok} redirected=${r.redirected} ${clean(r.url)} | ${clean(body)}`)
+  } catch (e) {
+    console.log(`${label}: ${describe(e)}`)
+  }
+}
+
+// Length and a comparison with the fixture, for large or compressed bodies.
+async function measure(label: string, p: Promise<Response, Error>, want: string): Promise<void> {
+  try {
+    const r = await p
+    const body = await r.text()
+    console.log(`${label}: ${r.status} length=${body.byteLength} same=${body === want}`)
+  } catch (e) {
+    console.log(`${label}: ${describe(e)}`)
+  }
+}
+
+// bodies and framing
+await show("text", fetch(base + "/text"))
+await show("chunked", fetch(base + "/chunked"))
+await show("close-delimited", fetch(base + "/close"))
+await show("http/1.0", fetch(base + "/http10"))
+await show("lf line endings", fetch(base + "/lf"))
+await show("interim 1xx", fetch(base + "/continue"))
+await show("404 with reason", fetch(base + "/status?code=404&reason=Nope%20Nope"))
+await show("500", fetch(base + "/status?code=500&reason=Internal%20Server%20Error"))
+await show("204", fetch(base + "/nobody?code=204"))
+await show("304", fetch(base + "/nobody?code=304"))
+await show("HEAD", fetch(base + "/head", { method: "HEAD" }))
+const big = "abcdefghijklmnopqrstuvwxyz".repeat(200000)
+await measure("5.2 MB body", fetch(base + "/big?n=5200000"), big)
+let chunks = ""
+for (let i = 0; i < 500; i++) {
+  chunks += String(i).padStart(1000, "0")
+}
+await measure("500 chunks", fetch(base + "/chunked-big"), chunks)
+
+// JSON
+type J = { a: number, b: number[], c: string }
+try {
+  const r = await fetch(base + "/json")
+  const j: J = await r.json()
+  console.log(`json: ${j.a} ${j.b.length} ${j.c} ${r.headers.get("content-type")}`)
+} catch (e) {
+  console.log(`json: ${describe(e)}`)
+}
+
+// headers
+try {
+  const r = await fetch(base + "/headers")
+  // (Bun iterates Set-Cookie last; the Fetch standard sorts it with the rest)
+  const seen: string[] = []
+  r.headers.forEach((v, k) => {
+    if (k !== "date" && k !== "set-cookie") {
+      seen.push(`${k}=${v}`)
+    }
+  })
+  console.log(`headers: get=${r.headers.get("x-a")} cookies=${r.headers.getSetCookie().join(";")} spaces=[${r.headers.get("x-spaces")}] missing=${r.headers.get("nope") ?? "none"}`)
+  console.log(`headers: ${seen.join(" ")}`)
+} catch (e) {
+  console.log(`headers: ${describe(e)}`)
+}
+
+// requests
+await show("GET query and headers", fetch(base + "/echo?q=1&r=two", { headers: { "X-Custom": "v", "Cookie": "c=1" } }))
+await show("Headers object", fetch(base + "/echo", { headers: new Headers({ "x-custom": "from Headers" }) }))
+await show("POST text", fetch(base + "/echo", { method: "POST", body: "hello" }))
+await show("POST form", fetch(base + "/echo", { method: "POST", body: new URLSearchParams("a=1&b=two words") }))
+await show("POST own type", fetch(base + "/echo", { method: "POST", body: "{}", headers: { "Content-Type": "application/json" } }))
+await show("PUT empty", fetch(base + "/echo", { method: "PUT" }))
+await show("lower-case delete", fetch(base + "/echo", { method: "delete" }))
+await show("patch kept as written", fetch(base + "/echo", { method: "patch", body: "p" }))
+await show("Request input", fetch(new Request(base + "/echo", { method: "POST", body: "from a Request", headers: { "X-Custom": "req" } })))
+await show("URL input", fetch(try new URL("/echo?u=1", base)))
+// (the fragment isn't sent; Response.url leaves it out too, where Bun keeps it)
+try {
+  console.log(`fragment dropped: ${await (await fetch(base + "/echo?f=1#frag")).text()}`)
+} catch (e) {
+  console.log(`fragment dropped: ${describe(e)}`)
+}
+await show("GET with body", fetch(base + "/echo", { method: "GET", body: "no" }))
+
+// redirects
+await show("301 POST", fetch(base + "/redirect?code=301", { method: "POST", body: "gone", headers: { "Content-Type": "text/plain" } }))
+await show("302 POST", fetch(base + "/redirect?code=302", { method: "POST", body: "gone" }))
+await show("303 PUT", fetch(base + "/redirect?code=303", { method: "PUT", body: "gone" }))
+await show("307 POST", fetch(base + "/redirect?code=307", { method: "POST", body: "kept" }))
+await show("308 POST", fetch(base + "/redirect?code=308", { method: "POST", body: "kept" }))
+await show("relative", fetch(base + "/redirect?to=echo%3Fr=1"))
+await show("same origin keeps credentials", fetch(base + "/redirect?to=/echo", { headers: { "Authorization": "Bearer t", "Cookie": "c=1" } }))
+await show("other origin drops credentials", fetch(base + "/redirect?to=ALT/echo", { headers: { "Authorization": "Bearer t", "Cookie": "c=1", "X-Custom": "kept" } }))
+await show("manual", fetch(base + "/redirect", { redirect: "manual" }))
+await show("error", fetch(base + "/redirect", { redirect: "error" }))
+await show("20 redirects", fetch(base + "/chain?n=20"))
+await show("loop", fetch(base + "/loop"))
+try {
+  const r = await fetch(base + "/redirect?code=301&to=/text", { redirect: "manual" })
+  console.log(`manual location: ${r.headers.get("location")} ${r.status}`)
+} catch (e) {
+  console.log(`manual location: ${describe(e)}`)
+}
+
+// compression
+await measure("gzip", fetch(base + "/gzip?f=fixture.gz"), fixtureText)
+await measure("deflate (zlib)", fetch(base + "/deflate?f=fixture.zlib"), fixtureText)
+await measure("deflate (stored blocks)", fetch(base + "/deflate?f=fixture-stored.zlib"), fixtureText.slice(0, 70000))
+await show("deflate (raw, fixed codes)", fetch(base + "/deflate?f=fixture-fixed.deflate"))
+await show("gzip (two members)", fetch(base + "/gzip?f=fixture-two.gz"))
+try {
+  const r = await fetch(base + "/gzip?f=fixture.gz", { decompress: false })
+  const raw = await r.bytes()
+  console.log(`decompress off: ${raw.length} ${r.headers.get("content-encoding")}`)
+} catch (e) {
+  console.log(`decompress off: ${describe(e)}`)
+}
+
+// text decoding
+try {
+  console.log(`invalid UTF-8: ${JSON.stringify(await (await fetch(base + "/utf8")).text())}`)
+  console.log(`BOM: ${JSON.stringify(await (await fetch(base + "/bom")).text())}`)
+} catch (e) {
+  console.log(`decoding: ${describe(e)}`)
+}
+
+// the body is read once
+try {
+  const r = await fetch(base + "/text")
+  const copy = r.clone()
+  console.log(`clone: ${await copy.text()} used=${r.bodyUsed}`)
+  console.log(`first read: ${await r.text()} used=${r.bodyUsed}`)
+  await r.text()
+} catch (e) {
+  console.log(`second read: ${describe(e)}`)
+}
+
+// connections
+// consecutive requests reuse the connection; after "Connection: close" a new one starts
+async function served(): Promise<number, Error> {
+  const text = try await (try await fetch(base + "/conn")).text()
+  return parseInt(text.split(" ")[1] ?? "0") ?? 0
+}
+try {
+  const first = await served()
+  const second = await served()
+  console.log(`keep-alive: reused=${second === first + 1}`)
+  console.log(`Connection: close: ${await (await fetch(base + "/closing")).text()}`)
+  console.log(`after close: request ${await served()}`)
+} catch (e) {
+  console.log(`keep-alive: ${describe(e)}`)
+}
+const all = try await Promise.all([fetch(base + "/text"), fetch(base + "/json"), fetch(base + "/chunked"), fetch(base + "/text"), fetch(base + "/close")])
+const statuses: number[] = []
+for (const r of all) {
+  statuses.push(r.status)
+}
+console.log(`concurrent: ${statuses.join(",")}`)
+
+// aborts
+const controller = new AbortController()
+const slow = fetch(base + "/slow?ms=2000", { signal: controller.signal })
+controller.abort()
+await show("abort", slow)
+await show("already aborted", fetch(base + "/text", { signal: AbortSignal.abort() }))
+await show("timeout", fetch(base + "/slow?ms=2000", { signal: AbortSignal.timeout(50) }))
+const withReason = new AbortController()
+const reasoned = fetch(base + "/slow?ms=2000", { signal: withReason.signal })
+withReason.abort(new Error("stopped by the test"))
+await show("abort with a reason", reasoned)
+const signal = AbortSignal.timeout(5000)
+await show("signal that doesn't fire", fetch(base + "/text", { signal }))
+console.log(`signal state: ${signal.aborted}`)
+
+// failures
+await show("connection refused", fetch("http://127.0.0.1:1/"))
+await show("invalid URL", fetch("not a url"))
+try {
+  await fetch("ftp://example.com/")
+} catch (e) {
+  // (Bun's message also offers its s3: protocol)
+  console.log(`unsupported protocol: ${e.name} ${e instanceof FetchError ? e.code : ""}`)
+}
+await show("unknown host", fetch("http://nonexistent.invalid/"))

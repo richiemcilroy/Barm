@@ -478,5 +478,25 @@ bm_str bm_native_headerValue(bm_str block, bm_int at);
 void bm_http_run(void);   /* after the program: serves registered servers until stopped (no-op if none) */
 bm_str bm_native_headerRemove(bm_str block, bm_str name);  /* the block without `name` lines */
 bm_str bm_native_headerAppend(bm_str block, bm_str name, bm_str value);
+/* fetch(): see the HTTP client section of barm.c */
+bm_int bm_native_fetchStart(bm_str method, bm_str url, bm_str headers, bm_str body, bm_int redirect, bm_int flags);
+bm_promise *bm_native_fetchWait(bm_int id);    /* Promise<int>: 0 done, -1 failed, -2 aborted */
+bm_int bm_native_fetchStatus(bm_int id);
+bm_str bm_native_fetchStatusText(bm_int id);
+bm_str bm_native_fetchHeaders(bm_int id);
+bm_str bm_native_fetchUrl(bm_int id);
+bool bm_native_fetchRedirected(bm_int id);
+bm_str bm_native_fetchBody(bm_int id);         /* moves the body out */
+bm_str bm_native_fetchErrorCode(bm_int id);
+bm_str bm_native_fetchErrorMessage(bm_int id);
+void bm_native_fetchAbort(bm_int id);
+void bm_native_fetchFree(bm_int id);
+void bm_native_timerUnref(bm_int id);
+bm_str bm_native_bytesToString(bm_arr bytes);
+bm_arr bm_native_stringToBytes(bm_str s);
+bm_str bm_native_utf8Clean(bm_str s);
+bm_str bm_native_headerGet(bm_str block, bm_str name);        /* values joined with ", " */
+bm_arr bm_native_headerEntries(bm_str block);                  /* sorted [name, value, ...] */
+bm_arr bm_native_headerValues(bm_str block, bm_str name);          /* WHATWG UTF-8 decode (BOM dropped, U+FFFD for bad bytes) */
 
 #endif /* BARM_H */

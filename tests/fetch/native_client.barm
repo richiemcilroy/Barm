@@ -1,0 +1,94 @@
+// Native-only fetch() behaviour: where Barm follows the Fetch standard and Bun doesn't, bodies
+// as bytes (u8[]), and failures whose wording is Barm's own.
+const base = process.env.BASE ?? "http://127.0.0.1:1"
+
+function describe(e: Error): string {
+  if (e instanceof FetchError) {
+    return `${e.name} ${e.code}: ${e.message.replaceAll(base, "BASE")}`
+  }
+  return `${e.name}: ${e.message}`
+}
+
+async function show(label: string, p: Promise<Response, Error>): Promise<void> {
+  try {
+    const r = await p
+    const body = await r.text()
+    console.log(`${label}: ${r.status} ${r.url.replaceAll(base, "BASE")} | ${body}`)
+  } catch (e) {
+    console.log(`${label}: ${describe(e)}`)
+  }
+}
+
+// at most 20 redirects (the Fetch standard)
+await show("20 redirects", fetch(base + "/chain?n=20"))
+await show("21 redirects", fetch(base + "/chain?n=21"))
+// Response.url has no fragment
+await show("fragment", fetch(base + "/text#part"))
+
+// bytes
+const bytes: u8[] = [104, 105, 0, 255]
+await show("POST bytes", fetch(base + "/echo", { method: "POST", body: [u8(111), u8(107)] }))
+try {
+  const r = await fetch(base + "/big?n=5")
+  const b = await r.bytes()
+  console.log(`bytes(): ${b}`)
+  const made = new Response(bytes)
+  const back = await made.bytes()
+  console.log(`bytes body: ${back} ${made.headers.get("content-type") ?? "no type"}`)
+} catch (e) {
+  console.log(`bytes: ${describe(e)}`)
+}
+
+// headers iterate sorted, Set-Cookie in its place
+try {
+  const r = await fetch(base + "/headers")
+  const seen: string[] = []
+  r.headers.forEach((v, k) => {
+    if (k !== "date") {
+      seen.push(`${k}=${v}`)
+    }
+  })
+  console.log(`headers: ${seen.join(" ")}`)
+  console.log(`keys: ${r.headers.keys().join(",")}`)
+} catch (e) {
+  console.log(`headers: ${describe(e)}`)
+}
+
+// failures
+await show("dropped", fetch(base + "/drop"))
+await show("malformed", fetch(base + "/malformed"))
+await show("cut short", fetch(base + "/short"))
+await show("bad gzip", fetch(base + "/badgzip"))
+// a pooled connection the server closed is replaced (the request is retried once)
+await show("warm up", fetch(base + "/text"))
+await show("pooled then dropped", fetch(base + "/drop"))
+await show("still fine", fetch(base + "/text"))
+
+// signals
+const a = new AbortController()
+const b = new AbortController()
+const either = AbortSignal.any([a.signal, b.signal])
+let heard = ""
+either.onabort = () => {
+  heard += "onabort "
+}
+either.addEventListener("abort", () => {
+  heard += "listener"
+})
+const pending = fetch(base + "/slow?ms=2000", { signal: either })
+b.abort(new Error("b gave up"))
+await show("any", pending)
+console.log(`heard: ${heard} aborted=${either.aborted} a=${a.signal.aborted}`)
+try {
+  either.throwIfAborted()
+  console.log("throwIfAborted: no")
+} catch (e) {
+  console.log(`throwIfAborted: ${e.message}`)
+}
+const d = new DOMException("gone", "AbortError")
+console.log(`DOMException: ${d.name} ${d.code} ${d.message} ${d instanceof Error}`)
+
+// a pending AbortSignal.timeout doesn't keep the program running
+const later = AbortSignal.timeout(60000)
+await show("with a long timeout", fetch(base + "/text", { signal: later }))
+console.log("done")

@@ -19,7 +19,8 @@ const STD_MODULES: &[(&str, &str, bool)] =
     &[("fs", include_str!("std/fs.barm"), true), ("path", include_str!("std/path.barm"), true), ("http", include_str!("std/http.barm"), false)];
 
 /// Globals that come from std/http, as in Bun.
-pub(crate) const WEB_GLOBALS: &[&str] = &["Bun", "Request", "Response", "Headers", "URL", "URLSearchParams"];
+pub(crate) const WEB_GLOBALS: &[&str] =
+    &["Bun", "Request", "Response", "Headers", "URL", "URLSearchParams", "fetch", "AbortController", "AbortSignal", "DOMException", "FetchError"];
 
 /// The standard module an import names (`"node:fs"`, `"fs"`, `"std/http"`), if any.
 fn std_module(spec: &str) -> Option<&'static (&'static str, &'static str, bool)> {

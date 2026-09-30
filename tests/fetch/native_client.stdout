@@ -1,0 +1,21 @@
+20 redirects: 200 BASE/chain?n=0 | end of chain
+21 redirects: TypeError TooManyRedirects: The response redirected too many times. For more information, pass `verbose: true` in the second argument to fetch()
+fragment: 200 BASE/text | hello
+POST bytes: 200 BASE/echo | POST |content-length=2|body=ok
+bytes(): 97,98,99,100,101
+bytes body: 104,105,0,255 no type
+headers: content-length=2 set-cookie=a=1 set-cookie=b=2 x-a=1, 2 x-spaces=padded value
+keys: content-length,set-cookie,set-cookie,x-a,x-spaces
+dropped: TypeError ECONNRESET: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()
+malformed: TypeError Malformed_HTTP_Response: Malformed_HTTP_Response fetching "BASE/malformed". For more information, pass `verbose: true` in the second argument to fetch()
+cut short: TypeError ECONNRESET: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()
+bad gzip: TypeError ZlibError: ZlibError fetching "BASE/badgzip". For more information, pass `verbose: true` in the second argument to fetch()
+warm up: 200 BASE/text | hello
+pooled then dropped: TypeError ECONNRESET: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()
+still fine: 200 BASE/text | hello
+any: Error: b gave up
+heard: onabort listener aborted=true a=false
+throwIfAborted: b gave up
+DOMException: AbortError 20 gone true
+with a long timeout: 200 BASE/text | hello
+done

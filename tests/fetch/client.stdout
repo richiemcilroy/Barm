@@ -1,0 +1,66 @@
+text: 200 "OK" ok=true redirected=false BASE/text | hello
+chunked: 200 "OK" ok=true redirected=false BASE/chunked | hello, chunked!
+close-delimited: 200 "OK" ok=true redirected=false BASE/close | read until the server closes
+http/1.0: 200 "OK" ok=true redirected=false BASE/http10 | an HTTP/1.0 body
+lf line endings: 200 "OK" ok=true redirected=false BASE/lf | lf only
+interim 1xx: 200 "OK" ok=true redirected=false BASE/continue | after interim responses
+404 with reason: 404 "Nope Nope" ok=false redirected=false BASE/status?code=404&reason=Nope%20Nope | status 404
+500: 500 "Internal Server Error" ok=false redirected=false BASE/status?code=500&reason=Internal%20Server%20Error | status 500
+204: 204 "X" ok=true redirected=false BASE/nobody?code=204 | 
+304: 304 "X" ok=false redirected=false BASE/nobody?code=304 | 
+HEAD: 200 "OK" ok=true redirected=false BASE/head | 
+5.2 MB body: 200 length=5200000 same=true
+500 chunks: 200 length=500000 same=true
+json: 1 2 x application/json
+headers: get=1, 2 cookies=a=1;b=2 spaces=[padded value] missing=none
+headers: content-length=2 x-a=1, 2 x-spaces=padded value
+GET query and headers: 200 "OK" ok=true redirected=false BASE/echo?q=1&r=two | GET ?q=1&r=two|cookie=c=1|x-custom=v|body=
+Headers object: 200 "OK" ok=true redirected=false BASE/echo | GET |x-custom=from Headers|body=
+POST text: 200 "OK" ok=true redirected=false BASE/echo | POST |content-length=5|body=hello
+POST form: 200 "OK" ok=true redirected=false BASE/echo | POST |content-type=application/x-www-form-urlencoded;charset=UTF-8|content-length=15|body=a=1&b=two+words
+POST own type: 200 "OK" ok=true redirected=false BASE/echo | POST |content-type=application/json|content-length=2|body={}
+PUT empty: 200 "OK" ok=true redirected=false BASE/echo | PUT |content-length=0|body=
+lower-case delete: 200 "OK" ok=true redirected=false BASE/echo | DELETE |content-length=0|body=
+patch kept as written: 200 "OK" ok=true redirected=false BASE/echo | PATCH |content-length=1|body=p
+Request input: 200 "OK" ok=true redirected=false BASE/echo | POST |content-length=14|x-custom=req|body=from a Request
+URL input: 200 "OK" ok=true redirected=false BASE/echo?u=1 | GET ?u=1|body=
+fragment dropped: GET ?f=1|body=
+GET with body: TypeError ERR_INVALID_ARG_VALUE: fetch() request with GET/HEAD method cannot have body.
+301 POST: 200 "OK" ok=true redirected=true BASE/echo | GET |body=
+302 POST: 200 "OK" ok=true redirected=true BASE/echo | GET |body=
+303 PUT: 200 "OK" ok=true redirected=true BASE/echo | GET |body=
+307 POST: 200 "OK" ok=true redirected=true BASE/echo | POST |content-length=4|body=kept
+308 POST: 200 "OK" ok=true redirected=true BASE/echo | POST |content-length=4|body=kept
+relative: 404 "Not Found" ok=false redirected=true BASE/echo%3Fr=1 | no such route
+same origin keeps credentials: 200 "OK" ok=true redirected=true BASE/echo | GET |authorization=Bearer t|cookie=c=1|body=
+other origin drops credentials: 200 "OK" ok=true redirected=true ALT/echo | GET |x-custom=kept|body=
+manual: 302 "Redirect" ok=false redirected=false BASE/redirect | redirecting
+error: TypeError UnexpectedRedirect: UnexpectedRedirect fetching "BASE/redirect". For more information, pass `verbose: true` in the second argument to fetch()
+20 redirects: 200 "OK" ok=true redirected=true BASE/chain?n=0 | end of chain
+loop: TypeError TooManyRedirects: The response redirected too many times. For more information, pass `verbose: true` in the second argument to fetch()
+manual location: /text 301
+gzip: 200 length=136863 same=true
+deflate (zlib): 200 length=136863 same=true
+deflate (stored blocks): 200 length=70000 same=true
+deflate (raw, fixed codes): 200 "OK" ok=true redirected=false BASE/deflate?f=fixture-fixed.deflate | small body, fixed Huffman codes
+gzip (two members): 200 "OK" ok=true redirected=false BASE/gzip?f=fixture-two.gz | first member|second member
+decompress off: 17702 gzip
+invalid UTF-8: "a�b� c😀d"
+BOM: "bom"
+clone: hello used=false
+first read: hello used=true
+second read: TypeError ERR_BODY_ALREADY_USED: Body already used
+keep-alive: reused=true
+Connection: close: closing after this
+after close: request 1
+concurrent: 200,200,200,200,200
+abort: AbortError: The operation was aborted.
+already aborted: AbortError: The operation was aborted.
+timeout: TimeoutError: The operation timed out.
+abort with a reason: Error: stopped by the test
+signal that doesn't fire: 200 "OK" ok=true redirected=false BASE/text | hello
+signal state: false
+connection refused: TypeError ConnectionRefused: Unable to connect. Is the computer able to access the url?
+invalid URL: TypeError ERR_INVALID_URL: fetch() URL is invalid
+unsupported protocol: TypeError ERR_INVALID_ARG_VALUE
+unknown host: TypeError ENOTFOUND: getaddrinfo ENOTFOUND nonexistent.invalid
