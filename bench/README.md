@@ -80,7 +80,7 @@ A missing toolchain is reported as `skipped`. A failed build is `build failed` w
 
 - `nbody` is **unsupported**: `error SC1090: compound assignment to fields of computed receivers are not supported yet` on `bodies[i]!.vx -= dx * mj` (9 sites).
 - `sort` **times out**. With a comparator, scriptc's sort takes 0.6 s for 1M elements but runs for more than 60 s at 2M. At 3M it was still running after 9 minutes, so something is super-linear. The program is correct at smaller sizes: 30k, 100k, 300k and 1M elements all match Node.
-- `array_push` compiles and is correct but is about 100× slower than C, consistent with the array and `for…of` costs described in `docs/research.md` §8. `points` (fresh object per iteration) and `binary_trees` are also 6–18× slower than C, because every object is `malloc`'d and reference-counted.
+- `array_push` compiles and is correct but is about 100× slower than C. `points` (fresh object per iteration) and `binary_trees` are also 6–18× slower than C, because every object is `malloc`'d and reference-counted.
 
 ## Barm checker issues
 

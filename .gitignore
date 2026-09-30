@@ -3,5 +3,6 @@
 bench/http/out/
 bench/http/rust/target/
 
-# Internal: the design doc stays local
+# Internal docs stay local
 docs/design.md
+docs/research.md
