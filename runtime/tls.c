@@ -23,7 +23,10 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <openssl/base64.h>
+#include <openssl/bytestring.h>
 #include <openssl/err.h>
+#include <openssl/mem.h>
 #include <openssl/pem.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
@@ -42,7 +45,70 @@ typedef struct bm_tls_conf {
     char *ca;                 /* extra PEM, or NULL */
     size_t ca_len;
     SSL_CTX *ctx;
+    bool *added;              /* which roots its store has (see bm_tls_verify) */
 } bm_tls_conf;
+
+/* The trusted roots (the system bundle and NODE_EXTRA_CA_CERTS), indexed by the canonical hash of
+ * their subject name and parsed only when a server's chain names one as an issuer: a program
+ * that fetches from one site parses one or two of the ~130 roots, not all of them (~13 ms and
+ * ~1.4 MB saved). */
+typedef struct { uint8_t *der; size_t len; uint32_t subject; X509 *x; } bm_root;
+static bm_root *bm_roots;
+static size_t bm_nroots;
+
+static void bm_roots_add_pem(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    size_t cap = 1 << 16, n = 0;
+    char *text = malloc(cap);
+    for (size_t r; (r = fread(text + n, 1, cap - n - 1, f)) > 0;) {
+        n += r;
+        if (cap - n < 4096) { cap *= 2; text = realloc(text, cap); }
+    }
+    fclose(f);
+    text[n] = 0;
+    static const char begin[] = "-----BEGIN CERTIFICATE-----", end[] = "-----END CERTIFICATE-----";
+    for (char *p = text; (p = strstr(p, begin)) != NULL;) {
+        p += sizeof begin - 1;
+        char *e = strstr(p, end);
+        if (!e) break;
+        /* base64 without its line breaks */
+        size_t bl = 0;
+        for (char *q = p; q < e; q++) if (*q != '\n' && *q != '\r' && *q != ' ' && *q != '\t') p[bl++] = *q;
+        size_t max;
+        if (EVP_DecodedLength(&max, bl)) {
+            uint8_t *der = malloc(max);
+            size_t len;
+            X509_NAME *name = NULL;
+            if (EVP_DecodeBase64(der, &len, max, (const uint8_t *)p, bl)) {
+                /* just the subject: Certificate { tbs { [0] version, serial, algorithm, issuer,
+                 * validity, subject ... } } */
+                CBS cert, tbs, subject;
+                CBS_init(&cert, der, len);
+                if (CBS_get_asn1(&cert, &cert, CBS_ASN1_SEQUENCE) && CBS_get_asn1(&cert, &tbs, CBS_ASN1_SEQUENCE) &&
+                    CBS_get_optional_asn1(&tbs, NULL, NULL, CBS_ASN1_CONTEXT_SPECIFIC | CBS_ASN1_CONSTRUCTED | 0) &&
+                    CBS_get_asn1(&tbs, NULL, CBS_ASN1_INTEGER) && CBS_get_asn1(&tbs, NULL, CBS_ASN1_SEQUENCE) &&
+                    CBS_get_asn1(&tbs, NULL, CBS_ASN1_SEQUENCE) && CBS_get_asn1(&tbs, NULL, CBS_ASN1_SEQUENCE) &&
+                    CBS_get_asn1_element(&tbs, &subject, CBS_ASN1_SEQUENCE)) {
+                    const uint8_t *in = CBS_data(&subject);
+                    name = d2i_X509_NAME(NULL, &in, (long)CBS_len(&subject));
+                }
+            }
+            if (name) {
+                /* the subject's hash; only the DER is kept (parsed if a chain needs it) */
+                uint32_t h = (uint32_t)X509_NAME_hash(name);
+                X509_NAME_free(name);
+                bm_roots = realloc(bm_roots, (bm_nroots + 1) * sizeof *bm_roots);
+                bm_roots[bm_nroots++] = (bm_root){ der, len, h, NULL };
+                der = NULL;
+            }
+            free(der);
+        }
+        p = e + sizeof end - 1;
+    }
+    free(text);
+    ERR_clear_error();
+}
 
 static bool bm_tls_ready;
 static const char *bm_tls_bundle;   /* the CA bundle file */
@@ -89,6 +155,7 @@ static void bm_tls_init(void) {
     bm_tls_index = SSL_get_ex_new_index(0, NULL, NULL, NULL, NULL);
     const char *file = getenv("SSL_CERT_FILE");
     if (file && *file) { bm_tls_bundle = file; return; }
+    bm_tls_bundle = NULL;
     static const char *const bundles[] = {
         "/etc/ssl/cert.pem",                                  /* macOS, Alpine, BSDs */
         "/etc/ssl/certs/ca-certificates.crt",                 /* Debian, Ubuntu, Arch */
@@ -98,6 +165,43 @@ static void bm_tls_init(void) {
     };
     for (size_t i = 0; i < sizeof bundles / sizeof *bundles; i++)
         if (access(bundles[i], R_OK) == 0) { bm_tls_bundle = bundles[i]; return; }
+}
+
+/* The roots, indexed on first use (the first verification). */
+static void bm_roots_load(void) {
+    static bool loaded;
+    if (loaded) return;
+    loaded = true;
+    if (bm_tls_bundle) bm_roots_add_pem(bm_tls_bundle);
+    const char *extra = getenv("NODE_EXTRA_CA_CERTS");
+    if (extra && *extra) bm_roots_add_pem(extra);
+}
+
+/* Adds to the context's store the roots that could have issued `x`. */
+static void bm_tls_add_issuers(bm_tls_conf *c, X509 *x) {
+    uint32_t h = (uint32_t)X509_NAME_hash(X509_get_issuer_name(x));
+    X509_STORE *store = SSL_CTX_get_cert_store(c->ctx);
+    for (size_t i = 0; i < bm_nroots; i++) {
+        if (bm_roots[i].subject != h || c->added[i]) continue;
+        if (!bm_roots[i].x) {
+            const uint8_t *in = bm_roots[i].der;
+            bm_roots[i].x = d2i_X509(NULL, &in, (long)bm_roots[i].len);
+        }
+        if (bm_roots[i].x) X509_STORE_add_cert(store, bm_roots[i].x);
+        c->added[i] = true;
+    }
+}
+
+/* Certificate verification: bring in the roots this chain can use, then verify as usual. */
+static int bm_tls_verify(X509_STORE_CTX *sc, void *arg) {
+    bm_tls_conf *c = arg;
+    bm_roots_load();
+    if (!c->added) c->added = calloc(bm_nroots ? bm_nroots : 1, sizeof *c->added);
+    bm_tls_add_issuers(c, X509_STORE_CTX_get0_cert(sc));
+    STACK_OF(X509) *chain = X509_STORE_CTX_get0_untrusted(sc);
+    for (size_t i = 0; chain && i < sk_X509_num(chain); i++) bm_tls_add_issuers(c, sk_X509_value(chain, i));
+    ERR_clear_error();
+    return X509_verify_cert(sc);
 }
 
 /* Adds every certificate in PEM text to the store. */
@@ -129,11 +233,9 @@ static bm_tls_conf *bm_tls_conf_for(bool verify, const char *ca, size_t ca_len) 
     SSL_CTX_sess_set_new_cb(ctx, bm_tls_new_session);
     SSL_CTX_set_verify(ctx, verify ? SSL_VERIFY_PEER : SSL_VERIFY_NONE, NULL);
     if (verify) {
-        X509_STORE *store = SSL_CTX_get_cert_store(ctx);
-        if (bm_tls_bundle) X509_STORE_load_locations(store, bm_tls_bundle, NULL);
-        const char *extra = getenv("NODE_EXTRA_CA_CERTS");
-        if (extra && *extra) X509_STORE_load_locations(store, extra, NULL);
-        if (ca_len) bm_tls_add_pem(store, ca, ca_len);
+        /* the system's roots come in on demand; a request's own `ca` right away */
+        SSL_CTX_set_cert_verify_callback(ctx, bm_tls_verify, c);
+        if (ca_len) bm_tls_add_pem(SSL_CTX_get_cert_store(ctx), ca, ca_len);
         ERR_clear_error();
     }
     if (ca_len) {
