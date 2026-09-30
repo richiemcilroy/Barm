@@ -1,0 +1,61 @@
+{
+ "machine": "Linux aarch64",
+ "results": [
+  {
+   "rps": 1636024,
+   "requests": 6555933,
+   "non2xx": 0,
+   "mb_per_s": 291.21,
+   "avg_us": 75.9,
+   "p50_us": 65,
+   "p90_us": 119,
+   "p99_us": 201,
+   "p999_us": 1793,
+   "max_us": 5884,
+   "rss_mb": 10.328125,
+   "pss_mb": 2.4853515625,
+   "cpu_us_per_req": 2.4272581768842927,
+   "cpu_cores": 3.9710526315789476,
+   "rps_all": [
+    1588026,
+    1598319,
+    1636024,
+    1645178,
+    1655476
+   ],
+   "server": "barm",
+   "route": "json",
+   "workers": 4,
+   "conns": 128,
+   "pipeline": 1
+  },
+  {
+   "rps": 1274118,
+   "requests": 5096549,
+   "non2xx": 0,
+   "mb_per_s": 208.96,
+   "avg_us": 98.3,
+   "p50_us": 82,
+   "p90_us": 131,
+   "p99_us": 600,
+   "p999_us": 2649,
+   "max_us": 5068,
+   "rss_mb": 5.42578125,
+   "pss_mb": 4.4423828125,
+   "cpu_us_per_req": 2.9576703669766684,
+   "cpu_cores": 3.7684210526315787,
+   "rps_all": [
+    1204365,
+    1263084,
+    1274118,
+    1286970,
+    1302224
+   ],
+   "server": "rust-tpc",
+   "route": "json",
+   "workers": 4,
+   "conns": 128,
+   "pipeline": 1
+  }
+ ]
+}
