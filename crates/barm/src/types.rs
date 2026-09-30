@@ -601,19 +601,13 @@ impl Display<'_> {
                 out.push('>');
             }
             Ty::Promise(v, e) => {
-                if in_array && e != NEVER {
-                    out.push('(');
-                }
                 out.push_str("Promise<");
                 self.write(v, out, false);
-                out.push('>');
                 if e != NEVER {
-                    out.push_str(" throws ");
+                    out.push_str(", ");
                     self.write(e, out, false);
-                    if in_array {
-                        out.push(')');
-                    }
                 }
+                out.push('>');
             }
             Ty::Record(fields) => {
                 let fields = self.types.fields(fields);

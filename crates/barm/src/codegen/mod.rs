@@ -55,6 +55,18 @@ pub fn runtime_source() -> String {
     out
 }
 
+/// The start every generated program shares (runtime interface, includes, prelude): the build
+/// precompiles it once per compiler and flags, so a program's compile parses only its own code.
+pub fn fixed_prefix() -> String {
+    let mut out = String::with_capacity(C_PREFIX.len() + RUNTIME_H.len() + PRELUDE.len() + 128);
+    out.push_str(C_PREFIX);
+    out.push_str(RUNTIME_H);
+    out.push('\n');
+    out.push_str("#include <math.h>\n#include <pthread.h>\n#include <stdio.h>\n#include <stdlib.h>\n");
+    out.push_str(PRELUDE);
+    out
+}
+
 /// A generated program plus the runtime in one file (for `--emit-c`: compiles on its own).
 pub fn standalone(program: &str) -> String {
     let head = C_PREFIX.len() + RUNTIME_H.len() + 1;
@@ -305,8 +317,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             self.mutated_globals.extend(globals);
         }
         let script = modules.iter().enumerate().find(|(_, m)| m.entry && m.ast.script.is_some()).map(|(mi, m)| (mi as u32, m.ast.script.unwrap()));
-        // Timers and tasks the program started run before its servers start.
-        let async_run = if crate::async_enabled() { "    bm_async_run();\n" } else { "" };
+        // Then the event loop: timers, tasks and servers the program started.
+        let async_run = "    bm_async_run();\n";
         let mut main_body = String::new();
         match mode {
             Mode::Run if script.is_some() && self.is_async_fn(script.unwrap().0, script.unwrap().1) => {
@@ -322,7 +334,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let throws = self.c.sigs[&(m, i)].throws != NEVER;
                 self.needs_uncaught |= throws;
                 let uncaught = if throws { "    if (bmg_err) { bmg_uncaught(); return 1; }\n" } else { "" };
-                let _ = writeln!(main_body, "    {cname}();\n{uncaught}{async_run}    bm_http_run();\n    bm_out_flush();\n    return 0;");
+                let _ = writeln!(main_body, "    {cname}();\n{uncaught}{async_run}    bm_out_flush();\n    return 0;");
             }
             Mode::Run => {
                 let Some((m, i)) = main_fn else {
@@ -340,9 +352,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.needs_uncaught |= throws;
                 let uncaught = if throws { "    if (bmg_err) { bmg_uncaught(); return 1; }\n" } else { "" };
                 if ret == INT {
-                    let _ = writeln!(main_body, "    bm_int code = {cname}();\n{uncaught}{async_run}    bm_http_run();\n    bm_out_flush();\n    return (int)code;");
+                    let _ = writeln!(main_body, "    bm_int code = {cname}();\n{uncaught}{async_run}    bm_out_flush();\n    return (int)code;");
                 } else {
-                    let _ = writeln!(main_body, "    {cname}();\n{uncaught}{async_run}    bm_http_run();\n    bm_out_flush();\n    return 0;");
+                    let _ = writeln!(main_body, "    {cname}();\n{uncaught}{async_run}    bm_out_flush();\n    return 0;");
                 }
             }
             Mode::Test => {
@@ -364,17 +376,15 @@ impl<'c, 'a> Gen<'c, 'a> {
         let code = if value == INT { "(int)*(bm_int *)bm_promise_value(mp)" } else { "0" };
         let _ = writeln!(
             out,
-            "    bm_task *t = bm_task_new(sizeof(AF_{cname}), {cname}_task, {desc});\n    bm_promise *mp = t->promise;\n    bm_promise_retain(mp);\n    bm_task_start(t);\n    bm_async_run();\n    if (mp->state == BM_REJECTED) {{ bmg_err = mp->err; bmg_obj_retain(bmg_err); bm_promise_release(mp); bmg_uncaught(); return 1; }}\n    if (mp->state == BM_PENDING) {{ bm_promise_release(mp); bm_out_flush(); fputs(\"warning: the program's top-level await never finished\\n\", stderr); return 13; }}\n    int code = {code};\n    bm_promise_release(mp);\n    bm_http_run();\n    bm_out_flush();\n    return code;"
+            "    bm_task *t = bm_task_new(sizeof(AF_{cname}), {cname}_task, {desc});\n    bm_promise *mp = t->promise;\n    bm_promise_retain(mp);\n    bm_task_start(t);\n    bm_async_run();\n    if (mp->state == BM_REJECTED) {{ bmg_err = mp->err; bmg_obj_retain(bmg_err); bm_promise_release(mp); bmg_uncaught(); return 1; }}\n    if (mp->state == BM_PENDING) {{ bm_promise_release(mp); bm_out_flush(); fputs(\"warning: the program's top-level await never finished\\n\", stderr); return 13; }}\n    int code = {code};\n    bm_promise_release(mp);\n    bm_out_flush();\n    return code;"
         );
     }
 
     fn finish_program(&mut self, main_body: String) {
-        // With real async, rejections nobody handled are reported like uncaught errors.
-        if crate::async_enabled() {
-            self.needs_uncaught = true;
-            self.helpers_after.push("static void bmg_async_release(void *e) { bmg_obj_release(e); }\nstatic void bmg_async_report(void *e) { bmg_err = e; bmg_obj_retain(e); bmg_uncaught(); }\n".to_string());
-            let _ = writeln!(self.protos, "static void bmg_async_release(void *e);\nstatic void bmg_async_report(void *e);");
-        }
+        // Rejections nobody handled are reported like uncaught errors.
+        self.needs_uncaught = true;
+        self.helpers_after.push("static void bmg_async_release(void *e) { bmg_obj_release(e); }\nstatic void bmg_async_report(void *e) { bmg_err = e; bmg_obj_retain(e); bmg_uncaught(); }\n".to_string());
+        let _ = writeln!(self.protos, "static void bmg_async_release(void *e);\nstatic void bmg_async_report(void *e);");
         if self.needs_uncaught {
             let uncaught = self.uncaught_fn();
             self.helpers_after.push(uncaught);
@@ -416,9 +426,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.helpers_after.push(dispatch);
         self.helpers_after.push(tables);
         let mut init = std::mem::take(&mut self.const_init);
-        if crate::async_enabled() {
-            init.insert_str(0, "    bm_async_init(bmg_async_release, bmg_async_report);\n");
-        }
+        init.insert_str(0, "    bm_async_init(bmg_async_release, bmg_async_report);\n");
         // The program runs on a thread with a 1 GiB stack (reserved, committed as used): deep
         // recursion — including freeing long linked structures — has room without per-call checks.
         let _ = writeln!(
@@ -1268,6 +1276,10 @@ impl<'c, 'a> Gen<'c, 'a> {
         if self.consts_done.insert((m, item)) {
             let ct = self.ctype(ty);
             let _ = writeln!(self.protos, "static {ct} {gname};");
+            // An initializer that awaits runs inline in the (async) script body instead.
+            if self.script_module == Some(m) && asyncfn::has_await(self.ast(m), *init) {
+                return Val::plain(gname, ty);
+            }
             // Initialize dependencies first (their `const_ref` calls happen while emitting this initializer).
             let code = self.function_body(m, FxMap::default(), &[], ty, body::FnBodyKind::Expr(*init), None, None, None);
             let fname = format!("init_{gname}");

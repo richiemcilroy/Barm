@@ -11,7 +11,7 @@ pub(super) const BUILTIN_TYPES: &[&str] = &[
 
 pub(super) const GLOBAL_NAMES: &[&str] = &[
     "Math", "console", "expect", "String", "Number", "parseInt", "parseFloat", "isNaN", "int", "f64", "f32", "i8", "i16", "i32", "u8", "u16", "u32", "u64", "process", "Date",
-    "performance", "JSON",
+    "performance", "JSON", "Promise",
 ];
 
 /// Runtime calls available to standard-library modules (`__native.name(...)`): parameters, result.
@@ -41,6 +41,8 @@ pub(super) fn native_sig(types: &mut Types, name: &str) -> Option<(Vec<TyId>, Ty
         "urlNormalize" => (vec![STR, STR], STR),
         "urlPart" => (vec![STR, INT], STR),
         "httpRespond" => (vec![INT, STR, STR, BOOL], VOID),
+        "httpDefer" => (vec![], INT),
+        "httpRespondTo" => (vec![INT, INT, STR, STR, BOOL], VOID),
         "headerIndex" => (vec![STR, STR], INT),
         "headerValue" => (vec![STR, INT], STR),
         "headerRemove" => (vec![STR, STR], STR),
@@ -56,16 +58,16 @@ pub(super) fn is_builtin_type(name: &str) -> bool {
 }
 
 pub(super) fn is_builtin_ns(name: &str) -> bool {
-    matches!(name, "Math" | "console" | "JSON" | "process" | "Date" | "performance")
+    matches!(name, "Math" | "console" | "JSON" | "process" | "Date" | "performance" | "Promise")
 }
 
 pub(super) fn is_builtin_fn(name: &str) -> bool {
     matches!(name, "expect" | "String" | "Number" | "parseInt" | "parseFloat" | "isNaN" | "test")
         || CONVERSIONS.contains(&name)
-        || crate::async_enabled() && TIMER_FNS.contains(&name)
+        || TIMER_FNS.contains(&name)
 }
 
-/// Timer globals (real async only).
+/// Timer globals.
 pub(crate) const TIMER_FNS: &[&str] = &["setTimeout", "setInterval", "clearTimeout", "clearInterval", "queueMicrotask"];
 
 pub(super) fn removed_global(name: &str) -> Option<String> {
@@ -74,8 +76,7 @@ pub(super) fn removed_global(name: &str) -> Option<String> {
         "eval" | "Function" => format!("`{name}` is not supported: there is no runtime code evaluation"),
         "globalThis" | "window" | "document" | "global" => format!("`{name}` is not available; Barm compiles to native programs"),
         "require" | "module" | "exports" => "CommonJS is not supported; use `import { name } from \"./file\"`".to_string(),
-        "setTimeout" | "setInterval" | "Promise" if crate::async_enabled() => return None,
-        "setTimeout" | "setInterval" | "fetch" | "Promise" => format!("`{name}` is not supported yet (async is planned for M6)"),
+        "fetch" => "`fetch` is not supported yet".to_string(),
         "Symbol" | "Proxy" | "Reflect" | "WeakMap" | "WeakSet" | "BigInt" => format!("`{name}` is not supported"),
         "Object" => "`Object` is not supported: records have fixed fields; use `Map` for dynamic keys".to_string(),
         "Array" => "`Array.from`/`Array.isArray` are not supported; use array literals and `map`".to_string(),
@@ -381,6 +382,7 @@ impl<'a> Checker<'a> {
             "process" => vec!["argv", "env", "exit", "cwd", "platform", "stdout", "stderr"],
             "Date" | "performance" => vec!["now"],
             "JSON" => vec!["stringify", "parse"],
+            "Promise" => vec!["resolve", "reject"],
             _ => vec!["log", "error", "warn", "info"],
         };
         if known.contains(&n.as_str()) {
@@ -389,6 +391,55 @@ impl<'a> Checker<'a> {
         }
         self.unknown_ns_member(ns, &n, &known, name_span);
         ERROR
+    }
+
+    /// `Promise.resolve(v)` (a fulfilled promise) and `Promise.reject(e)` (a rejected one). The
+    /// value type comes from the argument or the expected type.
+    fn promise_call(&mut self, name: &str, name_span: Span, args: &[Arg], exp: Option<TyId>, span: Span) -> TyId {
+        let expected = exp.and_then(|t| {
+            self.flat_members(t).into_iter().find_map(|m| match *self.types.get(m) {
+                Ty::Promise(v, e) => Some((v, e)),
+                _ => None,
+            })
+        });
+        match name {
+            "resolve" => {
+                let v = match args {
+                    [] => expected.map(|(v, _)| v).unwrap_or(VOID),
+                    [a] => {
+                        let hint = expected.map(|(v, _)| v);
+                        let t = self.expr(a.expr, hint);
+                        match hint {
+                            Some(h) if self.assignable(t, h) => h,
+                            _ => self.types.widen(t),
+                        }
+                    }
+                    _ => {
+                        self.report(Diagnostic::new("T0201", span, format!("`Promise.resolve` takes 1 argument, found {}", args.len())));
+                        self.check_args_loose(args);
+                        return ERROR;
+                    }
+                };
+                self.types.promise(v, NEVER)
+            }
+            "reject" => {
+                let [a] = args else {
+                    self.report(Diagnostic::new("T0201", span, format!("`Promise.reject` takes 1 argument (an error), found {}", args.len())));
+                    self.check_args_loose(args);
+                    return ERROR;
+                };
+                let e = self.expr(a.expr, None);
+                let s = self.ast().expr(a.expr).span;
+                self.check_throws_type(e, s);
+                let v = expected.map(|(v, _)| v).unwrap_or(NEVER);
+                self.types.promise(v, e)
+            }
+            _ => {
+                self.check_args_loose(args);
+                self.unknown_ns_member("Promise", name, &["resolve", "reject"], name_span);
+                ERROR
+            }
+        }
     }
 
     fn unknown_ns_member(&mut self, ns: &str, n: &str, known: &[&str], span: Span) {
@@ -418,6 +469,7 @@ impl<'a> Checker<'a> {
                 VOID
             }
             "JSON" => self.json_call(name, name_span, args, exp, span),
+            "Promise" => self.promise_call(name, name_span, args, exp, span),
             "process" => {
                 let (params, ret): (Vec<FnParam>, TyId) = match name {
                     "exit" => (vec![opt(self, INT)], NEVER),

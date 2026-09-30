@@ -552,7 +552,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                             }
                             // (An async arrow's task can outlive the call: its environment is on the heap.)
                             for a in args {
-                                if matches!(&ast.expr(a.expr).kind, ExprKind::Arrow(f) if !(f.is_async && crate::async_enabled())) {
+                                if matches!(&ast.expr(a.expr).kind, ExprKind::Arrow(f) if !f.is_async) {
                                     stack_arrows.insert(a.expr);
                                 }
                             }
@@ -782,8 +782,19 @@ impl<'c, 'a> Gen<'c, 'a> {
         match &node.kind {
             StmtKind::Empty | StmtKind::Error => {}
             StmtKind::InitGlobal(ii) => {
-                // `g = init_g();` here, in source order (a script's module variable).
+                // `g = init_g();` here, in source order (a script's module variable); an
+                // initializer that awaits is evaluated right here, in the async script body.
                 let g = self.const_ref(m, *ii);
+                let ast::ItemKind::Const { init, .. } = &self.ast(m).items[*ii as usize].kind else { unreachable!() };
+                if super::asyncfn::has_await(self.ast(m), *init) {
+                    self.push_temps();
+                    let v = self.expr(*init);
+                    let v = self.coerce(v, g.ty);
+                    let code = self.consume(v);
+                    self.line(format!("{} = {code};", g.code));
+                    self.pop_temps();
+                    return;
+                }
                 self.line(format!("{} = init_{}();", g.code, g.code));
                 if self.c.const_throws.contains(&(m, *ii)) {
                     self.error_check();
@@ -1536,8 +1547,6 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             ExprKind::This => self.ident(e, ty),
             ExprKind::Try(x) => self.expr(*x),
-            // Synchronous until real async is on (BARM_ASYNC): the value itself.
-            ExprKind::Await(x) if !crate::async_enabled() => self.expr(*x),
             ExprKind::Await(x) => self.await_expr(e, *x),
             ExprKind::Super => Val::plain("0", ty),
         }
@@ -1746,6 +1755,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.pop_temps();
                 self.close("}");
                 return res;
+            }
+            // A promise with a narrower error type (or a value of the same representation) is the
+            // same promise.
+            (Ty::Promise(fv, _), Ty::Promise(tv, _)) if fv == tv || self.ctype(fv) == self.ctype(tv) => {
+                return Val { ty: to, ..v };
             }
             (Ty::Func(fps, fret, _), Ty::Func(tps, tret, _)) => {
                 // Same C calling convention when parameter and return C types agree (e.g. a result
@@ -2704,7 +2718,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             };
             env_locals.insert(*k, Local { access, ty: *ty });
         }
-        if f.is_async && crate::async_enabled() {
+        if f.is_async {
             self.emit_async_arrow(&cname, m, subst, &params, ret, kind, env_locals);
             return ArrowInfo { cname, env_type, captures };
         }

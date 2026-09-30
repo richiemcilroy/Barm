@@ -324,13 +324,19 @@ export class Request {
     return Headers.fromWire(this.rawHeaders)
   }
 
-  text(): string {
-    return this.rawBody
+  // As in Bun, the body is read through a promise (already settled: the body has arrived).
+  text(): Promise<string> {
+    return Promise.resolve(this.rawBody)
   }
 
   // The body parsed as JSON, checked against the type the context expects.
-  json<T>(): T throws SyntaxError {
-    return try JSON.parse(this.rawBody)
+  json<T>(): Promise<T, SyntaxError> {
+    try {
+      const value: T = JSON.parse(this.rawBody)
+      return Promise.resolve(value)
+    } catch (e) {
+      return Promise.reject(e)
+    }
   }
 
   // Internal: fills in a request read from the wire.
@@ -382,12 +388,17 @@ export class Response {
     return this.status >= 200 && this.status < 300
   }
 
-  text(): string {
-    return this.bodyText
+  text(): Promise<string> {
+    return Promise.resolve(this.bodyText)
   }
 
-  json<T>(): T throws SyntaxError {
-    return try JSON.parse(this.bodyText)
+  json<T>(): Promise<T, SyntaxError> {
+    try {
+      const value: T = JSON.parse(this.bodyText)
+      return Promise.resolve(value)
+    } catch (e) {
+      return Promise.reject(e)
+    }
   }
 
   // `data` as JSON, with `Content-Type: application/json;charset=utf-8`.
@@ -406,6 +417,10 @@ export class Response {
     const r = new Response(undefined, { status: status ?? 302 })
     r.rawHeaders = __native.headerAppend("", "Location", url)
     return r
+  }
+
+  wireBody(): string {
+    return this.bodyText
   }
 
   wireHeaders(): string {
@@ -453,8 +468,10 @@ export class Server {
   }
 }
 
-export type Handler = (req: Request, server: Server) => Response throws Error
-export type RouteHandler = (req: BunRequest, server: Server) => Response throws Error
+/* What a handler answers with: a response, or (an async handler) a promise of one. */
+export type Answer = Response | Promise<Response, Error>
+export type Handler = (req: Request, server: Server) => Answer throws Error
+export type RouteHandler = (req: BunRequest, server: Server) => Answer throws Error
 export type MethodRoutes = {
   GET?: RouteHandler
   POST?: RouteHandler
@@ -541,6 +558,19 @@ function matchPattern(p: Pattern, path: string): Record<string, string> | undefi
   return params
 }
 
+// An async handler's response: sent once its promise settles (a rejection is answered like an
+// error the handler threw). Responses on a connection still go out in request order.
+async function respondLater(id: int, pending: Promise<Response, Error>, method: string, target: string, onError: ((error: Error) => Response) | undefined) {
+  let res: Response | undefined = undefined
+  try {
+    res = await pending
+  } catch (e) {
+    res = internalError(e, method, target, onError)
+  }
+  const r = res!
+  __native.httpRespondTo(id, r.status, r.wireHeaders(), r.wireBody(), r.wireTyped())
+}
+
 function internalError(e: Error, method: string, target: string, onError: ((error: Error) => Response) | undefined): Response {
   console.error(`error: ${e.message}\n${method} - ${target} failed`)
   if (onError !== undefined) {
@@ -578,7 +608,7 @@ export function serve(options: ServeOptions): Server {
   const server = new Server(hostname === "0.0.0.0" ? "localhost" : hostname)
   const noParams: Record<string, string> = {}
 
-  const run = (value: RouteValue, params: Record<string, string>, method: string, target: string, headers: string, body: string): Response | undefined => {
+  const run = (value: RouteValue, params: Record<string, string>, method: string, target: string, headers: string, body: string): Answer | undefined => {
     if (value instanceof Response) {
       return value
     }
@@ -595,7 +625,7 @@ export function serve(options: ServeOptions): Server {
     }
   }
 
-  const handle = (method: string, target: string, headers: string, body: string): Response => {
+  const handle = (method: string, target: string, headers: string, body: string): Answer => {
     const q = target.indexOf("?")
     const path = q < 0 ? target : target.slice(0, q)
     const v = exact.get(path)
@@ -628,7 +658,11 @@ export function serve(options: ServeOptions): Server {
 
   const id = __native.httpListen(port, hostname, (method: string, target: string, headers: string, body: string): void => {
     const res = handle(method, target, headers, body)
-    __native.httpRespond(res.status, res.wireHeaders(), res.text(), res.wireTyped())
+    if (res instanceof Response) {
+      __native.httpRespond(res.status, res.wireHeaders(), res.wireBody(), res.wireTyped())
+    } else {
+      respondLater(__native.httpDefer(), res, method, target, onError)
+    }
   })
   if (id < 0) {
     console.error(`error: ${__native.takeError()}`)

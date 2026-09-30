@@ -105,8 +105,6 @@ impl<'a> Checker<'a> {
             }
             ExprKind::Ident(sym) => self.ident(e, *sym, span),
             ExprKind::Paren(x) => self.expr(*x, exp),
-            // Synchronous until real async is on (BARM_ASYNC): `await e` is `e`.
-            ExprKind::Await(x) if !crate::async_enabled() => self.expr(*x, exp),
             ExprKind::Await(x) => self.await_expr(e, *x, exp, span),
             ExprKind::Unary(op, x) => self.unary(*op, *x, exp, span),
             ExprKind::Binary(op, l, r) => self.binary(*op, *l, *r, exp, span),
@@ -1680,14 +1678,21 @@ impl<'a> Checker<'a> {
                 })
             })
             .unwrap_or(NEVER);
-        let is_async = f.is_async && crate::async_enabled();
+        let is_async = f.is_async;
         // An async arrow's context expects `(...) => Promise<T>`: its body returns `T`, and
         // whatever it throws rejects the promise.
+        // (The context may also accept a plain value: `Response | Promise<Response, Error>`.)
         let (exp_fn, exp_throws) = match exp_fn {
-            Some((ps, r)) if is_async => match *self.types.get(r) {
-                Ty::Promise(v, err) => (Some((ps, v)), err),
-                _ => (Some((ps, r)), NEVER),
-            },
+            Some((ps, r)) if is_async => {
+                let promised = self.flat_members(r).into_iter().find_map(|m| match *self.types.get(m) {
+                    Ty::Promise(v, err) => Some((v, err)),
+                    _ => None,
+                });
+                match promised {
+                    Some((v, err)) => (Some((ps, v)), err),
+                    None => (Some((ps, r)), NEVER),
+                }
+            }
             other => (other, exp_throws),
         };
         let tscope = self.tscope();
@@ -1909,7 +1914,7 @@ impl<'a> Checker<'a> {
                 self.report(Diagnostic::new("X0036", span, "`new Array(...)` is not supported").note("instead", "use an array literal: `const xs: T[] = []`"));
                 ERROR
             }
-            "Promise" if crate::async_enabled() && !self.scopes[self.cur as usize].values.contains_key(&s) => self.new_promise(e, &targs, args, exp, span),
+            "Promise" if !self.scopes[self.cur as usize].values.contains_key(&s) => self.new_promise(e, &targs, args, exp, span),
             _ => {
                 if let Some(Decl::Class(c)) = self.scopes[self.cur as usize].values.get(&s).map(|d| d.0) {
                     self.rec_ident(callee, IdentFact::Class(c));
@@ -2414,6 +2419,14 @@ impl<'a> Checker<'a> {
                 if let Ty::Map(ak, av) = *self.types.get(actual) {
                     self.unify(pk, ak, free, map);
                     self.unify(pv, av, free, map);
+                }
+            }
+            Ty::Promise(pv, pe) => {
+                if let Ty::Promise(av, ae) = *self.types.get(actual) {
+                    self.unify(pv, av, free, map);
+                    if ae != NEVER {
+                        self.unify(pe, ae, free, map);
+                    }
                 }
             }
             Ty::Func(pps, pr, _) => {

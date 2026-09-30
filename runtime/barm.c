@@ -2998,9 +2998,16 @@ static void bm_fire_timers(void) {
     }
 }
 
+static bool bm_http_busy(void);
+
 void bm_async_run(void) {
     for (;;) {
         bm_run_microtasks();
+        /* while servers run, their loop runs the timers too */
+        if (bm_http_busy()) {
+            bm_http_run();
+            continue;
+        }
         while (bm_ntimers && !bm_timers[0].cb.fn) (void)bm_timer_pop();
         if (!bm_live_timers) return;
         if (bm_timers[0].when > bm_loop_update()) bm_sleep_until(bm_timers[0].when);
@@ -3039,7 +3046,27 @@ typedef struct bm_http_conn {
     bool close_after, want_write, want_read, stalled, continued;
     /* in/out currently point at the loop's shared buffers (see bm_http_attach) */
     bool in_shared, out_shared;
+    bool eof;             /* the client closed its side */
+    bool dirty;           /* on bm_http_dirty: a late response is ready to write */
+    struct bm_http_conn *dirty_next;
+    /* Requests answered later (async handlers), in request order; see bm_http_req. */
+    struct bm_http_req *pend_head, *pend_tail;
+    int npending;
 } bm_http_conn;
+
+/* A request whose response isn't written yet: its handler returned a promise (it has an id for
+ * httpRespondTo), or it was answered while an earlier request on the same connection is still
+ * waiting (responses go out in request order). */
+typedef struct bm_http_req {
+    struct bm_http_req *next;
+    bm_http_conn *c;      /* NULL once the connection has closed */
+    bm_int id;            /* 0: answered already, waiting for the ones ahead of it */
+    bool keep, head, ready;
+    bm_sb out;            /* the response, once ready */
+} bm_http_req;
+
+/* Pipelined requests handled ahead of a slow one, per connection, before reading pauses. */
+#define BM_HTTP_MAX_PENDING 64
 
 /* One read buffer and one write buffer per event loop: a connection borrows them while it is
  * handled, and keeps heap buffers only for leftovers (a partial request, or output the socket
@@ -3129,9 +3156,13 @@ static bool bm_has_header(bm_str block, const char *name) {
     return false;
 }
 
-void bm_native_httpRespond(bm_int status, bm_str headers, bm_str body, bool typed) {
-    bm_http_conn *c = bm_http_cur;
-    if (!c) return;
+/* Output goes to the connection (c) or to a response kept for later (sb). */
+static inline void bm_http_put(bm_http_conn *c, bm_sb *sb, const char *s, size_t n) {
+    if (c) bm_http_out(c, s, n);
+    else bm_sb_push(sb, s, n);
+}
+
+static void bm_http_response(bm_http_conn *c, bm_sb *sb, bool keep, bool head, bm_int status, bm_str headers, bm_str body, bool typed) {
     char line[160], *p = line;
     memcpy(p, "HTTP/1.1 ", 9);
     p += 9;
@@ -3159,20 +3190,114 @@ void bm_native_httpRespond(bm_int status, bm_str headers, bm_str body, bool type
         *p++ = '\r';
         *p++ = '\n';
     }
-    bm_http_out(c, line, (size_t)(p - line));
+    bm_http_put(c, sb, line, (size_t)(p - line));
     if (!bodiless && typed && !bm_has_header(headers, "content-type")) {
         static const char ct[] = "content-type: text/plain;charset=utf-8\r\n";
-        bm_http_out(c, ct, sizeof ct - 1);
+        bm_http_put(c, sb, ct, sizeof ct - 1);
     }
-    bm_http_out(c, bm_http_date, strlen(bm_http_date));
-    if (!bm_http_keep) {
+    bm_http_put(c, sb, bm_http_date, strlen(bm_http_date));
+    if (!keep) {
         static const char cl[] = "connection: close\r\n";
-        bm_http_out(c, cl, sizeof cl - 1);
+        bm_http_put(c, sb, cl, sizeof cl - 1);
     }
-    bm_http_out(c, headers.p->data, (size_t)headers.p->len);
-    bm_http_out(c, "\r\n", 2);
-    if (!bodiless && !bm_http_head) bm_http_out(c, body.p->data, (size_t)body.p->len);
+    bm_http_put(c, sb, headers.p->data, (size_t)headers.p->len);
+    bm_http_put(c, sb, "\r\n", 2);
+    if (!bodiless && !head) bm_http_put(c, sb, body.p->data, (size_t)body.p->len);
+}
+
+static bm_http_conn *bm_http_dirty;   /* connections with a late response to write */
+
+static void bm_http_mark_dirty(bm_http_conn *c) {
+    if (c->dirty) return;
+    c->dirty = true;
+    c->dirty_next = bm_http_dirty;
+    bm_http_dirty = c;
+}
+
+static void bm_http_enqueue(bm_http_conn *c, bm_http_req *r) {
+    r->next = NULL;
+    if (c->pend_tail) c->pend_tail->next = r; else c->pend_head = r;
+    c->pend_tail = r;
+    c->npending++;
+}
+
+/* Writes the ready responses at the front of c's queue, in order. */
+static void bm_http_drain(bm_http_conn *c) {
+    while (c->pend_head && c->pend_head->ready) {
+        bm_http_req *r = c->pend_head;
+        if (r->out.len) bm_http_out(c, r->out.data, r->out.len);
+        if (!r->keep) c->close_after = true;
+        c->pend_head = r->next;
+        if (!c->pend_head) c->pend_tail = NULL;
+        c->npending--;
+        bm_sb_free(&r->out);
+        bm_free(r);
+    }
+}
+
+void bm_native_httpRespond(bm_int status, bm_str headers, bm_str body, bool typed) {
+    bm_http_conn *c = bm_http_cur;
+    if (!c) return;
     bm_http_cur = NULL; /* one response per request */
+    if (!c->npending) {
+        bm_http_response(c, NULL, bm_http_keep, bm_http_head, status, headers, body, typed);
+        return;
+    }
+    /* an earlier request on this connection is still waiting: this response waits behind it */
+    bm_http_req *r = bm_alloc(sizeof *r);
+    memset(r, 0, sizeof *r);
+    r->c = c;
+    r->keep = bm_http_keep;
+    r->head = bm_http_head;
+    r->ready = true;
+    bm_http_response(NULL, &r->out, r->keep, r->head, status, headers, body, typed);
+    bm_http_enqueue(c, r);
+}
+
+/* Requests waiting for httpRespondTo, by id (slot 0 unused; free slots are reused). */
+static bm_http_req **bm_http_deferred;
+static bm_int bm_http_ndeferred, bm_http_deferred_cap, bm_http_deferred_free;
+
+bm_int bm_native_httpDefer(void) {
+    bm_http_conn *c = bm_http_cur;
+    if (!c) return 0;
+    bm_http_cur = NULL;
+    bm_http_req *r = bm_alloc(sizeof *r);
+    memset(r, 0, sizeof *r);
+    r->c = c;
+    r->keep = bm_http_keep;
+    r->head = bm_http_head;
+    bm_int id;
+    if (bm_http_deferred_free) {
+        id = bm_http_deferred_free;
+        bm_http_deferred_free = (bm_int)(intptr_t)bm_http_deferred[id];
+    } else {
+        if (bm_http_ndeferred + 1 >= bm_http_deferred_cap) {
+            bm_http_deferred_cap = bm_http_deferred_cap ? bm_http_deferred_cap * 2 : 64;
+            bm_http_deferred = bm_realloc(bm_http_deferred, (size_t)bm_http_deferred_cap * sizeof *bm_http_deferred);
+        }
+        id = ++bm_http_ndeferred;
+    }
+    bm_http_deferred[id] = r;
+    r->id = id;
+    bm_http_enqueue(c, r);
+    return id;
+}
+
+void bm_native_httpRespondTo(bm_int id, bm_int status, bm_str headers, bm_str body, bool typed) {
+    if (id <= 0 || id > bm_http_ndeferred) return;
+    bm_http_req *r = bm_http_deferred[id];
+    if (!r || (uintptr_t)r <= (uintptr_t)bm_http_ndeferred) return;   /* not waiting (a free slot) */
+    bm_http_deferred[id] = (bm_http_req *)(intptr_t)bm_http_deferred_free;
+    bm_http_deferred_free = id;
+    r->id = 0;
+    if (!r->c) { bm_free(r); return; }   /* the client went away */
+    bm_http_refresh_date();
+    bm_http_conn *c = r->c;
+    bm_http_response(NULL, &r->out, r->keep, r->head, status, headers, body, typed);
+    r->ready = true;
+    bm_http_drain(c);   /* may write and free r */
+    bm_http_mark_dirty(c);
 }
 
 bm_int bm_native_headerIndex(bm_str block, bm_str name) {
@@ -3317,7 +3442,7 @@ static bool bm_http_process(bm_http_conn *c) {
     bm_fn h = c->srv->handler;
     size_t pos = 0;
     c->stalled = false;
-    while (pos < c->in_len && !c->close_after) {
+    while (pos < c->in_len && !c->close_after && c->npending < BM_HTTP_MAX_PENDING) {
         if (c->out_len >= BM_HTTP_OUT_HIGH) { c->stalled = true; break; }
         char *start = c->in + pos;
         size_t avail = c->in_len - pos;
@@ -3408,6 +3533,7 @@ static bool bm_http_process(bm_http_conn *c) {
         bm_http_head = mlen == 4 && memcmp(start, "HEAD", 4) == 0;
         ((void (*)(void *, bm_str, bm_str, bm_str, bm_str))h.fn)(h.env, method, target, hdrs, body);
         if (bm_http_cur) bm_native_httpRespond(500, BM_EMPTY_STR, BM_EMPTY_STR, false); /* no response */
+        bm_run_microtasks();   /* each request is a macrotask, as in JavaScript */
         bm_str_release(method);
         bm_str_release(target);
         bm_str_release(hdrs);
@@ -3440,6 +3566,20 @@ static bm_http_conn bm_http_dead;   /* stands in for connections closed earlier 
 
 static void bm_http_close(bm_http_conn *c) {
     bm_http_load_add(-1);
+    if (c->dirty) {
+        for (bm_http_conn **pp = &bm_http_dirty; *pp; pp = &(*pp)->dirty_next)
+            if (*pp == c) { *pp = c->dirty_next; break; }
+    }
+    /* waiting requests outlive the connection until they're answered (then dropped) */
+    for (bm_http_req *r = c->pend_head, *next; r; r = next) {
+        next = r->next;
+        if (r->id) {
+            r->c = NULL;
+        } else {
+            bm_sb_free(&r->out);
+            bm_free(r);
+        }
+    }
     if (c->prev) c->prev->next = c->next; else bm_http_conns = c->next;
     if (c->next) c->next->prev = c->prev;
     close(c->fd);
@@ -3551,7 +3691,77 @@ static void bm_http_accept(bm_http_server *sv) {
     }
 }
 
-/* Runs the event loop until every server has stopped and its connections have closed. */
+/* Reads (when readable), handles the complete requests, writes; closes the connection once it's
+ * finished. Returns false if it was closed. */
+static bool bm_http_service(bm_http_conn *c, bool readable, bool broken) {
+    bool ok = !broken;
+    bm_http_attach(c);
+    if (readable && c->want_read) {
+        for (;;) {
+            if (c->in_cap - c->in_len < 4096) {
+                size_t cap = c->in_cap ? c->in_cap * 2 : 8192;
+                if (c->in_shared) { /* more than the shared buffer holds: move to its own */
+                    char *p = bm_alloc(cap);
+                    memcpy(p, c->in, c->in_len);
+                    c->in = p;
+                    c->in_shared = false;
+                } else {
+                    c->in = bm_realloc(c->in, cap);
+                }
+                c->in_cap = cap;
+            }
+            size_t room = c->in_cap - c->in_len;
+            ssize_t r = read(c->fd, c->in + c->in_len, room);
+            /* Level-triggered: a short read means the socket is drained, so skip the read that
+             * would only return EAGAIN (one syscall per request saved). */
+            if (r > 0) { c->in_len += (size_t)r; if ((size_t)r == room && c->in_len < BM_HTTP_MAX_BODY + BM_HTTP_MAX_HEAD) continue; break; }
+            if (r == 0) { c->eof = true; break; }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            if (errno == EINTR) continue;
+            ok = false;
+            break;
+        }
+    }
+    /* handle, write, and handle again while flushing unblocks pipelined requests */
+    while (ok) {
+        if (c->in_len && !c->close_after && c->npending < BM_HTTP_MAX_PENDING) ok = bm_http_process(c);
+        if (ok && c->out_len) ok = bm_http_flush(c);
+        if (!(ok && c->stalled && c->out_len == 0)) break;
+    }
+    /* a stopped server finishes the requests in hand, then closes its connections */
+    if (c->srv->fd < 0 && c->in_len == 0) c->close_after = true;
+    if (ok && c->out_len == 0 && c->npending == 0 && (c->close_after || c->eof)) ok = false;
+    if (!ok) {
+        bm_http_detach(c);
+        bm_http_close(c);
+        return false;
+    }
+    bm_http_detach(c);
+    /* interest: write while output is pending; read unless output is backed up, or too many
+     * requests are waiting for their responses */
+    bool want_write = c->out_len > 0;
+    bool want_read = !(c->stalled || c->eof || (c->close_after && c->out_len) || c->npending >= BM_HTTP_MAX_PENDING);
+#ifdef BM_KQUEUE
+    struct kevent mods[2];
+    int nm = 0;
+    if (want_write != c->want_write) EV_SET(&mods[nm++], c->fd, EVFILT_WRITE, want_write ? EV_ADD : EV_DELETE, 0, 0, c);
+    if (want_read != c->want_read) EV_SET(&mods[nm++], c->fd, EVFILT_READ, want_read ? EV_ENABLE : EV_DISABLE, 0, 0, c);
+    if (nm) kevent(bm_http_q, mods, nm, NULL, 0, NULL);
+#else
+    if (want_write != c->want_write || want_read != c->want_read) {
+        struct epoll_event wev = { .events = (want_read ? EPOLLIN | EPOLLRDHUP : 0) | (want_write ? EPOLLOUT : 0), .data.ptr = c };
+        epoll_ctl(bm_http_q, EPOLL_CTL_MOD, c->fd, &wev);
+    }
+#endif
+    c->want_write = want_write;
+    c->want_read = want_read;
+    return true;
+}
+
+static char bm_http_timer_tag;   /* the loop's timer event (the next setTimeout) */
+
+/* Runs the event loop until every server has stopped and its connections have closed; timers
+ * and microtasks run in it too. */
 static void bm_http_loop(void) {
 #ifdef BM_KQUEUE
     bm_http_q = kqueue();
@@ -3570,14 +3780,41 @@ static void bm_http_loop(void) {
     }
 #endif
     while (bm_http_active > 0 || bm_http_conns) {
+        bm_run_microtasks();
+        /* connections whose late responses are ready */
+        while (bm_http_dirty) {
+            bm_http_conn *c = bm_http_dirty;
+            bm_http_dirty = c->dirty_next;
+            c->dirty = false;
+            bm_http_service(c, false, false);
+            bm_run_microtasks();
+        }
+        if (!(bm_http_active > 0 || bm_http_conns)) break;
         if (bm_out_len) bm_out_flush(); /* handler logs reach pipes and files promptly */
+        while (bm_ntimers && !bm_timers[0].cb.fn) (void)bm_timer_pop();
+        /* wait for I/O, or until the next timer is due */
+        bool timed = bm_live_timers > 0;
+        uint64_t now_ms = bm_loop_update();
+        uint64_t due = timed ? bm_timers[0].when : 0;
 #ifdef BM_KQUEUE
-        int n = kevent(bm_http_q, NULL, 0, events, 256, NULL);
+        struct kevent tch;
+        int nch = 0;
+        struct timespec zero = {0, 0};
+        if (timed && due > now_ms) {
+            /* a kqueue timer marked critical wakes within ~0.1 ms (a plain timeout: ~1 ms late) */
+            uint64_t wait = due * 1000000u > bm_mono_ns() ? due * 1000000u - bm_mono_ns() : 0;
+            EV_SET(&tch, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT, NOTE_NSECONDS | NOTE_CRITICAL, (int64_t)wait, &bm_http_timer_tag);
+            nch = 1;
+        }
+        int n = kevent(bm_http_q, &tch, nch, events, 256, timed && due <= now_ms ? &zero : NULL);
 #else
-        int n = epoll_wait(bm_http_q, events, 256, -1);
+        int timeout = -1;
+        if (timed) timeout = due > now_ms ? (int)(due - now_ms) : 0;
+        int n = epoll_wait(bm_http_q, events, 256, timeout);
 #endif
         if (n < 0) { if (errno == EINTR) continue; break; }
         bm_http_refresh_date();
+        if (timed) bm_fire_timers();
         for (int i = 0; i < n; i++) {
 #ifdef BM_KQUEUE
             void *tag = events[i].udata;
@@ -3586,7 +3823,7 @@ static void bm_http_loop(void) {
             void *tag = events[i].data.ptr;
             bool readable = events[i].events & (EPOLLIN | EPOLLRDHUP), broken = events[i].events & (EPOLLHUP | EPOLLERR);
 #endif
-            bool eof = false;
+            if (tag == &bm_http_timer_tag) continue;
             if (bm_http_is_server(tag)) {
                 bm_http_accept(tag);
                 continue;
@@ -3598,69 +3835,15 @@ static void bm_http_loop(void) {
 #endif
                 continue;
             }
-            bool ok = !broken;
-            bm_http_attach(c);
-            if (readable && c->want_read) {
-                for (;;) {
-                    if (c->in_cap - c->in_len < 4096) {
-                        size_t cap = c->in_cap ? c->in_cap * 2 : 8192;
-                        if (c->in_shared) { /* more than the shared buffer holds: move to its own */
-                            char *p = bm_alloc(cap);
-                            memcpy(p, c->in, c->in_len);
-                            c->in = p;
-                            c->in_shared = false;
-                        } else {
-                            c->in = bm_realloc(c->in, cap);
-                        }
-                        c->in_cap = cap;
-                    }
-                    size_t room = c->in_cap - c->in_len;
-                    ssize_t r = read(c->fd, c->in + c->in_len, room);
-                    /* Level-triggered: a short read means the socket is drained, so skip the
-                     * read that would only return EAGAIN (one syscall per request saved). */
-                    if (r > 0) { c->in_len += (size_t)r; if ((size_t)r == room && c->in_len < BM_HTTP_MAX_BODY + BM_HTTP_MAX_HEAD) continue; break; }
-                    if (r == 0) { eof = true; break; }
-                    if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-                    if (errno == EINTR) continue;
-                    ok = false;
-                    break;
+            if (!bm_http_service(c, readable, broken)) {
+                for (int j = i + 1; j < n; j++) {
+#ifdef BM_KQUEUE
+                    if (events[j].udata == c) events[j].udata = &bm_http_dead;
+#else
+                    if (events[j].data.ptr == c) events[j].data.ptr = &bm_http_dead;
+#endif
                 }
             }
-            /* handle, write, and handle again while flushing unblocks pipelined requests */
-            while (ok) {
-                if (c->in_len && !c->close_after) ok = bm_http_process(c);
-                if (ok && c->out_len) ok = bm_http_flush(c);
-                if (!(ok && c->stalled && c->out_len == 0)) break;
-            }
-            /* a stopped server finishes the request in hand, then closes its connections */
-            if (c->srv->fd < 0 && c->in_len == 0) c->close_after = true;
-            if (ok && c->out_len == 0 && (c->close_after || eof)) ok = false;
-            if (!ok) {
-                bm_http_detach(c);
-                bm_http_close(c);
-#ifdef BM_KQUEUE
-                for (int j = i + 1; j < n; j++)
-                    if (events[j].udata == c) events[j].udata = &bm_http_dead;
-#endif
-                continue;
-            }
-            bm_http_detach(c);
-            /* interest: write while output is pending; read unless output is backed up */
-            bool want_write = c->out_len > 0, want_read = !(c->stalled || eof || (c->close_after && c->out_len));
-#ifdef BM_KQUEUE
-            struct kevent mods[2];
-            int nm = 0;
-            if (want_write != c->want_write) EV_SET(&mods[nm++], c->fd, EVFILT_WRITE, want_write ? EV_ADD : EV_DELETE, 0, 0, c);
-            if (want_read != c->want_read) EV_SET(&mods[nm++], c->fd, EVFILT_READ, want_read ? EV_ENABLE : EV_DISABLE, 0, 0, c);
-            if (nm) kevent(bm_http_q, mods, nm, NULL, 0, NULL);
-#else
-            if (want_write != c->want_write || want_read != c->want_read) {
-                struct epoll_event wev = { .events = (want_read ? EPOLLIN | EPOLLRDHUP : 0) | (want_write ? EPOLLOUT : 0), .data.ptr = c };
-                epoll_ctl(bm_http_q, EPOLL_CTL_MOD, c->fd, &wev);
-            }
-#endif
-            c->want_write = want_write;
-            c->want_read = want_read;
         }
     }
     close(bm_http_q);
@@ -3761,8 +3944,10 @@ static void bm_http_supervise(bm_int workers) {
     _exit(128 + sig);
 }
 
+static bool bm_http_busy(void) { return bm_http_active > 0 || bm_http_conns; }
+
 void bm_http_run(void) {
-    if (bm_http_active == 0) return;
+    if (!bm_http_busy()) return;
     bm_out_flush();
     bm_int workers = bm_http_want_workers;
     if (workers <= 1) {
@@ -3773,6 +3958,10 @@ void bm_http_run(void) {
     void *m = mmap(NULL, (size_t)workers * sizeof(int64_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
     if (m != MAP_FAILED) { bm_http_loads = m; bm_http_nworkers = workers; }
     bm_http_supervise(workers);
+    /* every worker has finished: so have this process's servers */
+    for (int i = 0; i < bm_http_nservers; i++)
+        if (bm_http_servers[i].fd >= 0) { close(bm_http_servers[i].fd); bm_http_servers[i].fd = -1; }
+    bm_http_active = 0;
 }
 
 bm_int bm_native_httpListen(bm_int port, bm_str host, bm_fn handler) {

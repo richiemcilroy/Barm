@@ -31,7 +31,7 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 | `A \| B` | union; `"lit"` string-literal types |
 | `(a: T) => U` | function type (`(a: T) => U throws E` if it can throw, §7) |
 | `Record<string, V>` | string-keyed map built with an object literal: `{ "Content-Type": "text/plain" }`; read with `.get(k)` (it is a `Map<string, V>`) |
-| `Promise<T>` | `T` (async is synchronous until M6, see §7b) |
+| `Promise<T>`, `Promise<T, E>` | a promise of a `T` that never rejects, or can reject with `E` (an `Error` class); see §7b |
 
 - Removed: `any`, `null` (use `undefined`), `object`, `symbol`, `bigint`, tuples [later], intersection `&`, conditional/mapped/indexed-access types, `keyof`, `typeof` in types, enums (use literal unions), namespaces, decorators.
 - `number` is exactly `f64`; `boolean` is exactly `bool`.
@@ -58,7 +58,7 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 - Methods in interfaces (`area(): f64`) are function-typed members: a class satisfies them with methods, a record with fields holding functions.
 
 ### Generics
-- `function f<T>(x: T): T`, `function g<T extends I>(...)`, `type Box<T> = { value: T }`, generic classes, and generic methods (`static of<T>(x: T)`, `json<T>(): T`; a generic method can't be overridden yet). Type arguments are inferred from arguments and from the expected type (`const t: Todo = try req.json()`). Bodies are checked once, at definition: a `T` can only be used through its bound.
+- `function f<T>(x: T): T`, `function g<T extends I>(...)`, `type Box<T> = { value: T }`, generic classes, and generic methods (`static of<T>(x: T)`, `json<T>(): Promise<T, SyntaxError>`; a generic method can't be overridden yet). Type arguments are inferred from arguments and from the expected type (`const t: Todo = try await req.json()`). Bodies are checked once, at definition: a `T` can only be used through its bound.
 
 ## 4. Declarations and statements **[M0]**
 - `function`, `const`, `let`, `type`, `interface`, arrow functions `(x: T) => expr` / `=> { ... }`, and methods in object literals (`{ fetch(req) { ... } }`, a field holding an arrow function).
@@ -149,8 +149,11 @@ Node's names, so existing habits work:
 - Rest parameters: `function f(first: T, ...rest: U[])` (not in methods yet).
 - Web servers: see §7c.
 
-## 7b. Async (synchronous until M6)
-`async` functions, arrows and methods, and `await`, are accepted so web-style code ports unchanged; for now they run synchronously: `await e` is `e`, and a `Promise<T>` is its `T`. An `async` call finishes before the caller continues, so code whose output depends on interleaving (two un-awaited tasks) behaves differently; request handlers and `await req.json()` behave as in Bun. `for await` is not supported.
+## 7b. Async
+`async` functions, arrows and object-literal methods, and `await`, work as in JavaScript, including the order things run in: microtasks run in order after each timer or request, and an `await` takes the same number of ticks as in Node and Bun (`tests/async` compares every program's output with Node's). A script's top level can `await`, and `main` can be `async`. Not yet: `async` class methods, `for await`, `Promise.all`/`race`/`allSettled`/`any`, `.then`/`.catch`/`.finally`.
+- **Promises.** An async function returns `Promise<T>`; its errors reject the promise instead of being thrown at the call: `async function load(id: string): Promise<User> throws NotFound` has type `(id: string) => Promise<User, NotFound>`. `await p` gives the `T`; if `p` can reject, `await` throws, so it's marked `try` (or caught) like a call: `const u = try await load(id)`. Awaiting a value that isn't a promise gives the value. `new Promise<T>((resolve, reject) => ...)` (it can reject only if the executor takes `reject`), `Promise.resolve(v)` and `Promise.reject(e)` make promises; a rejection nobody awaits is reported like an uncaught error.
+- **Timers.** `setTimeout(f, ms)` and `setInterval(f, ms)` return an id for `clearTimeout`/`clearInterval`; `queueMicrotask(f)`. Timers keep time as Node's do (whole milliseconds on the loop's clock) and fire within about 0.1 ms of it.
+- **Running.** An async function runs until its first `await` that has to wait. Awaiting a call to an async function costs no allocation (its state lives inside the caller's); a call that isn't awaited runs as a task of its own. The program exits when nothing is left to run: no timers, tasks waiting on them, or servers.
 
 ## 7c. Web servers (Bun's API)
 `Bun.serve`, `Request`, `Response`, `Headers`, `URL` and `URLSearchParams` are globals, as in Bun (also `import { serve, ... } from "std/http"`). A Bun server ports with Barm's usual edits only — `try` on calls that can throw, `.byteLength` for `.length` on strings; `tests/parity` runs a Bun server and its port side by side and compares every response.
@@ -178,8 +181,9 @@ console.log(`Listening on ${server.url}`)
 ```
 - **Serving.** `Bun.serve` binds right away (an unusable port prints the error and exits, as an uncaught error does in Bun) and returns a `Server` (`port`, `hostname`, `url`, `stop(closeActive?)`); requests are served once the script's top level (or `main`) has finished, until every server is stopped. `workers: n` (Barm only) forks `n` processes sharing the sockets, supervised: a worker that dies is replaced, and SIGTERM/SIGINT stop them all.
 - **Routing** as in Bun: exact paths first, then `:param` and `/*` routes; a route is a `Response`, a handler, or an object of per-method handlers (`GET`, `POST`, ...; others fall through to `fetch`). `req.params` is typed from the route. Unmatched requests go to `fetch`, else `404`.
-- **Errors.** Handlers can throw (their type is `(req, server) => Response throws Error`): the error is logged to stderr and answered by `error(err)` if given, else `500 Something went wrong!`, like Bun in production.
-- **Types.** `Request`: `method`, `url`, `headers`, `text()`, `json<T>()` (checked against the expected type, throws `SyntaxError`). `Response(body?, { status?, statusText?, headers? })`, `Response.json(value, init?)`, `Response.redirect(url, status?)`, `status`, `ok`, `headers`, `text()`, `json<T>()`. `Headers(init?)`: `get`/`has`/`set`/`append`/`delete`/`forEach`/`toJSON`, case-insensitive; CR/LF in names and values are dropped. `URL(input, base?)` (throws `TypeError`): `href`, `protocol`, `host`, `hostname`, `port`, `pathname`, `search`, `hash`, `origin`, `searchParams`; `URL.parse`, `URL.canParse`. `URLSearchParams`: `get`/`getAll`/`has`/`set`/`append`/`delete`/`size`/`toString`.
+- **Handlers** return a `Response`, or (`async`) a promise of one: their type is `(req, server) => Response | Promise<Response, Error> throws Error`. A synchronous response is written at once; an async one when its promise settles, and responses on a connection still go out in request order (pipelining works either way).
+- **Errors.** A handler that throws (or whose promise rejects) is logged to stderr and answered by `error(err)` if given, else `500 Something went wrong!`, like Bun in production.
+- **Types.** `Request`: `method`, `url`, `headers`, `text()` (a `Promise<string>`), `json<T>()` (a `Promise<T, SyntaxError>`, parsed against the expected type). `Response(body?, { status?, statusText?, headers? })`, `Response.json(value, init?)`, `Response.redirect(url, status?)`, `status`, `ok`, `headers`, `text()`, `json<T>()` (promises, as on `Request`). `Headers(init?)`: `get`/`has`/`set`/`append`/`delete`/`forEach`/`toJSON`, case-insensitive; CR/LF in names and values are dropped. `URL(input, base?)` (throws `TypeError`): `href`, `protocol`, `host`, `hostname`, `port`, `pathname`, `search`, `hash`, `origin`, `searchParams`; `URL.parse`, `URL.canParse`. `URLSearchParams`: `get`/`getAll`/`has`/`set`/`append`/`delete`/`size`/`toString`.
 - **Protocol.** HTTP/1.1 with keep-alive, pipelining, `Content-Length` and chunked request bodies, `Expect: 100-continue` and `HEAD`; `content-length` and `date` are added, and `content-type: text/plain;charset=utf-8` when a body has none. Malformed or oversized requests get `400`/`413`/`431` and are closed.
 - Not yet: TLS, HTTP/2, WebSockets, streaming bodies, `Bun.file`, `fetch()` (the client).
 
