@@ -223,6 +223,167 @@ static uint64_t bm_hash_bytes(const void *data, size_t len) {
     return bm_mum(s1 ^ len, bm_mum(a ^ s2, b ^ seed));
 }
 
+/* ================================================================== sorting */
+
+/* LSD radix sort of 64-bit keys, 11-bit digits, skipping digits every key shares.
+ * `idx` (optional) is permuted alongside the keys. Stable. */
+void bm_radix64(uint64_t *keys, int64_t *idx, bm_int n) {
+    if (n < 2) return;
+    enum { BITS = 11, B = 1 << BITS, PASSES = 6 };
+    size_t *hist = calloc((size_t)PASSES * B, sizeof(size_t));
+    if (!hist) bm_trap("out of memory", "sort");
+    for (bm_int i = 0; i < n; i++) {
+        uint64_t k = keys[i];
+        for (int p = 0; p < PASSES; p++) hist[p * B + ((k >> (p * BITS)) & (B - 1))]++;
+    }
+    uint64_t *k2 = bm_alloc((size_t)n * sizeof(uint64_t));
+    int64_t *i2 = idx ? bm_alloc((size_t)n * sizeof(int64_t)) : NULL;
+    uint64_t *ks = keys, *kd = k2;
+    int64_t *is = idx, *id = i2;
+    for (int p = 0; p < PASSES; p++) {
+        size_t *h = hist + p * B;
+        int shift = p * BITS;
+        if (h[(ks[0] >> shift) & (B - 1)] == (size_t)n) continue;
+        size_t sum = 0;
+        for (int b = 0; b < B; b++) { size_t c = h[b]; h[b] = sum; sum += c; }
+        if (idx) {
+            for (bm_int i = 0; i < n; i++) { uint64_t k = ks[i]; size_t pos = h[(k >> shift) & (B - 1)]++; kd[pos] = k; id[pos] = is[i]; }
+            int64_t *ti = is; is = id; id = ti;
+        } else {
+            for (bm_int i = 0; i < n; i++) { uint64_t k = ks[i]; kd[h[(k >> shift) & (B - 1)]++] = k; }
+        }
+        uint64_t *tk = ks; ks = kd; kd = tk;
+    }
+    if (ks != keys) memcpy(keys, ks, (size_t)n * sizeof(uint64_t));
+    if (idx && is != idx) memcpy(idx, is, (size_t)n * sizeof(int64_t));
+    bm_free(k2);
+    if (i2) bm_free(i2);
+    free(hist);
+}
+/* Order-preserving 64-bit key for a double under the comparator `a - b`:
+ * both zeros share a key (they compare equal), NaN sorts last. */
+static inline uint64_t bm_f64_key(double x) {
+    uint64_t u;
+    if (x == 0) u = 0;
+    else if (x != x) u = 0x7FF8000000000000ull;
+    else memcpy(&u, &x, 8);
+    return (u >> 63) ? ~u : (u ^ 0x8000000000000000ull);
+}
+/* In-place radix sort of 64-bit keys, not stable (callers use it only where equal keys are
+ * indistinguishable). One in-place pass (American flag) splits the keys by the 11 highest bits
+ * on which they differ; buckets then finish with LSD radix sort through a scratch buffer the
+ * size of the bucket (small, in cache) — or, if a bucket is still large, recursively in place.
+ * Extra memory: the largest small bucket, not a copy of the array. */
+enum { BM_RX_SMALL = 1 << 15 };
+static void bm_lsd_bucket(uint64_t *k, size_t n, uint64_t *tmp, uint64_t diff) {
+    uint64_t *src = k, *dst = tmp;
+    for (int shift = 0; shift < 64; shift += 8) {
+        if (!((diff >> shift) & 255)) continue; /* a byte every key shares */
+        size_t cnt[256] = {0};
+        for (size_t i = 0; i < n; i++) cnt[(src[i] >> shift) & 255]++;
+        size_t pos = 0;
+        for (int b = 0; b < 256; b++) { size_t c = cnt[b]; cnt[b] = pos; pos += c; }
+        for (size_t i = 0; i < n; i++) { uint64_t v = src[i]; dst[cnt[(v >> shift) & 255]++] = v; }
+        uint64_t *t = src; src = dst; dst = t;
+    }
+    if (src != k) memcpy(k, src, n * sizeof *k);
+}
+/* Scratch for bucket sorts, grown to the largest bucket met (often a few KiB). */
+typedef struct bm_rx_tmp { uint64_t *p; size_t cap; } bm_rx_tmp;
+/* One American-flag pass on the digit at `shift` (counts `cnt`, bucket cursors `head`/`tail`
+ * of type T), then each bucket recursively. */
+#define BM_RX_PARTITION(T) \
+    for (size_t i = 0; i < n; i++) cnt[(k[i] >> shift) & (B - 1)]++; \
+    { T pos = 0; for (int b = 0; b < B; b++) { head[b] = pos; pos += cnt[b]; tail[b] = pos; } } \
+    for (int b = 0; b < B; b++) { \
+        while (head[b] < tail[b]) { \
+            uint64_t v = k[head[b]]; \
+            size_t d = (v >> shift) & (B - 1); \
+            while (d != (size_t)b) { /* cycle: place v, pick up what was there */ \
+                uint64_t t = k[head[d]]; \
+                k[head[d]++] = v; \
+                v = t; \
+                d = (v >> shift) & (B - 1); \
+            } \
+            k[head[b]++] = v; \
+        } \
+    } \
+    { size_t start = 0; \
+      for (int b = 0; b < B; b++) { \
+          if (shift > 0 && cnt[b] > 1) bm_radix_inplace(k + start, cnt[b], tmp); \
+          start += cnt[b]; \
+      } }
+static void bm_radix_inplace(uint64_t *k, size_t n, bm_rx_tmp *tmp) {
+    if (n < 64) {
+        for (size_t i = 1; i < n; i++) {
+            uint64_t v = k[i];
+            size_t j = i;
+            while (j > 0 && k[j - 1] > v) { k[j] = k[j - 1]; j--; }
+            k[j] = v;
+        }
+        return;
+    }
+    uint64_t diff = 0, k0 = k[0];
+    for (size_t i = 1; i < n; i++) diff |= k[i] ^ k0;
+    if (!diff) return;
+    if (n <= BM_RX_SMALL) {
+        if (tmp->cap < n) {
+            size_t cap = tmp->cap * 2 > n ? tmp->cap * 2 : n;
+            if (cap > BM_RX_SMALL) cap = BM_RX_SMALL;
+            tmp->p = bm_realloc(tmp->p, cap * sizeof(uint64_t));
+            tmp->cap = cap;
+        }
+        bm_lsd_bucket(k, n, tmp->p, diff);
+        return;
+    }
+    int top = 63 - __builtin_clzll(diff);
+    int shift = top >= 10 ? top - 10 : 0;
+    enum { B = 2048 };
+    /* 32-bit counts on the stack while they fit (24 KiB, no allocation), else 64-bit on the heap */
+    if (n <= UINT32_MAX) {
+        uint32_t cnt[B] = {0}, head[B], tail[B];
+        BM_RX_PARTITION(uint32_t)
+        return;
+    }
+    size_t *cnt = calloc(B * 3, sizeof(size_t));
+    if (!cnt) bm_trap("out of memory", "sort");
+    size_t *head = cnt + B, *tail = cnt + 2 * B;
+    BM_RX_PARTITION(size_t)
+    free(cnt);
+}
+/* xs.sort((a, b) => a - b) / (b - a) on f64[]: the doubles become order-preserving keys in
+ * place, are radix-sorted in place, and are decoded back. Equal keys are equal values (NaNs
+ * share one key; both zeros share a key and keep their original order: their signs are
+ * replayed in encounter order), so the unstable in-place sort is unobservable. No copy of the
+ * array is made. */
+void bm_sort_f64(double *a, bm_int n, bool desc) {
+    if (n < 2) return;
+    uint64_t *k = (uint64_t *)(void *)a;
+    uint8_t *zs = NULL;
+    bm_int nz = 0;
+    for (bm_int i = 0; i < n; i++) {
+        double x = a[i];
+        if (x == 0) {
+            if (!zs) zs = bm_alloc((size_t)n);
+            zs[nz++] = signbit(x) ? 1 : 0;
+        }
+        uint64_t key = bm_f64_key(x);
+        k[i] = desc ? ~key : key;
+    }
+    bm_rx_tmp tmp = { NULL, 0 };
+    bm_radix_inplace(k, (size_t)n, &tmp);
+    free(tmp.p);
+    uint64_t kz = desc ? ~0x8000000000000000ull : 0x8000000000000000ull;
+    bm_int zi = 0;
+    for (bm_int i = 0; i < n; i++) {
+        uint64_t key = desc ? ~k[i] : k[i];
+        if (k[i] == kz) { a[i] = zs[zi++] ? -0.0 : 0.0; continue; }
+        uint64_t u = (key >> 63) ? (key ^ 0x8000000000000000ull) : ~key;
+        memcpy(&a[i], &u, 8);
+    }
+    if (zs) bm_free(zs);
+}
+
 /* ================================================================== strings */
 
 const bm_strbuf bm_empty_strbuf = {-1, 0, {0}}; /* flexible-array initializer: GNU C (gcc, clang) */
