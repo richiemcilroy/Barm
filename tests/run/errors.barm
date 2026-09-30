@@ -1,0 +1,61 @@
+// Errors: throw, try/catch/finally, throws inference, `try` propagation, Error subclasses.
+
+class NotFound extends Error {
+  constructor(readonly key: string) {
+    super(`no such key: ${key}`)
+    this.name = "NotFound"
+  }
+}
+
+class BadInput extends Error {}
+
+function lookup(m: Map<string, int>, k: string): int throws NotFound {
+  const v = m.get(k)
+  if (v === undefined) {
+    throw new NotFound(k)
+  }
+  return v
+}
+
+function parsePositive(s: string): int {
+  const n = parseInt(s)
+  if (n === undefined || n < 0) {
+    throw new BadInput(`not a positive number: ${s}`)
+  }
+  return n
+}
+
+function sum(m: Map<string, int>, keys: string[]): int {
+  let total = 0
+  for (const k of keys) {
+    total += try lookup(m, k)
+  }
+  return total
+}
+
+function main() {
+  const m = new Map<string, int>()
+  m.set("a", 1)
+  m.set("b", 2)
+  try {
+    console.log(sum(m, ["a", "b"]))
+    console.log(sum(m, ["a", "zzz"]))
+    console.log("not reached")
+  } catch (e) {
+    console.log("caught", e.name, e.message)
+    if (e instanceof NotFound) {
+      console.log("missing key", e.key)
+    }
+  }
+  for (const s of ["12", "-3", "-40"]) {
+    try {
+      console.log(parsePositive(s))
+    } catch (e) {
+      console.log(e.message)
+    } finally {
+      console.log("done", s)
+    }
+  }
+  const err = new Error("plain")
+  console.log(`${err}`, String(new BadInput()))
+}

@@ -1,0 +1,201 @@
+// Classes: shared references, inheritance, overrides, getters, statics, generics, weak fields.
+
+abstract class Shape {
+  constructor(readonly name: string) {}
+  abstract area(): f64
+  describe(): string {
+    return `${this.name}: ${this.area().toFixed(2)}`
+  }
+  toString(): string {
+    return `<${this.name}>`
+  }
+}
+
+class Circle extends Shape {
+  constructor(private r: f64) {
+    super("circle")
+  }
+  area(): f64 {
+    return Math.PI * this.r * this.r
+  }
+}
+
+class Rect extends Shape {
+  w: f64
+  h: f64
+  constructor(w: f64, h: f64) {
+    super("rect")
+    this.w = w
+    this.h = h
+  }
+  area() {
+    return this.w * this.h
+  }
+  get perimeter(): f64 {
+    return 2 * (this.w + this.h)
+  }
+}
+
+class Square extends Rect {
+  constructor(side: f64) {
+    super(side, side)
+  }
+  describe(): string {
+    return "square! " + super.describe()
+  }
+}
+
+class Counter {
+  count = 0
+  static readonly START = 10
+  increment(): int {
+    this.count++
+    return this.count
+  }
+  static make(): Counter {
+    const c = new Counter()
+    c.count = Counter.START
+    return c
+  }
+}
+
+class Stack<T> {
+  private items: T[] = []
+  push(x: T) {
+    this.items.push(x)
+  }
+  pop(): T | undefined {
+    return this.items.pop()
+  }
+  get size(): int {
+    return this.items.length
+  }
+}
+
+class Tree {
+  constructor(readonly value: int, readonly left: Tree | undefined, readonly right: Tree | undefined) {}
+  sum(): int {
+    let s = this.value
+    if (this.left !== undefined) {
+      s += this.left.sum()
+    }
+    if (this.right !== undefined) {
+      s += this.right.sum()
+    }
+    return s
+  }
+}
+
+cyclic class Folder {
+  children: Folder[] = []
+  weak parent: Folder | undefined = undefined
+  constructor(readonly name: string) {}
+  add(child: Folder) {
+    child.parent = this
+    this.children.push(child)
+  }
+  path(): string {
+    const p = this.parent
+    if (p === undefined) {
+      return this.name
+    }
+    return p.path() + "/" + this.name
+  }
+}
+
+class Point {
+  constructor(public x: int, public y: int) {}
+}
+
+type Pet = Cat | Dog
+
+class Cat {
+  constructor(readonly lives: int) {}
+}
+
+class Dog {
+  tricks: string[] = []
+}
+
+function makeAdder(p: Point): () => int {
+  return () => p.x + p.y
+}
+
+class Button {
+  clicks = 0
+  handler(): () => void {
+    return () => {
+      this.clicks++
+    }
+  }
+}
+
+function main() {
+  const shapes: Shape[] = [new Circle(1), new Rect(2, 3), new Square(2)]
+  for (const s of shapes) {
+    console.log(s.describe())
+    if (s instanceof Rect) {
+      console.log("perimeter", s.perimeter)
+    }
+  }
+  console.log(`${shapes[0]!}`, String(shapes[1]!))
+
+  const c = Counter.make()
+  c.increment()
+  console.log(c.count, Counter.START)
+
+  const st = new Stack<int>()
+  st.push(1)
+  st.push(2)
+  console.log(st.pop(), st.size)
+  const names = new Stack<string>()
+  names.push("a")
+  console.log(names.pop(), names.pop(), names.size)
+
+  const t = new Tree(1, new Tree(2, undefined, undefined), new Tree(3, new Tree(4, undefined, undefined), undefined))
+  console.log(t.sum())
+
+  const root = new Folder("root")
+  const docs = new Folder("docs")
+  root.add(docs)
+  const notes = new Folder("notes")
+  docs.add(notes)
+  console.log(notes.path(), root.children.length)
+
+  // References are shared: a change through one is seen through the other.
+  const p = new Point(1, 2)
+  const q = p
+  q.x = 10
+  console.log(p.x, p === q, p === new Point(10, 2))
+  const add = makeAdder(p)
+  p.y = 5
+  console.log(add())
+  console.log(p, [p, new Point(3, 4)])
+  console.log(new Counter(), t.left)
+
+  const pets: Pet[] = [new Cat(9), new Dog()]
+  for (const pet of pets) {
+    if (pet instanceof Cat) {
+      console.log("cat with", pet.lives, "lives")
+    } else {
+      pet.tricks.push("sit")
+      console.log("dog", pet.tricks)
+    }
+  }
+
+  const b = new Button()
+  const h = b.handler()
+  h()
+  h()
+  console.log(b.clicks)
+
+  const maybe: Counter | undefined = undefined
+  console.log(maybe?.increment(), c?.increment())
+
+  const seen = new Map<Point, string>()
+  seen.set(p, "p")
+  console.log(seen.get(p), seen.get(new Point(10, 5)), seen.size)
+  const sh: Shape = shapes[2]!
+  const r = sh as Rect
+  console.log(r.w)
+}
