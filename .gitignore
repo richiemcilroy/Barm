@@ -2,3 +2,6 @@
 .DS_Store
 bench/http/out/
 bench/http/rust/target/
+
+# Internal: the design doc stays local
+docs/design.md
