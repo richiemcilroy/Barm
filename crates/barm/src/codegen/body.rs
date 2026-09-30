@@ -82,6 +82,9 @@ pub(crate) struct Body {
     /// Array locals pushed in a loop that nothing else in it can reallocate: the C variable
     /// holding their capacity (pushes compare against it instead of reloading it).
     pub push_caps: FxMap<u32, String>,
+    /// Array locals whose capacity was reserved before a loop for every push it can make
+    /// (see `reserve_for_pushes`): those pushes store without a capacity check.
+    pub exact_pushes: FxSet<u32>,
 }
 
 /// A function whose `return a + f(args)` self-calls run as a loop: the function (module,
@@ -236,6 +239,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             tre: None,
             in_bounds: Vec::new(),
             push_caps: FxMap::default(),
+            exact_pushes: FxSet::default(),
         });
     }
 
@@ -424,6 +428,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             tre: self.pending_tre.take(),
             in_bounds: Vec::new(),
             push_caps: FxMap::default(),
+            exact_pushes: FxSet::default(),
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
             let access = if inout { format!("(*p{i})") } else { format!("p{i}") };
@@ -841,7 +846,9 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         let (ok, passed) = self.uniqueness_uses(m, &all);
         let mut added = Vec::new();
-        let candidates: Vec<u32> = ok.iter().filter(|(k, v)| **v && (written.contains(k) || passed.contains(k))).map(|(k, _)| *k).collect();
+        // A local in a heap cell can be reassigned by any call into a closure that shares it.
+        let boxed = &self.b().boxed;
+        let candidates: Vec<u32> = ok.iter().filter(|(k, v)| **v && (written.contains(k) || passed.contains(k)) && !boxed.contains(k)).map(|(k, _)| *k).collect();
         for k in candidates {
             if self.b().unique.contains(&k) {
                 continue;
@@ -995,6 +1002,16 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             local(*obj)
         }).collect();
+        let mut push_counts: FxMap<u32, usize> = FxMap::default();
+        for &e in &all {
+            if let ExprKind::Call { callee, .. } = &ast.expr(e).kind
+                && let ExprKind::Member { obj, name, .. } = &ast.expr(*callee).kind
+                && self.sym(*name) == "push"
+                && let Some(k) = local(*obj)
+            {
+                *push_counts.entry(k).or_default() += 1;
+            }
+        }
         for xk in pushed {
             let Some(cv) = self.b().push_caps.get(&xk).cloned() else { continue };
             let (Some(xl), Some(il)) = (self.b().locals.get(&xk).cloned(), self.b().locals.get(&ik).cloned()) else { continue };
@@ -1011,7 +1028,18 @@ impl<'c, 'a> Gen<'c, 'a> {
             };
             let d = self.desc(et);
             let (xs, i) = (xl.access, il.access);
-            self.line(format!("if ({n} > {i} && bm_arr_len({xs}) + ({n} - {i}) > {cv}) {{ {xs} = bmg_reserve({xs}, {d}, bm_arr_len({xs}) + ({n} - {i})); {cv} = {xs}.p->cap; }}"));
+            // The loop runs exactly `n - i` times and pushes once per run when that push is the
+            // only one onto `xs` in it and no heap closure can change `xs`, `i` or `n`: then the
+            // reservation covers every push. (A count too large to add up can't be allocated.)
+            let pushes = push_counts.get(&xk).copied().unwrap_or(0);
+            let b = self.b();
+            let exact = pushes == 1 && !b.boxed.contains(&xk) && !b.boxed.contains(&ik) && bound.is_none_or(|k| !b.mutated.contains(&k) && !b.boxed.contains(&k));
+            if exact {
+                self.line(format!("if ({n} > {i}) {{ bm_int need_; if ((uint64_t){n} - (uint64_t){i} > (uint64_t)INT64_MAX || __builtin_add_overflow(bm_arr_len({xs}), (bm_int)((uint64_t){n} - (uint64_t){i}), &need_)) bm_trap(\"array too large\", NULL); if (need_ > {cv}) {{ {xs} = bmg_reserve({xs}, {d}, need_); {cv} = {xs}.p->cap; }} }}"));
+                self.b().exact_pushes.insert(xk);
+            } else {
+                self.line(format!("if ({n} > {i} && bm_arr_len({xs}) + ({n} - {i}) > {cv}) {{ {xs} = bmg_reserve({xs}, {d}, bm_arr_len({xs}) + ({n} - {i})); {cv} = {xs}.p->cap; }}"));
+            }
             return;
         }
     }
@@ -1020,6 +1048,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         for k in keys {
             self.b().unique.remove(&k);
             self.b().push_caps.remove(&k);
+            self.b().exact_pushes.remove(&k);
         }
     }
 
@@ -3189,6 +3218,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             tre: None,
             in_bounds: Vec::new(),
             push_caps: FxMap::default(),
+            exact_pushes: FxSet::default(),
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
             let access = if inout { format!("(*p{i})") } else { format!("p{i}") };

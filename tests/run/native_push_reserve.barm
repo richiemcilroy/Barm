@@ -1,0 +1,117 @@
+// Native-only: counted loops that push reserve the array's capacity up front, and when the
+// reservation covers every push, pushes skip the capacity check. Each loop here must still
+// produce exactly what pushing one element at a time would.
+
+function counted(n: int): int[] {
+  const xs: int[] = [100, 200]
+  for (let i = 0; i < n; i++) {
+    xs.push(i * 3)
+  }
+  return xs
+}
+
+function fromNegative(): string[] {
+  const out: string[] = []
+  for (let i = -3; i < 2; i++) {
+    out.push(`s${i}`)
+  }
+  return out
+}
+
+function literalBound(): f64[] {
+  const ys: f64[] = []
+  for (let i = 0; i < 5; i += 1) {
+    ys.push(i * 0.5)
+  }
+  return ys
+}
+
+// A second push from a closure: the reservation doesn't cover it, so pushes stay checked.
+function twoPushes(n: int): int[] {
+  let xs: int[] = []
+  const extra = () => {
+    xs.push(-1)
+  }
+  for (let i = 0; i < n; i++) {
+    xs.push(i)
+    extra()
+  }
+  return xs
+}
+
+// Two top-level pushes per iteration.
+function doubled(n: int): int[] {
+  const xs: int[] = []
+  for (let i = 0; i < n; i++) {
+    xs.push(i)
+    xs.push(i + 1000)
+  }
+  return xs
+}
+
+// The bound changes after the loop: still one push per iteration.
+function reassignedBound(): int[] {
+  let n = 4
+  const xs: int[] = []
+  for (let i = 0; i < n; i++) {
+    xs.push(i)
+  }
+  n = 0
+  return xs
+}
+
+// A copy of a parameter shares its caller's buffer: it's copied before the first push, and the
+// caller's array keeps its elements.
+function grown(xs: int[]): int[] {
+  let copy = xs
+  for (let i = 0; i < 3; i++) {
+    copy.push(i)
+  }
+  return copy
+}
+
+function shared(): string {
+  const a: int[] = [1, 2, 3]
+  const c = grown(a)
+  return `${a} ${c}`
+}
+
+// A closure reassigns the array mid-loop: pushes must see the new, empty array.
+function resetting(): int {
+  let xs: int[] = []
+  const reset = () => {
+    xs = []
+  }
+  for (let i = 0; i < 10000; i++) {
+    xs.push(i)
+    if (i % 1000 === 998) reset()
+  }
+  return xs.length
+}
+
+// A closure copies the array mid-loop: later writes must not reach the copy.
+function snapshots(): string {
+  let xs: int[] = [0, 0, 0, 0]
+  let saved: int[] = []
+  const save = () => {
+    saved = xs
+  }
+  for (let i = 0; i < 4; i++) {
+    if (i === 2) save()
+    xs[i] = i + 1
+  }
+  return `${saved} ${xs}`
+}
+
+function main() {
+  console.log(counted(0), counted(-5), counted(4))
+  console.log(fromNegative(), literalBound())
+  console.log(twoPushes(3), doubled(2), reassignedBound())
+  console.log(shared())
+  console.log(resetting(), snapshots())
+  let total = 0
+  for (let r = 0; r < 50; r++) {
+    total += counted(r).length
+  }
+  console.log(total)
+}

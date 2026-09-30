@@ -1766,6 +1766,8 @@ static inline void bmg_make_unique(bm_arr *a, const bm_type *t) {
 #define BMG_PUSH_C(T, arr, capv, desc, val) do { bm_arr *bmp_a = (arr); T bmp_v = (val); \
     if (__builtin_expect(bmp_a->len < (capv), 1)) ((T *)(void *)bmp_a->p->data)[bmp_a->len++] = bmp_v; \
     else { T bmp_s = bmp_v; *bmp_a = bmg_push_slow(*bmp_a, (desc), &bmp_s); (capv) = bmp_a->p->cap; } } while (0)
+/* Push with capacity reserved for it before the loop (reserve_for_pushes). */
+#define BMG_PUSH_X(T, arr, val) do { bm_arr *bmp_a = (arr); ((T *)(void *)bmp_a->p->data)[bmp_a->len++] = (val); } while (0)
 /* Mutable element access: copy-on-write, then a bounds-checked pointer. */
 static inline void *bmg_at_mut(bm_arr *a, const bm_type *t, size_t size, bm_int i, const char *loc) {
     bmg_make_unique(a, t);
