@@ -7,7 +7,13 @@ error[N0001] calls.barm:11:3: unknown name `ad`
   did you mean: add
   fix[maybe]: use `add`
 
-error[T0001] calls.barm:13:21: expected `string`, found `int | string`
+error[T0001] calls.barm:13:28: expected `string`, found `int`
+   13 |   const s: string = first([1, 2, 3]) ?? ""
+
+error[T0001] calls.barm:13:31: expected `string`, found `int`
+   13 |   const s: string = first([1, 2, 3]) ?? ""
+
+error[T0001] calls.barm:13:34: expected `string`, found `int`
    13 |   const s: string = first([1, 2, 3]) ?? ""
 
 error[T0001] calls.barm:15:25: expected `string[]`, found `int[]`
@@ -22,4 +28,4 @@ error[T0107] calls.barm:16:42: `string` has no member `startWith`
 error[T0202] calls.barm:17:3: `n` is not a function (its type is `int`)
    17 |   n()
 
-6 error(s)
+8 error(s)

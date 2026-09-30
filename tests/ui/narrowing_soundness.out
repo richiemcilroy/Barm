@@ -1,0 +1,18 @@
+error[T0501] narrowing_soundness.barm:9:12: can't apply `+` to `int | undefined` and `int`
+    9 |     return x + 1
+  why: one side may be `undefined`; narrow it or use `?? 0`
+
+error[T0120] narrowing_soundness.barm:19:12: `t.left` may be `undefined`
+   19 |     return t.left.v
+  narrow first: `if (t.left !== undefined) { ... }`
+  fix[maybe]: optional chaining: `t.left?.v`
+  fix[maybe]: assert defined (traps if not): `t.left!.v`
+
+error[T0001] narrowing_soundness.barm:47:12: expected `int`, found `int | undefined`
+   47 |     return x
+  context: return type of `h`
+  why: the value may be `undefined`
+  fix[placeholder]: provide a default: `?? <default>`
+  fix[maybe]: assert it is defined (traps if not): `!`
+
+3 error(s)

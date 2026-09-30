@@ -1,0 +1,50 @@
+// Narrowings don't survive assignments in nested blocks, loops or closures; branches join.
+type T = { v: int, left: T | undefined }
+function f(c: bool, x0: int | undefined): int {
+  let x = x0
+  if (x !== undefined) {
+    if (c) {
+      x = undefined
+    }
+    return x + 1
+  }
+  return 0
+}
+function g(c: bool): int {
+  let t: T = { v: 1, left: { v: 2, left: undefined } }
+  if (t.left !== undefined) {
+    if (c) {
+      t.left = undefined
+    }
+    return t.left.v
+  }
+  return 0
+}
+function f2(x0: int | undefined): int {
+  let x = x0
+  if (x === undefined) {
+    x = 7
+  }
+  return x + 1
+}
+function g2(x0: int | undefined, c: bool): int {
+  let x = x0
+  if (x !== undefined) {
+    let y = 0
+    while (c) {
+      y = x
+      break
+    }
+    return x + y
+  }
+  return 0
+}
+function h(x0: int | undefined): int {
+  let x = x0
+  const clear = () => { x = undefined }
+  if (x !== undefined) {
+    clear()
+    return x
+  }
+  return 0
+}

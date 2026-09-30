@@ -1,0 +1,30 @@
+error[T0831] errors.barm:14:10: `connect` can throw `Timeout`; mark the call `try` to pass the error on, or catch it
+   14 |   return connect("x")
+  why: errors are values in Barm: every call that can fail is marked, so control flow is visible
+  or: wrap it in `try { ... } catch (e) { ... }`
+  fix[safe]: pass it on: `try connect("x")`
+
+error[T0833] errors.barm:18:14: this can throw `Timeout`, but the function declares `throws Refused`
+   18 |   return try connect("x")
+  instead: widen the declaration (`throws Refused | Timeout`), or catch it here
+
+error[T0830] errors.barm:21:17: exported function `leaky` can throw `Refused` but doesn't declare it
+   21 | export function leaky(s: string): int {
+  why: exported signatures are the module's interface; callers need to know what can go wrong
+  fix[safe]: declare `throws Refused`
+
+error[T0832] errors.barm:29:28: `connect` can throw `Timeout`, but a closure can't pass errors on
+   29 |   return xs.map((h) => try connect(h))
+  instead: catch it inside the closure: `try { ... } catch (e) { ... }`
+
+error[T0834] errors.barm:33:9: can only throw `Error` objects, found `"just a string"`
+   33 |   throw "just a string"
+  fix[maybe]: throw an Error: `new Error("just a string")`
+
+error[T0831] errors.barm:45:27: `narrow` can throw `Refused`; mark the call `try` to pass the error on, or catch it
+   45 |   console.log(unmarked(), narrow(), ok())
+  why: errors are values in Barm: every call that can fail is marked, so control flow is visible
+  or: wrap it in `try { ... } catch (e) { ... }`
+  fix[safe]: pass it on: `try narrow()`
+
+6 error(s)

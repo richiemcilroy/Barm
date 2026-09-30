@@ -18,8 +18,9 @@ error[N0105] imports/main.barm:3:23: imports name Barm modules without an extens
     3 | import { other } from "./lib.ts"
   fix[safe]: use "./lib"
 
-error[N0103] imports/main.barm:4:21: the standard library module "std/fs" is not available yet (planned for M3)
-    4 | import * as fs from "std/fs"
+error[N0103] imports/main.barm:4:21: the Node module "sockets" is not available yet
+    4 | import * as fs from "std/sockets"
+  available: node:fs, node:path
 
 error[X0011] imports/main.barm:5:8: default imports are not supported
     5 | import lodash from "lodash"
