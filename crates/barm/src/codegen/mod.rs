@@ -478,7 +478,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         // recursion — including freeing long linked structures — has room without per-call checks.
         let _ = writeln!(
             self.funcs,
-            "static int bmg_argc; static char **bmg_argv; static int bmg_exit;\nstatic int bmg_program(void) {{\n    bm_init(bmg_argc, bmg_argv);\n{init}{main_body}}}\nstatic void *bmg_thread(void *arg) {{ (void)arg; bmg_exit = bmg_program(); return NULL; }}\nint main(int argc, char **argv) {{\n    bmg_argc = argc; bmg_argv = argv;\n#if defined(__APPLE__)\n    /* Linked with a 512 MiB main stack (build.rs): run right here. */\n    if (pthread_get_stacksize_np(pthread_self()) >= ((size_t)256 << 20)) return bmg_program();\n#endif\n    pthread_attr_t attr; pthread_t th;\n    if (pthread_attr_init(&attr) == 0 && pthread_attr_setstacksize(&attr, (size_t)1 << 30) == 0 && BMG_THREAD_QOS(&attr) && pthread_create(&th, &attr, bmg_thread, NULL) == 0) {{\n        pthread_join(th, NULL);\n        return bmg_exit;\n    }}\n    return bmg_program();\n}}"
+            "static int bmg_argc; static char **bmg_argv; static int bmg_exit;\nstatic int bmg_program(void) {{\n    bm_init(bmg_argc, bmg_argv);\n{init}{main_body}}}\nstatic void *bmg_thread(void *arg) {{ (void)arg; bmg_exit = bmg_program(); return NULL; }}\nint main(int argc, char **argv) {{\n    bmg_argc = argc; bmg_argv = argv;\n#if defined(__APPLE__) && defined(BMG_MAIN_STACK)\n    /* Linked with a 512 MiB main stack (build.rs): run right here. */\n    return bmg_program();\n#elif defined(__APPLE__)\n    if (pthread_get_stacksize_np(pthread_self()) >= ((size_t)256 << 20)) return bmg_program();\n#endif\n    pthread_attr_t attr; pthread_t th;\n    if (pthread_attr_init(&attr) == 0 && pthread_attr_setstacksize(&attr, (size_t)1 << 30) == 0 && BMG_THREAD_QOS(&attr) && pthread_create(&th, &attr, bmg_thread, NULL) == 0) {{\n        pthread_join(th, NULL);\n        return bmg_exit;\n    }}\n    return bmg_program();\n}}"
         );
     }
 
@@ -1836,6 +1836,29 @@ static void bmg_lsd_bucket(uint64_t *k, size_t n, uint64_t *tmp, uint64_t diff) 
 }
 /* Scratch for bucket sorts, grown to the largest bucket met (often a few KiB). */
 typedef struct bmg_rx_tmp { uint64_t *p; size_t cap; } bmg_rx_tmp;
+/* One American-flag pass on the digit at `shift` (counts `cnt`, bucket cursors `head`/`tail`
+ * of type T), then each bucket recursively. */
+#define BMG_RX_PARTITION(T) \
+    for (size_t i = 0; i < n; i++) cnt[(k[i] >> shift) & (B - 1)]++; \
+    { T pos = 0; for (int b = 0; b < B; b++) { head[b] = pos; pos += cnt[b]; tail[b] = pos; } } \
+    for (int b = 0; b < B; b++) { \
+        while (head[b] < tail[b]) { \
+            uint64_t v = k[head[b]]; \
+            size_t d = (v >> shift) & (B - 1); \
+            while (d != (size_t)b) { /* cycle: place v, pick up what was there */ \
+                uint64_t t = k[head[d]]; \
+                k[head[d]++] = v; \
+                v = t; \
+                d = (v >> shift) & (B - 1); \
+            } \
+            k[head[b]++] = v; \
+        } \
+    } \
+    { size_t start = 0; \
+      for (int b = 0; b < B; b++) { \
+          if (shift > 0 && cnt[b] > 1) bmg_radix_inplace(k + start, cnt[b], tmp); \
+          start += cnt[b]; \
+      } }
 static void bmg_radix_inplace(uint64_t *k, size_t n, bmg_rx_tmp *tmp) {
     if (n < 64) {
         for (size_t i = 1; i < n; i++) {
@@ -1862,30 +1885,16 @@ static void bmg_radix_inplace(uint64_t *k, size_t n, bmg_rx_tmp *tmp) {
     int top = 63 - __builtin_clzll(diff);
     int shift = top >= 10 ? top - 10 : 0;
     enum { B = 2048 };
+    /* 32-bit counts on the stack while they fit (24 KiB, no allocation), else 64-bit on the heap */
+    if (n <= UINT32_MAX) {
+        uint32_t cnt[B] = {0}, head[B], tail[B];
+        BMG_RX_PARTITION(uint32_t)
+        return;
+    }
     size_t *cnt = calloc(B * 3, sizeof(size_t));
     if (!cnt) bm_trap("out of memory", "sort");
     size_t *head = cnt + B, *tail = cnt + 2 * B;
-    for (size_t i = 0; i < n; i++) cnt[(k[i] >> shift) & (B - 1)]++;
-    size_t pos = 0;
-    for (int b = 0; b < B; b++) { head[b] = pos; pos += cnt[b]; tail[b] = pos; }
-    for (int b = 0; b < B; b++) {
-        while (head[b] < tail[b]) {
-            uint64_t v = k[head[b]];
-            size_t d = (v >> shift) & (B - 1);
-            while (d != (size_t)b) { /* cycle: place v, pick up what was there */
-                uint64_t t = k[head[d]];
-                k[head[d]++] = v;
-                v = t;
-                d = (v >> shift) & (B - 1);
-            }
-            k[head[b]++] = v;
-        }
-    }
-    size_t start = 0;
-    for (int b = 0; b < B; b++) {
-        if (shift > 0 && cnt[b] > 1) bmg_radix_inplace(k + start, cnt[b], tmp);
-        start += cnt[b];
-    }
+    BMG_RX_PARTITION(size_t)
     free(cnt);
 }
 /* xs.sort((a, b) => a - b) / (b - a) on f64[]: the doubles become order-preserving keys in
