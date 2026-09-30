@@ -160,6 +160,58 @@ try {
   console.log(`second read: ${describe(e)}`)
 }
 
+// streaming bodies: fetch() resolves at the head, and the body arrives as it's sent
+try {
+  const t0 = performance.now()
+  const r = await fetch(base + "/stream")
+  const head = performance.now() - t0
+  const decoder = new TextDecoder()
+  let text = ""
+  let firstAt = 0.0
+  for await (const chunk of r.body!) {
+    if (firstAt === 0.0) {
+      firstAt = performance.now() - t0
+    }
+    text += decoder.decode(chunk, { stream: true })
+  }
+  const all = performance.now() - t0
+  console.log(`stream: ${JSON.stringify(text)} early head=${head < 150} first chunk early=${firstAt < 150} all later=${all >= 150} used=${r.bodyUsed}`)
+} catch (e) {
+  console.log(`stream: ${describe(e)}`)
+}
+try {
+  const r = await fetch(base + "/stream")
+  const reader = r.body!.getReader()
+  const first = await reader.read()
+  console.log(`reader: done=${first.done} ${JSON.stringify(new TextDecoder().decode(first.value!))} locked=${r.body!.locked}`)
+  try {
+    await r.text()
+  } catch (e) {
+    console.log(`text() while streaming: ${describe(e)}`)
+  }
+  await reader.cancel()
+  console.log(`cancelled`)
+} catch (e) {
+  console.log(`reader: ${describe(e)}`)
+}
+try {
+  const r = await fetch(base + "/stream-cut")
+  console.log(`cut: head ${r.status}`)
+  await r.text()
+  console.log("cut: no error")
+} catch (e) {
+  console.log(`cut: ${describe(e)}`)
+}
+try {
+  const c = new AbortController()
+  const r = await fetch(base + "/slowbody", { signal: c.signal })
+  console.log(`abort mid-body: head ${r.status}`)
+  c.abort()
+  await r.text()
+} catch (e) {
+  console.log(`abort mid-body: ${describe(e)}`)
+}
+
 // connections
 // consecutive requests reuse the connection; after "Connection: close" a new one starts
 async function served(): Promise<number, Error> {

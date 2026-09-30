@@ -5217,8 +5217,14 @@ bool (*bm_decode_zstd)(const uint8_t *p, size_t n, bm_sb *out);
 
 typedef struct bm_fr {
     bm_int id;
-    int result;                /* 1 running, 0 done, < 0 failed */
-    bm_promise *done;          /* Promise<int> from fetchWait */
+    int result;                /* 1 running, 0 the whole response is in, < 0 failed */
+    int head_state;            /* 1 waiting for the response head, 0 it arrived, < 0 failed first */
+    bm_promise *done;          /* fetchWait: the head arrived (0) or the request failed */
+    bm_promise *body_p;        /* fetchBodyWait: the body is in (0) or failed */
+    bm_promise *read_p;        /* fetchRead: body bytes to take (> 0), the end (0), or failed */
+    bool streaming;            /* the body is read in chunks (res.body) */
+    bool paused;               /* ... and the reader is behind: the socket isn't read */
+    int shares;                /* Response.clone()s that will take the body too */
     struct bm_fr *dns_next;    /* waiting on a lookup */
     /* the request */
     bm_str method, headers, body, url;
@@ -5341,14 +5347,43 @@ static void bm_origin_unlink(bm_fc *c) {
 
 /* ---- failure */
 
+static void bm_fr_resolve(bm_promise **pp, bm_int v) {
+    bm_promise *p = *pp;
+    if (!p) return;
+    *pp = NULL;
+    bm_promise_resolve(p, &v);
+    bm_promise_release(p);
+}
+
+/* The response is complete (0), or the request failed (< 0) — before the head arrived, or while
+ * the body did. */
 static void bm_fr_settle(bm_fr *r, int result) {
     if (r->result != 1) return;
     r->result = result;
     bm_io_refs--;
-    if (r->done) {
-        bm_int v = result;
-        bm_promise_resolve(r->done, &v);
+    if (r->head_state == 1) {
+        r->head_state = result;
+        bm_fr_resolve(&r->done, result);
     }
+    bm_fr_resolve(&r->body_p, result);
+    bm_fr_resolve(&r->read_p, result == 0 && r->rbody.len ? (bm_int)r->rbody.len : result);
+}
+
+/* The final response's head is in: fetch() resolves (the body follows). */
+static void bm_fr_head_ready(bm_fr *r) {
+    if (r->head_state != 1) return;
+    r->head_state = 0;
+    bm_fr_resolve(&r->done, 0);
+}
+
+/* A body streamed as it arrives: at most this much waits for the reader before the socket pauses. */
+#define BM_STREAM_HIGH (4 << 20)
+
+/* Body bytes arrived: a waiting reader gets them (encoded bodies are decoded at the end). */
+static bool bm_fr_data(bm_fr *r) {
+    if (!r->streaming || (r->decompress && r->enc)) return false;
+    if (r->read_p && r->rbody.len) bm_fr_resolve(&r->read_p, (bm_int)r->rbody.len);
+    return r->rbody.len >= BM_STREAM_HIGH;
 }
 
 static void bm_fr_fail(bm_fr *r, const char *code, const char *fmt, ...) {
@@ -5636,6 +5671,7 @@ static void bm_fr_take(bm_fr *r, const char *p, size_t n) {
     if (r->discard) return;
     bm_sb_push(&r->rbody, p, n);
     bm_fr_check_utf8(r);
+    bm_fr_data(r);
 }
 
 /* Consumes what it can of the connection's input. 1: the response is complete, 0: needs more,
@@ -5661,6 +5697,7 @@ static int bm_fr_parse(bm_fr *r, bm_fc *c) {
                 r->state = BM_FR_HEAD; /* an interim response: the real one follows */
                 continue;
             }
+            if (!r->discard) bm_fr_head_ready(r);
             if (r->state == BM_FR_DONE) return 1;
             continue;
         }
@@ -6141,7 +6178,9 @@ static void bm_fc_ready(bm_io *h, bool readable, bool writable, bool broken) {
                 r->rbody.len += (size_t)n;
                 r->remaining -= n;
                 bm_fr_check_utf8(r);
+                bool full = bm_fr_data(r);
                 if (r->remaining == 0) { r->state = BM_FR_DONE; break; }
+                if (full) { r->paused = true; bm_fc_interest(c, false, false); break; }
                 /* TLS returns a record at a time: read until it has no more */
                 if ((size_t)n == want || c->tls) continue;
                 break;
@@ -6175,6 +6214,7 @@ static void bm_fc_ready(bm_io *h, bool readable, bool writable, bool broken) {
                 return;
             }
             if (st > 0) break;
+            if (r->streaming && r->rbody.len >= BM_STREAM_HIGH && !(r->decompress && r->enc)) { r->paused = true; bm_fc_interest(c, false, false); break; }
             if ((size_t)n == room || c->tls) continue;
             break;
         }
@@ -6261,6 +6301,7 @@ bm_int bm_native_fetchStart(bm_str method, bm_str url, bm_str headers, bm_str bo
     r->id = (bm_int)(((uint64_t)++bm_fr_gen << 32) | (uint64_t)(slot + 1));
     bm_fr_table[slot] = r;
     r->result = 1;
+    r->head_state = 1;
     bm_io_refs++;
     bm_str_retain(method);
     bm_str_retain(headers);
@@ -6289,21 +6330,73 @@ bm_int bm_native_fetchStart(bm_str method, bm_str url, bm_str headers, bm_str bo
     return r->id;
 }
 
-bm_promise *bm_native_fetchWait(bm_int id) {
+/* A Promise<int>: settled with `now` unless `pending`, else kept in *slot until it settles. */
+static bm_promise *bm_fr_promise(bm_promise **slot, bool pending, bm_int now) {
     bm_promise *p = bm_promise_new(&bm_type_int);
-    bm_fr *r = bm_fr_get(id);
-    if (!r) {
-        bm_int v = -1;
-        bm_promise_resolve(p, &v);
+    if (!pending || !slot) {
+        bm_promise_resolve(p, &now);
         return p;
     }
-    if (r->result != 1) {
-        bm_int v = r->result;
-        bm_promise_resolve(p, &v);
-        return p;
-    }
+    if (*slot) bm_promise_release(*slot); /* a reader asking again: the new promise replaces it */
     bm_promise_retain(p);
-    r->done = p;
+    *slot = p;
+    return p;
+}
+
+/* The response head arrived (0), or the request failed (< 0). */
+bm_promise *bm_native_fetchWait(bm_int id) {
+    bm_fr *r = bm_fr_get(id);
+    return bm_fr_promise(r ? &r->done : NULL, r && r->head_state == 1, r ? r->head_state : -1);
+}
+
+/* The whole body is in (0), or it failed (< 0). */
+bm_promise *bm_native_fetchBodyWait(bm_int id) {
+    bm_fr *r = bm_fr_get(id);
+    return bm_fr_promise(r ? &r->body_p : NULL, r && r->result == 1, r ? r->result : -1);
+}
+
+/* Streaming (res.body): bytes to take (> 0), the end (0), or a failure (< 0). */
+bm_promise *bm_native_fetchRead(bm_int id) {
+    bm_fr *r = bm_fr_get(id);
+    if (!r) return bm_fr_promise(NULL, false, -1);
+    r->streaming = true;
+    bool encoded = r->decompress && r->enc && r->result == 1; /* decoded when it's all in */
+    if (r->rbody.len && !encoded) return bm_fr_promise(NULL, false, (bm_int)r->rbody.len);
+    return bm_fr_promise(&r->read_p, r->result == 1, r->result);
+}
+
+/* The body bytes that have arrived (and haven't been taken). */
+bm_arr bm_native_fetchTake(bm_int id) {
+    bm_fr *r = bm_fr_get(id);
+    if (!r) return BM_EMPTY_ARR;
+    bm_arr a = bm_arr_with_capacity(&bm_type_u8, (bm_int)r->rbody.len);
+    if (r->rbody.len) memcpy(bm_arr_data(a), r->rbody.data, r->rbody.len);
+    a.len = (bm_int)r->rbody.len;
+    r->rbody.len = 0;
+    if (r->paused && r->c) {
+        /* the reader caught up: read on (what's buffered in TLS or unparsed won't raise an event) */
+        r->paused = false;
+        bm_fc *c = r->c;
+        bm_fc_interest(c, true, false);
+        bm_fc_ready(&c->io, true, false, false);
+    }
+    return a;
+}
+
+/* Response.clone(): one more reader will take the whole body. */
+void bm_native_fetchShare(bm_int id) {
+    bm_fr *r = bm_fr_get(id);
+    if (r) r->shares++;
+}
+
+static void bm_fetch_handle_release(void *p) { bm_native_fetchFree(*(bm_int *)p); }
+static const bm_type bm_type_fetch_handle = { sizeof(bm_int), NULL, bm_fetch_handle_release, NULL, NULL, NULL, NULL };
+
+/* A Response's hold on request `id`: a settled promise whose release (the Response going away)
+ * frees the request, and aborts it if the body is still arriving. */
+bm_promise *bm_native_fetchHandle(bm_int id) {
+    bm_promise *p = bm_promise_new(&bm_type_fetch_handle);
+    bm_promise_resolve(p, &id);
     return p;
 }
 
@@ -6327,7 +6420,12 @@ bool bm_native_fetchBodyClean(bm_int id) {
 
 bm_str bm_native_fetchBody(bm_int id) {
     bm_fr *r = bm_fr_get(id);
-    return r ? bm_str_from_sb(&r->rbody) : BM_EMPTY_STR;
+    if (!r) return BM_EMPTY_STR;
+    if (r->shares > 0) { /* a clone reads it too */
+        r->shares--;
+        return bm_str_from(r->rbody.data, r->rbody.len);
+    }
+    return bm_str_from_sb(&r->rbody);
 }
 bm_str bm_native_fetchErrorCode(bm_int id) {
     bm_fr *r = bm_fr_get(id);
@@ -6367,6 +6465,8 @@ void bm_native_fetchFree(bm_int id) {
     bm_fr_table[slot] = NULL;
     bm_fr_free[bm_fr_nfree++] = slot;
     if (r->done) bm_promise_release(r->done);
+    if (r->body_p) bm_promise_release(r->body_p);
+    if (r->read_p) bm_promise_release(r->read_p);
     bm_str_release(r->method);
     bm_str_release(r->headers);
     bm_str_release(r->body);
@@ -6552,4 +6652,19 @@ bm_arr bm_native_headerValues(bm_str block, bm_str name) {
         s = nl + 1;
     }
     return out;
+}
+
+/* TextDecoder's stream mode: how many of the bytes form whole characters, leaving out a character
+ * cut off at the end (still valid so far: more bytes may complete it). */
+bm_int bm_native_utf8Complete(bm_arr bytes) {
+    const uint8_t *p = bm_arr_data(bytes);
+    size_t n = (size_t)bytes.len;
+    /* look back at most 3 bytes for the start of the last character */
+    for (size_t back = 1; back <= 3 && back <= n; back++) {
+        uint8_t c = p[n - back];
+        if ((c & 0xC0) == 0x80) continue; /* a continuation byte: keep looking */
+        size_t need = c >= 0xC2 && c <= 0xDF ? 2 : c >= 0xE0 && c <= 0xEF ? 3 : c >= 0xF0 && c <= 0xF4 ? 4 : 1;
+        return (bm_int)(need > back ? n - back : n);
+    }
+    return (bm_int)n;
 }

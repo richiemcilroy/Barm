@@ -450,6 +450,12 @@ export class Response {
   private wasRedirected: bool
   // the body is valid UTF-8 without a BOM: text() returns it as it is
   private clean: bool
+  // a fetch() response: its request (0 otherwise), whose body arrives after the head; the
+  // handle frees the request when the response goes away
+  private id: int
+  private handle: Promise<int> | undefined
+  private signal: AbortSignal | undefined
+  private stream: ReadableStream | undefined
 
   constructor(body?: BodyInit, init?: ResponseInit) {
     this.bodyText = body === undefined ? "" : bodyText(body)
@@ -466,17 +472,22 @@ export class Response {
     this.finalUrl = ""
     this.wasRedirected = false
     this.clean = (body === undefined || typeof body === "string" || body instanceof URLSearchParams) && !this.bodyText.startsWith("\uFEFF")
+    this.id = 0
+    this.handle = undefined
+    this.signal = undefined
+    this.stream = undefined
   }
 
-  // Internal: the response to fetch() request `id`.
-  static fetched(id: int): Response {
-    // (checked while the body arrived; asked before fetchBody moves the body out)
-    const clean = __native.fetchBodyClean(id)
-    const r = new Response(__native.fetchBody(id), { status: __native.fetchStatus(id), statusText: __native.fetchStatusText(id) })
-    r.clean = clean
+  // Internal: the response to fetch() request `id`, whose head has arrived.
+  static fetched(id: int, signal: AbortSignal | undefined): Response {
+    const r = new Response(undefined, { status: __native.fetchStatus(id), statusText: __native.fetchStatusText(id) })
     r.rawHeaders = __native.fetchHeaders(id)
     r.finalUrl = __native.fetchUrl(id)
     r.wasRedirected = __native.fetchRedirected(id)
+    r.hasBody = true
+    r.id = id
+    r.handle = __native.fetchHandle(id)
+    r.signal = signal
     return r
   }
 
@@ -501,50 +512,76 @@ export class Response {
     return "default"
   }
 
-  // The body has been read (it can be read once).
+  // The body has been read, or its stream started (it can be read once).
   get bodyUsed(): bool {
-    return this.used
+    const st = this.stream
+    return this.used || (st !== undefined && st.disturbed)
+  }
+
+  // The body as a stream of byte chunks (undefined for a response made without a body).
+  get body(): ReadableStream | undefined {
+    const st = this.stream
+    if (st !== undefined) {
+      return st
+    }
+    if (this.id === 0 && !this.hasBody) {
+      return undefined
+    }
+    const made = this.id !== 0 ? ReadableStream.fetched(this.id, this.handle, this.signal) : ReadableStream.of(__native.stringToBytes(this.bodyText))
+    this.stream = made
+    return made
+  }
+
+  // Internal: marks the body read (or rejects), and for a fetch() response waits for all of it.
+  async whole(): Promise<string> throws Error {
+    if (this.bodyUsed) {
+      throw new FetchError("Body already used", "ERR_BODY_ALREADY_USED")
+    }
+    this.used = true
+    const id = this.id
+    if (id === 0) {
+      return this.bodyText
+    }
+    const r = await __native.fetchBodyWait(id)
+    const signal = this.signal
+    if (signal !== undefined) {
+      signal.unwatch(id)
+    }
+    if (r !== 0) {
+      if (r === -2 && signal !== undefined) {
+        try signal.throwIfAborted()
+      }
+      throw new FetchError(__native.fetchErrorMessage(id), __native.fetchErrorCode(id))
+    }
+    this.clean = __native.fetchBodyClean(id)
+    return __native.fetchBody(id)
   }
 
   // The body as text (invalid UTF-8 becomes U+FFFD, a leading BOM is dropped).
-  text(): Promise<string, TypeError> {
-    if (this.used) {
-      return Promise.reject(new FetchError("Body already used", "ERR_BODY_ALREADY_USED"))
-    }
-    this.used = true
-    return Promise.resolve(this.clean ? this.bodyText : __native.utf8Clean(this.bodyText))
+  async text(): Promise<string> throws Error {
+    const body = try await this.whole()
+    return this.clean ? body : __native.utf8Clean(body)
   }
 
   // The body parsed as JSON, checked against the type the context expects.
-  json<T>(): Promise<T, SyntaxError | TypeError> {
-    if (this.used) {
-      return Promise.reject(new FetchError("Body already used", "ERR_BODY_ALREADY_USED"))
-    }
-    this.used = true
-    try {
-      const value: T = JSON.parse(this.clean ? this.bodyText : __native.utf8Clean(this.bodyText))
-      return Promise.resolve(value)
-    } catch (e) {
-      return Promise.reject(e)
-    }
+  async json<T>(): Promise<T> throws Error {
+    const text = try await this.text()
+    const value: T = try JSON.parse(text)
+    return value
   }
 
   // The body's bytes (Bun's `bytes()`; a `u8[]` stands in for Uint8Array).
-  bytes(): Promise<u8[], TypeError> {
-    if (this.used) {
-      return Promise.reject(new FetchError("Body already used", "ERR_BODY_ALREADY_USED"))
-    }
-    this.used = true
-    return Promise.resolve(__native.stringToBytes(this.bodyText))
+  async bytes(): Promise<u8[]> throws Error {
+    return __native.stringToBytes(try await this.whole())
   }
 
-  arrayBuffer(): Promise<u8[], TypeError> {
-    return this.bytes()
+  async arrayBuffer(): Promise<u8[]> throws Error {
+    return try await this.bytes()
   }
 
   // A copy that can be read separately.
   clone(): Response throws TypeError {
-    if (this.used) {
+    if (this.bodyUsed) {
       throw new FetchError("Body already used", "ERR_BODY_ALREADY_USED")
     }
     const r = new Response(this.bodyText, { status: this.status, statusText: this.statusText })
@@ -553,6 +590,13 @@ export class Response {
     r.finalUrl = this.finalUrl
     r.wasRedirected = this.wasRedirected
     r.clean = this.clean
+    if (this.id !== 0) {
+      // both read the whole body (the request keeps it until the second has it)
+      __native.fetchShare(this.id)
+      r.id = this.id
+      r.handle = this.handle
+      r.signal = this.signal
+    }
     return r
   }
 
@@ -968,6 +1012,205 @@ export class AbortController {
   }
 }
 
+// Text to UTF-8 bytes (`u8[]` stands in for Uint8Array).
+export class TextEncoder {
+  readonly encoding: string
+
+  constructor() {
+    this.encoding = "utf-8"
+  }
+
+  encode(input?: string): u8[] {
+    return __native.stringToBytes(input ?? "")
+  }
+}
+
+export type TextDecoderOptions = { fatal?: bool, ignoreBOM?: bool }
+export type TextDecodeOptions = { stream?: bool }
+
+// UTF-8 bytes to text: invalid bytes become U+FFFD and a leading BOM is dropped (unless
+// `ignoreBOM`). With `{ stream: true }` a character cut off at the end of one chunk is
+// completed by the next, so a body's chunks decode as the whole would.
+export class TextDecoder {
+  readonly encoding: string
+  readonly fatal: bool
+  readonly ignoreBOM: bool
+  private pending: u8[]
+  private started: bool
+
+  constructor(label?: string, options?: TextDecoderOptions) throws RangeError {
+    const l = (label ?? "utf-8").trim().toLowerCase()
+    if (l !== "utf-8" && l !== "utf8" && l !== "unicode-1-1-utf-8") {
+      throw new RangeError(`The "${label ?? ""}" encoding is not supported`)
+    }
+    this.encoding = "utf-8"
+    this.fatal = options?.fatal ?? false
+    this.ignoreBOM = options?.ignoreBOM ?? false
+    this.pending = []
+    this.started = false
+  }
+
+  decode(input?: u8[], options?: TextDecodeOptions): string throws TypeError {
+    const stream = options?.stream ?? false
+    let bytes = input ?? []
+    if (this.pending.length > 0) {
+      bytes = this.pending.concat(bytes)
+      this.pending = []
+    }
+    const whole = stream ? __native.utf8Complete(bytes) : bytes.length
+    if (whole < bytes.length) {
+      this.pending = bytes.slice(whole)
+      bytes = bytes.slice(0, whole)
+    }
+    let raw = __native.bytesToString(bytes)
+    // the BOM is dropped once, at the start of a stream
+    if (!this.started && !this.ignoreBOM && raw.startsWith("\uFEFF")) {
+      raw = raw.slice(3)
+    }
+    this.started = stream
+    const text = __native.utf8Clean(raw)
+    if (this.fatal && text !== raw) {
+      throw new TypeError("The encoded data was not valid for encoding utf-8")
+    }
+    return text
+  }
+}
+
+// One read from a stream: a chunk, or `done` at the end.
+export type ReadableStreamReadResult = { done: bool, value: u8[] | undefined }
+
+// A body as a stream of byte chunks: `res.body`. Read it with `getReader()` (`read()` until
+// `done`) or `for await (const chunk of res.body)`. A fetch() body streams as it arrives.
+export class ReadableStream {
+  // a fetch() request's body (0: the chunks below)
+  private id: int
+  private handle: Promise<int> | undefined
+  private signal: AbortSignal | undefined
+  private chunks: u8[][]
+  private isLocked: bool
+  private started: bool
+  private finished: bool
+
+  constructor() {
+    this.id = 0
+    this.handle = undefined
+    this.signal = undefined
+    this.chunks = []
+    this.isLocked = false
+    this.started = false
+    this.finished = false
+  }
+
+  // Internal: the body of fetch() request `id`.
+  static fetched(id: int, handle: Promise<int> | undefined, signal: AbortSignal | undefined): ReadableStream {
+    const s = new ReadableStream()
+    s.id = id
+    s.handle = handle
+    s.signal = signal
+    return s
+  }
+
+  // Internal: a stream of one chunk.
+  static of(bytes: u8[]): ReadableStream {
+    const s = new ReadableStream()
+    if (bytes.length > 0) {
+      s.chunks.push(bytes)
+    }
+    return s
+  }
+
+  // A reader is reading it.
+  get locked(): bool {
+    return this.isLocked
+  }
+
+  // Reading has started.
+  get disturbed(): bool {
+    return this.started
+  }
+
+  getReader(): ReadableStreamDefaultReader throws TypeError {
+    if (this.isLocked) {
+      throw new TypeError("ReadableStream is locked")
+    }
+    this.isLocked = true
+    return new ReadableStreamDefaultReader(this)
+  }
+
+  // Stops the body: a fetch() request is aborted (its connection closed).
+  async cancel(): Promise<void> {
+    this.started = true
+    this.finished = true
+    this.chunks = []
+    if (this.id !== 0) {
+      __native.fetchAbort(this.id)
+    }
+  }
+
+  // Internal: the reader's read().
+  async pull(): Promise<ReadableStreamReadResult> throws Error {
+    this.started = true
+    const id = this.id
+    if (id === 0 || this.finished) {
+      const c = this.chunks.shift()
+      if (c === undefined) {
+        return { done: true, value: undefined }
+      }
+      return { done: false, value: c }
+    }
+    const n = await __native.fetchRead(id)
+    if (n > 0) {
+      return { done: false, value: __native.fetchTake(id) }
+    }
+    this.finished = true
+    const signal = this.signal
+    if (signal !== undefined) {
+      signal.unwatch(id)
+    }
+    if (n < 0) {
+      if (n === -2 && signal !== undefined) {
+        try signal.throwIfAborted()
+      }
+      throw new FetchError(__native.fetchErrorMessage(id), __native.fetchErrorCode(id))
+    }
+    return { done: true, value: undefined }
+  }
+
+  // Internal: the reader let go.
+  unlock(): void {
+    this.isLocked = false
+  }
+}
+
+export class ReadableStreamDefaultReader {
+  private stream: ReadableStream
+  private released: bool
+
+  constructor(stream: ReadableStream) {
+    this.stream = stream
+    this.released = false
+  }
+
+  // The next chunk, or `done` at the end. Rejects if the body fails (or its request is aborted).
+  async read(): Promise<ReadableStreamReadResult> throws Error {
+    if (this.released) {
+      throw new TypeError("This reader has released its lock")
+    }
+    return try await this.stream.pull()
+  }
+
+  releaseLock(): void {
+    if (!this.released) {
+      this.released = true
+      this.stream.unlock()
+    }
+  }
+
+  async cancel(): Promise<void> {
+    await this.stream.cancel()
+  }
+}
+
 // A failed fetch(): a TypeError with Bun's message and `code` ("ConnectionRefused",
 // "ENOTFOUND", "TooManyRedirects", "UnexpectedRedirect", "ECONNRESET", ...).
 export class FetchError extends TypeError {
@@ -981,8 +1224,9 @@ export class FetchError extends TypeError {
 }
 
 // Bun's fetch(): an HTTP/1.1 request on a pooled keep-alive connection, resolving once the
-// whole response has arrived. Rejects with a FetchError when the request fails (an HTTP error
-// status still resolves), or with the signal's reason when it is aborted.
+// response's head has arrived; the body follows (`res.text()`, `res.json()`, `res.body`...).
+// Rejects with a FetchError when the request fails (an HTTP error status still resolves), or
+// with the signal's reason when it is aborted.
 export async function fetch(input: string | URL | Request, init?: RequestInit): Promise<Response> throws Error {
   let method = "GET"
   let url = ""
@@ -1043,11 +1287,12 @@ export async function fetch(input: string | URL | Request, init?: RequestInit): 
   if (signal !== undefined) {
     signal.watch(id)
   }
+  // the head: the body follows (the signal can still abort it)
   const result = await __native.fetchWait(id)
-  if (signal !== undefined) {
-    signal.unwatch(id)
-  }
   if (result !== 0) {
+    if (signal !== undefined) {
+      signal.unwatch(id)
+    }
     const message = __native.fetchErrorMessage(id)
     const code = __native.fetchErrorCode(id)
     __native.fetchFree(id)
@@ -1056,9 +1301,7 @@ export async function fetch(input: string | URL | Request, init?: RequestInit): 
     }
     throw new FetchError(message, code)
   }
-  const res = Response.fetched(id)
-  __native.fetchFree(id)
-  return res
+  return Response.fetched(id, signal)
 }
 
 // The `Bun` global (only `Bun.serve` so far).

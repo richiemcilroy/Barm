@@ -173,6 +173,25 @@ fn handle(s: &mut TcpStream, r: &Req, served: usize, fixtures: &Path, alt: &str)
             return false;
         }
         "/drop" => return false,
+        "/stream" => {
+            // server-sent events: the head at once, then events over ~200 ms
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n");
+            for (i, ev) in ["data: one\n\n", "data: two\n\n", "data: three\n\n"].iter().enumerate() {
+                std::thread::sleep(Duration::from_millis(if i == 0 { 0 } else { 100 }));
+                let _ = s.write_all(format!("{:x}\r\n{ev}\r\n", ev.len()).as_bytes());
+            }
+            let _ = s.write_all(b"0\r\n\r\n");
+        }
+        "/stream-cut" => {
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n");
+            std::thread::sleep(Duration::from_millis(50));
+            return false;
+        }
+        "/slowbody" => {
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n");
+            std::thread::sleep(Duration::from_millis(2000));
+            let _ = s.write_all(b"late");
+        }
         "/malformed" => {
             let _ = s.write_all(b"this is not HTTP\r\n\r\n");
             return false;

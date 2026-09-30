@@ -53,6 +53,14 @@ BOM: "bom"
 clone: hello used=false
 first read: hello used=true
 second read: TypeError ERR_BODY_ALREADY_USED: Body already used
+stream: "data: one\n\ndata: two\n\ndata: three\n\n" early head=true first chunk early=true all later=true used=true
+reader: done=false "data: one\n\n" locked=true
+text() while streaming: TypeError ERR_BODY_ALREADY_USED: Body already used
+cancelled
+cut: head 200
+cut: TypeError ECONNRESET: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()
+abort mid-body: head 200
+abort mid-body: AbortError: The operation was aborted.
 keep-alive: reused=true
 Connection: close: closing after this
 after close: request 1
