@@ -8,6 +8,8 @@
  * calls are tallied per object: after each group every object must be dead.
  */
 #define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE 1   /* MAP_ANON (glibc) */
+#define _DARWIN_C_SOURCE 1  /* MAP_ANON (macOS) */
 #include "barm.h"
 #include "barm.c"
 
@@ -1924,7 +1926,7 @@ static const char want_arr_of_maps[] =
     static void name##_insp(bm_sb *sb, const void *p, int d) { bm_inspect_arr(sb, *(const bm_arr *)p, elem, d); } \
     static void name##_rel(void *p) { bm_arr_release(*(bm_arr *)p, elem); }                               \
     static const bm_type name = {sizeof(bm_arr), retain_arr, name##_rel, NULL, NULL, NULL, name##_insp};
-#define MAP_TYPE(name, kt, vt)                                                                            \
+#define TEST_MAP_TYPE(name, kt, vt)                                                                            \
     static void name##_insp(bm_sb *sb, const void *p, int d) { bm_map_inspect(sb, *(const bm_map *)p, kt, vt, d); } \
     static void name##_rel(void *p) { bm_map_release(*(bm_map *)p, kt, vt); }                             \
     static const bm_type name = {sizeof(bm_map), NULL, name##_rel, NULL, NULL, NULL, name##_insp};
@@ -1932,8 +1934,8 @@ static const char want_arr_of_maps[] =
 ARR_TYPE(arr_str_type, &bm_type_str)
 ARR_TYPE(arr_map_ii_type, &map_ii_type)
 ARR_TYPE(arr2_map_ii_type, &arr_map_ii_type)
-MAP_TYPE(map_si_type, &bm_type_str, &bm_type_int)
-MAP_TYPE(map_is_type, &bm_type_int, &bm_type_str)
+TEST_MAP_TYPE(map_si_type, &bm_type_str, &bm_type_int)
+TEST_MAP_TYPE(map_is_type, &bm_type_int, &bm_type_str)
 
 /* records, as the compiler would generate them */
 typedef struct { int64_t kind, a, b; } shape;
@@ -2465,6 +2467,128 @@ static void test_processes(void) {
 
 /* ================================================================== main */
 
+/* ================================================================== async */
+
+static bm_sb alog;   /* what ran, in order */
+
+static void alog_push(const char *s) {
+    if (alog.len) bm_sb_push_char(&alog, ' ');
+    bm_sb_push_cstr(&alog, s);
+}
+
+static void cb_log(bm_env *env) { alog_push((const char *)((void **)(env + 1))[0]); }
+
+/* A closure logging `word` (an env with the word after the header). */
+static bm_fn log_fn(const char *word) {
+    struct { bm_env h; const char *w; } *e = bm_alloc(sizeof *e);
+    e->h.rc = 1;
+    e->h.drop = NULL;
+    e->w = word;
+    return (bm_fn){(void *)cb_log, &e->h};
+}
+
+/* A hand-written async function, as generated code does it: logs `name`, awaits `on` (if any),
+ * logs `name` again with a '+' and returns. */
+typedef struct {
+    void *pc;
+    const char *name;
+    bm_promise *on;
+    char after[32];
+} waiter_frame;
+
+static bool waiter_run(bm_task *t) {
+    waiter_frame *F = bm_task_frame(t);
+    if (F->pc) goto *F->pc;
+    alog_push(F->name);
+    if (F->on) {
+        if (!bm_await_now(F->on)) {
+            F->pc = &&resumed;
+            bm_await_suspend(F->on);
+            return false;
+        }
+    resumed:;
+    }
+    snprintf(F->after, sizeof F->after, "%s+", F->name);
+    alog_push(F->after);
+    bm_promise_resolve_move(t->promise, NULL);
+    return true;
+}
+
+static bm_task *waiter(const char *name, bm_promise *on) {
+    bm_task *t = bm_task_new(sizeof(waiter_frame), waiter_run, &bm_type_undefined);
+    waiter_frame *F = bm_task_frame(t);
+    F->name = name;
+    F->on = on;
+    return t;
+}
+
+static void test_async(void) {
+    /* Microtasks run FIFO, including ones queued while the queue drains. */
+    bm_queue_microtask(log_fn("m1"));
+    bm_queue_microtask(log_fn("m2"));
+    bm_run_microtasks();
+    CHECK_SB(alog, "m1 m2");
+
+    /* A spawned task (its caller is still running) yields at an await even when the promise is
+     * settled; a task started by the loop continues at once when nothing else is queued. */
+    bm_promise *done = bm_promise_new(&bm_type_undefined);
+    bm_promise_resolve_move(done, NULL);
+    bm_promise *p1 = bm_task_spawn(waiter("a", done));
+    alog_push("caller");
+    CHECK(p1->state == BM_PENDING);
+    bm_run_microtasks();
+    CHECK(p1->state == BM_FULFILLED);
+    CHECK_SB(alog, "a caller a+");
+    bm_task_start(waiter("b", done));
+    CHECK_SB(alog, "b b+");
+    /* ...but not when a microtask is queued: that one runs first. */
+    bm_queue_microtask(log_fn("m"));
+    bm_task_start(waiter("c", done));
+    bm_run_microtasks();
+    CHECK_SB(alog, "c m c+");
+    bm_promise_release(p1);
+
+    /* Waiters wake in the order they started waiting, when the promise settles. */
+    bm_promise *gate = bm_promise_new(&bm_type_undefined);
+    bm_promise *pa = bm_task_spawn(waiter("x", gate));
+    bm_promise *pb = bm_task_spawn(waiter("y", gate));
+    bm_promise *pc = bm_task_spawn(waiter("z", gate));
+    bm_run_microtasks();
+    CHECK_SB(alog, "x y z");
+    bm_promise_resolve_move(gate, NULL);
+    alog_push("resolved");
+    bm_run_microtasks();
+    CHECK_SB(alog, "resolved x+ y+ z+");
+    CHECK(pa->state == BM_FULFILLED && pb->state == BM_FULFILLED && pc->state == BM_FULFILLED);
+    bm_promise_release(pa);
+    bm_promise_release(pb);
+    bm_promise_release(pc);
+    bm_promise_release(gate);
+    bm_promise_release(done);
+
+    /* Timers fire by due time, then in the order they were set; cleared ones never fire. */
+    bm_fn t10 = log_fn("t10"), t1a = log_fn("t1a"), t1b = log_fn("t1b"), tx = log_fn("cleared");
+    bm_set_timer(t10, 10, false);
+    bm_set_timer(t1a, 1, false);
+    bm_set_timer(t1b, 0, false);   /* 0 ms is 1 ms, as in Node */
+    bm_clear_timer(bm_set_timer(tx, 2, false));
+    bm_env_release(t10.env);
+    bm_env_release(t1a.env);
+    bm_env_release(t1b.env);
+    bm_env_release(tx.env);
+    bm_async_run();
+    CHECK_SB(alog, "t1a t1b t10");
+
+    /* A promise resolved by a timer wakes its task; values are released once. */
+    bm_promise *pv = bm_promise_new(&obj_type);
+    obj o = obj_new();
+    bm_promise_resolve(pv, &o);
+    obj_release(&o);
+    CHECK(pv->state == BM_FULFILLED && *(obj *)bm_promise_value(pv) == o);
+    bm_promise_release(pv);
+    CHECK(all_dead());
+}
+
 int main(int argc, char **argv) {
     bm_init(argc, argv);
     if (argc > 1 && strcmp(argv[1], "trap") == 0) { /* used by test.sh to check the exit status */
@@ -2486,6 +2610,8 @@ int main(int argc, char **argv) {
     test_inspect_node_layout();
     test_math_misc();
     test_processes();
+    test_async();
+    bm_sb_free(&alog);
     bm_sb_free(&bm_test_msg);
     CHECK(all_dead());
     printf("%d checks, %d failures\n", checks, failures);
