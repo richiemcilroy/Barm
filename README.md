@@ -6,7 +6,7 @@ A TypeScript-shaped language built for coding agents. It compiles to small, fast
 - **Native and fast.** Compiles to a single binary with no bundled runtime. It keeps pace with Rust and is far ahead of Node and Bun.
 - **Quick feedback.** Builds take around 0.1 s. Error messages name the problem and the fix, and every error has a code you can look up with `barm explain`.
 
-> **Status:** early (milestone 1). Command-line programs compile and run. Classes, error handling, async and a standard library are still to come.
+> **Status:** early (milestone 2). Command-line programs with records, unions, generics, classes and interfaces compile and run. Error handling, a standard library and async are still to come.
 
 ## Example
 
@@ -60,6 +60,7 @@ Barm keeps TypeScript's syntax and drops the parts that make programs hard to re
 - Arrays, records and maps are values. Assigning one makes a copy, and the compiler flags code where TypeScript would have shared the value instead.
 - To modify a caller's value, a function declares an `inout` parameter and the caller passes `&x`.
 - Unions of object types must be narrowed before you use their fields, and a `switch` must cover every case.
+- Classes are reference-counted, not garbage-collected. If instances of a class could reference each other in a cycle, the compiler asks you to mark the back-reference `weak`, make it `readonly`, or declare a `cyclic class` (which adds cycle collection for that class only).
 
 The full list is in [docs/spec.md](docs/spec.md).
 
@@ -70,6 +71,8 @@ Median wall time on an Apple M4 Max. Every language prints identical output.
 | benchmark | Rust | Node | Bun | **Barm** |
 |---|---:|---:|---:|---:|
 | binary_trees | 800 ms | 478 ms | 398 ms | **316 ms** |
+| class_trees | 806 ms | 486 ms | 382 ms | **286 ms** |
+| dispatch (virtual calls) | 84 ms | 207 ms | 115 ms | **42 ms** |
 | map_insert | 561 ms | 980 ms | 834 ms | **343 ms** |
 | nbody | 246 ms | 577 ms | 533 ms | **217 ms** |
 | sort | 77 ms | 1190 ms | 706 ms | **40 ms** |
@@ -80,11 +83,38 @@ Median wall time on an Apple M4 Max. Every language prints identical output.
 
 Binaries are about 50 KB (Rust's are about 470 KB), and a build takes 0.08–0.13 s. Run the benchmarks yourself with `python3 bench/run.py`; the method is in [bench/README.md](bench/README.md).
 
+### HTTP server
+
+`std/http` is a Bun-style server (`serve({ port, fetch })`). Requests per second on Linux (M4 Max, Docker), 128 keep-alive connections, JSON route:
+
+| | Rust (axum) | Bun | **Barm** |
+|---|---:|---:|---:|
+| 1 core | 277k | 234k | **400k** |
+| 4 cores | 1.11M\* | 790k | **1.63M** |
+| p99 latency, 4 cores | 1.06 ms | 1.42 ms | **0.19 ms** |
+| memory | 6 MB | 178 MB | **9 MB** |
+
+\* Thread-per-core Rust; tokio's default multi-thread runtime reaches 613k. With pipelining, Barm serves 13M requests/s on 4 cores. Method, macOS numbers and caveats are in [bench/http/README.md](bench/http/README.md).
+
+```ts
+import { serve, Request, Response, json } from "std/http"
+
+function route(req: Request): Response {
+  if (req.pathname === "/users") return json(JSON.stringify([{ id: 1, name: "Ada" }]))
+  return new Response("not found", { status: 404 })
+}
+
+function main(): void throws Error {
+  try serve({ port: 3000, workers: 8, fetch: route })
+}
+```
+
 ## Development
 
 ```sh
-cargo test                        # checker snapshots, fuzzing, native run tests
+cargo test                        # checker snapshots, fuzzing, native run tests, HTTP protocol tests
 python3 bench/run.py              # cross-language benchmarks
+python3 bench/http/run.py         # HTTP server benchmark (bench/http/linux.sh for Linux)
 scripts/sanitize.sh run file.barm # run under ASan/UBSan in a Linux container
 ```
 
