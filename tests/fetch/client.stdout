@@ -74,6 +74,8 @@ abort with a reason: Error: stopped by the test
 signal that doesn't fire: 200 "OK" ok=true redirected=false BASE/text | hello
 signal state: false
 connection refused: TypeError ConnectionRefused: Unable to connect. Is the computer able to access the url?
+https connection refused: TypeError ConnectionRefused: Unable to connect. Is the computer able to access the url?
+https connection refused (every address): TypeError ConnectionRefused: Unable to connect. Is the computer able to access the url?
 invalid URL: TypeError ERR_INVALID_URL: fetch() URL is invalid
 unsupported protocol: TypeError ERR_INVALID_ARG_VALUE
 unknown host: TypeError ENOTFOUND: getaddrinfo ENOTFOUND nonexistent.invalid

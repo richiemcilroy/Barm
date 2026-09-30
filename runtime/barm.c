@@ -5439,6 +5439,7 @@ struct bm_fc {
     int err;                   /* the last connect error */
     int port;
     bm_tls *tls;               /* https: the TLS session (NULL for http) */
+    int early_err;             /* the ClientHello, sent while connecting, failed with this */
     bool handshaking;
     bool tunneling;            /* waiting for a proxy's answer to CONNECT */
     bool no_reuse;             /* a proxy refused the tunnel: its connection isn't ours to keep */
@@ -6131,6 +6132,15 @@ static void bm_fc_handshake(bm_fc *c) {
     bm_fr *r = c->r;
     int rc = bm_tls_impl->handshake(c->tls);
     if (rc == 0) { c->handshaking = false; bm_fr_send(r, c); return; }
+    /* still connecting (the ClientHello went early): wait for the connection, and report a
+     * refused one as such, not as a TLS error */
+    if (c->connecting) {
+        /* the write took the connect's error (a loopback refusal is instant on Linux): keep it,
+         * as SO_ERROR won't say it again */
+        if (rc < 0) c->early_err = errno ? errno : ECONNREFUSED;
+        bm_fc_interest(c, true, true);
+        return;
+    }
     if (rc == 1) { bm_fc_interest(c, true, false); return; }
     if (rc == 2) { bm_fc_interest(c, true, true); return; }
     const char *code = "ERR_SSL";
@@ -6207,6 +6217,7 @@ static void bm_fc_tunnel(bm_fc *c, bool readable, bool writable) {
 static void bm_fc_connected(bm_fc *c) {
     bm_fr *r = c->r;
     if (!r->https) { bm_fr_send(r, c); return; }
+    if (c->tls) { bm_fc_handshake(c); return; } /* the ClientHello, made while connecting, goes out */
     if (r->via_proxy) {
         bm_sb *h = &c->ctl;
         h->len = 0;
@@ -6253,8 +6264,10 @@ static void bm_fr_connect(bm_fr *r, const bm_addrs *addrs) {
     }
     r->c = c;
     c->r = r;
-    if (c->connecting) return;
-    bm_fc_connected(c);
+    if (!c->connecting) { bm_fc_connected(c); return; }
+    /* make the ClientHello (the key shares are the costly part) while TCP connects: it waits
+     * in the TLS write buffer until the socket is writable */
+    if (r->https && !r->via_proxy) bm_fc_start_tls(c);
 }
 
 static void bm_dns_resolved(bm_dns *d) {
@@ -6492,11 +6505,12 @@ static void bm_fc_ready(bm_io *h, bool readable, bool writable, bool broken) {
         return;
     }
     if (c->connecting) {
-        if (!writable && !broken) return;
+        if (!writable && !readable && !broken) return;
         int err = 0;
         socklen_t el = sizeof err;
         if (getsockopt(c->fd, SOL_SOCKET, SO_ERROR, &err, &el) != 0) err = errno;
-        if (!err) {
+        if (!err) err = c->early_err;
+        if (!err && c->ai > 0) {
             /* an event left over from an address given up on: this one may still be connecting */
             struct sockaddr_storage peer;
             socklen_t pl = sizeof peer;
@@ -6506,6 +6520,7 @@ static void bm_fc_ready(bm_io *h, bool readable, bool writable, bool broken) {
             }
         }
         if (err) {
+            if (c->tls) { bm_tls_impl->close(c->tls, false); c->tls = NULL; c->handshaking = false; c->early_err = 0; }
             close(c->fd);
             c->fd = -1;
             c->ai++;
