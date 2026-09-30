@@ -661,6 +661,9 @@ export function serve(options: ServeOptions): Server {
     if (res instanceof Response) {
       __native.httpRespond(res.status, res.wireHeaders(), res.wireBody(), res.wireTyped())
     } else {
+      // Nothing observable follows (the loop runs microtasks next), so the response can go out
+      // at once if the handler's promise is already settled.
+      __native.spawnTail()
       respondLater(__native.httpDefer(), res, method, target, onError)
     }
   })
