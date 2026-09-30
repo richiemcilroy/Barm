@@ -150,11 +150,13 @@ struct Frame {
     try_expr: u32,
     /// A module variable's initializer (not a closure) — for the "can't throw" message.
     module_init: bool,
+    /// An async function or arrow (or an async script's top level): `await` is allowed.
+    is_async: bool,
 }
 
 impl Frame {
     fn new(ret: Option<TyId>, name: Option<Sym>, can_throw: bool, throws_decl: Option<TyId>) -> Frame {
-        Frame { ret, returns: Vec::new(), loops: 0, switches: 0, name, can_throw, throws_decl, thrown: Vec::new(), try_frames: Vec::new(), try_expr: 0, module_init: false }
+        Frame { ret, returns: Vec::new(), loops: 0, switches: 0, name, can_throw, throws_decl, thrown: Vec::new(), try_frames: Vec::new(), try_expr: 0, module_init: false, is_async: false }
     }
 }
 
@@ -810,7 +812,9 @@ impl<'a> Checker<'a> {
                     self.fn_sig(m, ii);
                     if f.name == self.syms.main {
                         let sig = self.sigs[&(m, ii)].clone();
-                        if !sig.params.is_empty() || !(sig.ret == VOID || sig.ret == INT || sig.ret == ERROR) {
+                        // `async function main()` returns `Promise<void>` or `Promise<int>`.
+                        let ret = self.body_sig(f, &sig).ret;
+                        if !sig.params.is_empty() || !(ret == VOID || ret == INT || ret == ERROR) {
                             self.done.push(
                                 Diagnostic::new("T0701", f.name_span, "`main` must take no parameters and return `void` or `int`")
                                     .note("expected", "function main() { ... }   or   function main(): int { ... }"),
@@ -896,6 +900,7 @@ impl<'a> Checker<'a> {
                 c.fcx.last_mut().unwrap().scopes.push(Vec::new());
                 let mut frame = Frame::new(None, None, script, None);
                 frame.module_init = true;
+                frame.is_async = script && crate::async_enabled() && c.ast().script.is_some_and(|si| matches!(&c.ast().items[si as usize].kind, ItemKind::Function(f) if f.is_async));
                 c.fcx.last_mut().unwrap().frames.push(frame);
                 let t = match ty {
                     Some(te) => {
@@ -1007,6 +1012,11 @@ impl<'a> Checker<'a> {
                     param_names.push(p.name);
                 }
                 let ret = f.ret.map(|t| c.resolve_type(t, &tscope));
+                // An async function's body returns the `T` of its `Promise<T>`.
+                let ret = match ret {
+                    Some(r) if f.is_async && crate::async_enabled() => Some(c.async_inner(r, f.ret.map(|te| c.ast().ty(te).span).unwrap())),
+                    r => r,
+                };
                 let throws = f.throws.map(|t| c.resolve_type(t, &tscope));
                 if let Some(t) = throws {
                     c.check_throws_type(t, f.throws.map(|te| c.ast().ty(te).span).unwrap());
@@ -1059,6 +1069,8 @@ impl<'a> Checker<'a> {
             }
         };
         let rest = f.params.last().map(|p| p.rest).unwrap_or(false);
+        // Callers of an async function get a promise; its errors reject the promise.
+        let (ret, throws) = if f.is_async && crate::async_enabled() { (self.types.promise(ret, throws), NEVER) } else { (ret, throws) };
         let sig = Sig { tparams, params, param_names, ret, throws, rest };
         self.sig_in_progress.remove(&(m, ii));
         Arc::make_mut(&mut self.sigs).insert((m, ii), sig.clone());
@@ -1082,7 +1094,35 @@ impl<'a> Checker<'a> {
         }
         let ItemKind::Function(f) = &self.modules[m as usize].ast.items[ii as usize].kind else { return };
         let tscope: Vec<(Sym, TyId)> = f.tparams.iter().zip(&sig.tparams).map(|(tp, &id)| (tp.name, self.types.intern(Ty::Param(id)))).collect();
+        let sig = self.body_sig(f, &sig);
         self.check_body_of(m, ii, &sig, &tscope, Some(sig.ret));
+    }
+
+    /// The body's view of a signature: an async function's body returns the `T` of its
+    /// `Promise<T>` and throws what the promise rejects with.
+    pub(crate) fn body_sig(&self, f: &ast::FnDecl, sig: &Sig) -> Sig {
+        if f.is_async && crate::async_enabled()
+            && let Ty::Promise(v, e) = *self.types.get(sig.ret)
+        {
+            return Sig { ret: v, throws: e, ..sig.clone() };
+        }
+        sig.clone()
+    }
+
+    /// The `T` an async function's declared `Promise<T>` resolves to (reports anything else).
+    pub(crate) fn async_inner(&mut self, declared: TyId, span: Span) -> TyId {
+        match *self.types.get(declared) {
+            Ty::Promise(v, _) => v,
+            Ty::Error => ERROR,
+            _ => {
+                let shown = self.show(declared);
+                self.report(
+                    Diagnostic::new("T0850", span, format!("an async function returns a `Promise`, found `{shown}`"))
+                        .fix(Applicability::Safe, format!("return `Promise<{shown}>`"), span, format!("Promise<{shown}>")),
+                );
+                declared
+            }
+        }
     }
 
     /// A class from the built-in prelude (`Error`, `SyntaxError`, ...), for code generation.
@@ -1128,7 +1168,9 @@ impl<'a> Checker<'a> {
             fcx.scopes.push(Vec::new());
             // Without a `throws` clause the body's own `try`/`throw` decide (T0831 covers unmarked calls).
             let decl = if sig.throws == UNKNOWN || (f.throws.is_none() && sig.throws == NEVER) { None } else { Some(sig.throws) };
-            fcx.frames.push(Frame::new(ret, Some(f.name), true, decl));
+            let mut frame = Frame::new(ret, Some(f.name), true, decl);
+            frame.is_async = f.is_async && crate::async_enabled();
+            fcx.frames.push(frame);
             fcx.class = class;
             if let Some(t) = &this {
                 fcx.locals.push(Local { name: THIS_SYM, ty: t.ty, kind: LocalKind::Param, span: f.name_span, kw_span: None, promotable: false, frame: 0 });
@@ -1574,8 +1616,14 @@ impl<'a> Checker<'a> {
                 );
                 Some(ERROR)
             }
-            // Async is synchronous until M6: a `Promise<T>` is its `T` (see spec §7b).
-            "Promise" => Some(if arity(self, 1) { targs[0] } else { ERROR }),
+            // Without real async (BARM_ASYNC), a `Promise<T>` is its `T` (see spec §7b).
+            "Promise" => Some(if !arity(self, 1) {
+                ERROR
+            } else if crate::async_enabled() {
+                self.types.promise(targs[0], NEVER)
+            } else {
+                targs[0]
+            }),
             // `Record<string, V>` is a string-keyed `Map` that object literals can build.
             "Record" => {
                 if !arity(self, 2) {
@@ -1662,6 +1710,8 @@ impl<'a> Checker<'a> {
         match (s, d) {
             (Ty::Array(a), Ty::Array(b)) => self.assignable_in(a, b, false, assuming),
             (Ty::Set(a), Ty::Set(b)) => a == b,
+            // Promises are read-only: covariant in the value; the errors must fit.
+            (Ty::Promise(v1, e1), Ty::Promise(v2, e2)) => self.assignable_in(v1, v2, false, assuming) && (e1 == NEVER || self.assignable_in(e1, e2, false, assuming)),
             (Ty::Map(k1, v1), Ty::Map(k2, v2)) => k1 == k2 && self.assignable_in(v1, v2, false, assuming),
             (Ty::Record(a), Ty::Record(b)) => {
                 let (a, b) = (self.types.fields(a).to_vec(), self.types.fields(b).to_vec());

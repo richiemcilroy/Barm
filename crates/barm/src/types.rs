@@ -73,6 +73,8 @@ pub enum Ty {
     BuiltinNs(Sym),
     /// The result of `expect(x)` in tests.
     Expect(TyId),
+    /// `Promise<T>`: (value type, what it can reject with — `never` if nothing).
+    Promise(TyId, TyId),
 }
 
 /// Hash-consed storage for lists of `T`.
@@ -332,6 +334,10 @@ impl Types {
         self.intern(Ty::Func(l, ret, throws))
     }
 
+    pub fn promise(&mut self, value: TyId, rejects: TyId) -> TyId {
+        self.intern(Ty::Promise(value, rejects))
+    }
+
     pub fn rec(&mut self, alias: u32, args: &[TyId]) -> TyId {
         let l = self.tys_list(args);
         self.intern(Ty::Rec(alias, l))
@@ -460,6 +466,11 @@ impl Types {
                 let e = self.subst(e, map);
                 self.intern(Ty::Set(e))
             }
+            Ty::Promise(v, e) => {
+                let v = self.subst(v, map);
+                let e = self.subst(e, map);
+                self.promise(v, e)
+            }
             Ty::Record(fs) => {
                 let fields: Vec<Field> = self.fields(fs).to_vec();
                 let fields = fields.into_iter().map(|f| Field { ty: self.subst(f.ty, map), ..f }).collect();
@@ -504,7 +515,7 @@ impl Types {
         match *self.get(ty) {
             Ty::Param(p) => params.contains(&p),
             Ty::Array(e) | Ty::Set(e) | Ty::Expect(e) => self.mentions(e, params),
-            Ty::Map(k, v) => self.mentions(k, params) || self.mentions(v, params),
+            Ty::Map(k, v) | Ty::Promise(k, v) => self.mentions(k, params) || self.mentions(v, params),
             Ty::Record(fs) => self.fields(fs).iter().any(|f| self.mentions(f.ty, params)),
             Ty::Union(ms) => self.tys(ms).iter().any(|&m| self.mentions(m, params)),
             Ty::Func(ps, r, _) => self.params(ps).iter().any(|p| self.mentions(p.ty, params)) || self.mentions(r, params),
@@ -588,6 +599,21 @@ impl Display<'_> {
                 out.push_str("Set<");
                 self.write(e, out, false);
                 out.push('>');
+            }
+            Ty::Promise(v, e) => {
+                if in_array && e != NEVER {
+                    out.push('(');
+                }
+                out.push_str("Promise<");
+                self.write(v, out, false);
+                out.push('>');
+                if e != NEVER {
+                    out.push_str(" throws ");
+                    self.write(e, out, false);
+                    if in_array {
+                        out.push(')');
+                    }
+                }
             }
             Ty::Record(fields) => {
                 let fields = self.types.fields(fields);

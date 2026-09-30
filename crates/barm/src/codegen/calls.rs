@@ -158,6 +158,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let _ = c;
                 self.new_object(e, ty, args, &params, span)
             }
+            Callee::NewPromise => {
+                self.unsupported(span, "`new Promise`");
+                Val::plain("0", ty)
+            }
             Callee::SuperCtor(base) => {
                 let base = self.inst(base);
                 self.super_ctor_call(base, args, &params);

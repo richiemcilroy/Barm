@@ -60,8 +60,13 @@ pub(super) fn is_builtin_ns(name: &str) -> bool {
 }
 
 pub(super) fn is_builtin_fn(name: &str) -> bool {
-    matches!(name, "expect" | "String" | "Number" | "parseInt" | "parseFloat" | "isNaN" | "test") || CONVERSIONS.contains(&name)
+    matches!(name, "expect" | "String" | "Number" | "parseInt" | "parseFloat" | "isNaN" | "test")
+        || CONVERSIONS.contains(&name)
+        || crate::async_enabled() && TIMER_FNS.contains(&name)
 }
+
+/// Timer globals (real async only).
+pub(crate) const TIMER_FNS: &[&str] = &["setTimeout", "setInterval", "clearTimeout", "clearInterval", "queueMicrotask"];
 
 pub(super) fn removed_global(name: &str) -> Option<String> {
     Some(match name {
@@ -69,6 +74,7 @@ pub(super) fn removed_global(name: &str) -> Option<String> {
         "eval" | "Function" => format!("`{name}` is not supported: there is no runtime code evaluation"),
         "globalThis" | "window" | "document" | "global" => format!("`{name}` is not available; Barm compiles to native programs"),
         "require" | "module" | "exports" => "CommonJS is not supported; use `import { name } from \"./file\"`".to_string(),
+        "setTimeout" | "setInterval" | "Promise" if crate::async_enabled() => return None,
         "setTimeout" | "setInterval" | "fetch" | "Promise" => format!("`{name}` is not supported yet (async is planned for M6)"),
         "Symbol" | "Proxy" | "Reflect" | "WeakMap" | "WeakSet" | "BigInt" => format!("`{name}` is not supported"),
         "Object" => "`Object` is not supported: records have fixed fields; use `Map` for dynamic keys".to_string(),
@@ -687,6 +693,47 @@ impl<'a> Checker<'a> {
                     }
                 }
                 self.types.optional(ret)
+            }
+            // `setTimeout(callback, ms)` / `setInterval(...)`: a timer id for `clearTimeout`.
+            "setTimeout" | "setInterval" => {
+                let callback = self.types.func(Vec::new(), VOID);
+                match args {
+                    [cb] | [cb, _] => {
+                        let t = self.expr(cb.expr, Some(callback));
+                        let s = self.ast().expr(cb.expr).span;
+                        self.expect_assignable(t, callback, s, Some("the callback".to_string()));
+                        if let Some(ms) = args.get(1) {
+                            let t = self.expr(ms.expr, Some(F64));
+                            let s = self.ast().expr(ms.expr).span;
+                            self.expect_assignable(t, F64, s, Some("the delay in milliseconds".to_string()));
+                        }
+                    }
+                    _ => {
+                        self.report(Diagnostic::new("T0201", span, format!("`{name}` takes a callback and a delay in milliseconds, found {} arguments", args.len())));
+                        self.check_args_loose(args);
+                    }
+                }
+                INT
+            }
+            "clearTimeout" | "clearInterval" => {
+                let id = self.types.optional(INT);
+                if let Some(t) = one(self) {
+                    let s = self.ast().expr(args[0].expr).span;
+                    self.expect_assignable(t, id, s, Some("a timer id".to_string()));
+                }
+                VOID
+            }
+            "queueMicrotask" => {
+                let callback = self.types.func(Vec::new(), VOID);
+                if let [cb] = args {
+                    let t = self.expr(cb.expr, Some(callback));
+                    let s = self.ast().expr(cb.expr).span;
+                    self.expect_assignable(t, callback, s, Some("the callback".to_string()));
+                } else {
+                    self.report(Diagnostic::new("T0201", span, format!("`queueMicrotask` takes 1 callback, found {} arguments", args.len())));
+                    self.check_args_loose(args);
+                }
+                VOID
             }
             "isNaN" => {
                 if let Some(t) = one(self) {
