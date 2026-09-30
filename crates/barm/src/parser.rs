@@ -350,10 +350,10 @@ impl<'a> Parser<'a> {
                 self.push(d);
                 self.const_item(start, exported);
             }
-            Tok::Class | Tok::Abstract => {
-                let span = self.cur_span();
-                self.err("U0001", span, "classes are not supported yet (planned for M2)");
-                self.skip_decl();
+            Tok::Class | Tok::Abstract => self.class_decl(start, exported, false),
+            Tok::Ident if self.text(self.tok()) == "cyclic" && matches!(self.nth(1), Tok::Class | Tok::Abstract) => {
+                self.bump();
+                self.class_decl(start, exported, true);
             }
             Tok::Enum => {
                 let span = self.cur_span();
@@ -394,6 +394,192 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+    }
+
+    /// `[abstract] class Name<T> extends Base<U> implements I, J { members }`.
+    fn class_decl(&mut self, start: Span, exported: bool, cyclic: bool) {
+        let is_abstract = self.eat(Tok::Abstract);
+        if !self.expect(Tok::Class, "(a class declaration)") {
+            self.skip_decl();
+            return;
+        }
+        let Some((name, name_span)) = self.ident("a class name") else {
+            self.skip_decl();
+            return;
+        };
+        let tparams = self.tparams();
+        let extends = if self.eat(Tok::Extends) { Some(self.postfix_ty()) } else { None };
+        let mut implements = Vec::new();
+        if self.eat(Tok::Implements) {
+            loop {
+                implements.push(self.postfix_ty());
+                if !self.eat(Tok::Comma) {
+                    break;
+                }
+            }
+        }
+        if !self.at(Tok::LBrace) {
+            self.expect(Tok::LBrace, "to start the class body");
+            self.skip_decl();
+            return;
+        }
+        self.bump();
+        let mut members = Vec::new();
+        while !self.at(Tok::RBrace) && !self.at(Tok::Eof) {
+            let before = self.pos;
+            if self.eat(Tok::Semi) {
+                continue;
+            }
+            if let Some(m) = self.class_member() {
+                members.push(m);
+            }
+            if self.pos == before {
+                self.bump();
+            }
+        }
+        self.expect(Tok::RBrace, "to close the class body");
+        let span = start.to(self.prev_span());
+        let decl = ClassDecl { name, name_span, tparams, is_abstract, cyclic, extends, implements, members };
+        self.ast.items.push(Item { kind: ItemKind::Class(decl), span, exported });
+    }
+
+    /// Is the current word a modifier (followed by a member name) rather than the member's own name?
+    fn at_modifier(&self) -> bool {
+        let next = self.nth(1);
+        let followed_by_name = matches!(next, Tok::Ident | Tok::Hash | Tok::Str | Tok::LBracket) || next.is_keyword();
+        followed_by_name && !self.toks.get(self.pos + 1).map(|t| t.nl_before).unwrap_or(false)
+    }
+
+    fn class_member(&mut self) -> Option<ClassMember> {
+        let start = self.cur_span();
+        let mut vis = Visibility::Public;
+        let (mut is_static, mut readonly, mut weak, mut is_abstract) = (false, false, false, false);
+        loop {
+            if self.at(Tok::Abstract) && self.at_modifier() {
+                self.bump();
+                is_abstract = true;
+                continue;
+            }
+            if !self.at(Tok::Ident) || !self.at_modifier() {
+                break;
+            }
+            match self.text(self.tok()) {
+                "public" => vis = Visibility::Public,
+                "private" => vis = Visibility::Private,
+                "protected" => vis = Visibility::Protected,
+                "static" => is_static = true,
+                "readonly" => readonly = true,
+                "weak" => weak = true,
+                "override" => {}
+                "async" => {
+                    let span = self.cur_span();
+                    self.err("U0003", span, "`async` methods are not supported yet (planned for M6)");
+                }
+                "declare" => {
+                    let span = self.cur_span();
+                    self.err("X0021", span, "`declare` is not supported");
+                }
+                "get" | "set" => break,
+                _ => break,
+            }
+            self.bump();
+        }
+        // Accessors: `get name(): T { ... }`.
+        let mut accessor = None;
+        if (self.at_word("get") || self.at_word("set")) && self.at_modifier() {
+            accessor = Some(self.text(self.tok()) == "get");
+            self.bump();
+        }
+        if self.at(Tok::LBracket) || self.at(Tok::Str) {
+            self.push(Diagnostic::new("X0017", start, "computed and string member names are not supported").note("instead", "use an identifier name"));
+            self.recover_line();
+            return None;
+        }
+        let (name, name_span) = if self.at(Tok::Hash) {
+            let h = self.bump();
+            let Some((n, s)) = self.ident("a private member name") else {
+                self.recover_line();
+                return None;
+            };
+            let text = format!("#{}", self.interner.get(n));
+            vis = Visibility::Private;
+            (self.interner.intern(&text), self.span_of(h).to(s))
+        } else {
+            match self.prop_name() {
+                Some(x) => x,
+                None => {
+                    let msg = format!("expected a class member, found {}", self.found());
+                    let span = self.cur_span();
+                    self.err("P0001", span, msg);
+                    self.recover_line();
+                    return None;
+                }
+            }
+        };
+        let text = self.interner.get(name).to_string();
+        if accessor == Some(false) {
+            let span = start.to(self.prev_span());
+            self.err("U0019", span, "setters are not supported yet; use a method like `setName(v)`");
+            if self.at(Tok::LParen) {
+                self.skip_balanced();
+            }
+            if self.at(Tok::LBrace) {
+                self.skip_balanced();
+            }
+            return None;
+        }
+        if self.at(Tok::LParen) || self.at(Tok::Lt) {
+            let tparams = self.tparams();
+            if !tparams.is_empty() {
+                let span = start.to(self.prev_span());
+                self.err("U0015", span, "generic methods are not supported yet; make the class generic or use a top-level generic function");
+            }
+            let params = self.params();
+            let ret = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
+            let throws = self.effects_clause();
+            let body = if self.at(Tok::LBrace) {
+                self.block()
+            } else {
+                if !is_abstract {
+                    let span = self.cur_span();
+                    let msg = format!("expected `{{` to start the method body, found {}", self.found());
+                    self.err("P0001", span, msg);
+                }
+                self.terminator();
+                let span = self.prev_span();
+                self.mk_stmt(StmtKind::Block(Vec::new()), span)
+            };
+            let fd = FnDecl { name, name_span, tparams, params, ret, throws, body };
+            let kind = if text == "constructor" && accessor.is_none() {
+                MemberKind::Constructor(fd)
+            } else if accessor == Some(true) {
+                MemberKind::Getter(fd)
+            } else {
+                MemberKind::Method(fd)
+            };
+            let span = start.to(self.prev_span());
+            return Some(ClassMember { name, name_span, span, vis, is_static, readonly, weak, is_abstract, kind });
+        }
+        // Field.
+        let optional = self.eat(Tok::Question);
+        if self.at(Tok::Bang) {
+            let span = self.cur_span();
+            self.push(
+                Diagnostic::new("X0040", span, "definite-assignment assertions (`x!: T`) are not supported")
+                    .note("instead", "give the field an initializer, assign it in the constructor, or make it optional (`x?: T`)"),
+            );
+            self.bump();
+        }
+        let ty = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
+        let init = if self.eat(Tok::Eq) { Some(self.assign()) } else { None };
+        if !(self.eat(Tok::Semi) || self.eat(Tok::Comma) || self.at(Tok::RBrace) || self.tok().nl_before) {
+            let msg = format!("expected `;` or a line break after the field, found {}", self.found());
+            let span = self.cur_span();
+            self.err("P0002", span, msg);
+            self.recover_line();
+        }
+        let span = start.to(self.prev_span());
+        Some(ClassMember { name, name_span, span, vis, is_static, readonly, weak, is_abstract, kind: MemberKind::Field { ty, init, optional } })
     }
 
     fn import(&mut self, start: Span) {
@@ -511,10 +697,7 @@ impl<'a> Parser<'a> {
         self.expect(Tok::LParen, "to start the parameter list");
         while !self.at(Tok::RParen) && !self.at(Tok::Eof) {
             let start = self.cur_span();
-            if self.at(Tok::DotDotDot) {
-                self.err("U0011", start, "rest parameters are not supported yet; take an array parameter instead");
-                self.bump();
-            }
+            let rest = self.eat(Tok::DotDotDot);
             if self.at(Tok::LBrace) || self.at(Tok::LBracket) {
                 self.err("U0006", start, "destructuring parameters are not supported yet; take the value and read its fields");
                 self.skip_balanced();
@@ -525,6 +708,32 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 continue;
+            }
+            // Constructor parameter properties: `private readonly x: T`.
+            let mut prop: Option<(Visibility, bool)> = None;
+            loop {
+                let next_is_name = matches!(self.nth(1), Tok::Ident) || self.nth(1).is_keyword();
+                if !next_is_name {
+                    break;
+                }
+                let vis = if self.at_word("public") {
+                    Some(Visibility::Public)
+                } else if self.at_word("private") {
+                    Some(Visibility::Private)
+                } else if self.at_word("protected") {
+                    Some(Visibility::Protected)
+                } else {
+                    None
+                };
+                if let Some(v) = vis {
+                    self.bump();
+                    prop = Some((v, prop.map(|p| p.1).unwrap_or(false)));
+                } else if self.at_word("readonly") {
+                    self.bump();
+                    prop = Some((prop.map(|p| p.0).unwrap_or(Visibility::Public), true));
+                } else {
+                    break;
+                }
             }
             let inout = if self.at_word("inout") && self.nth(1) == Tok::Ident {
                 self.bump();
@@ -545,7 +754,7 @@ impl<'a> Parser<'a> {
                 let s = s.to(self.expr_span(e));
                 self.err("U0005", s, "default parameter values are not supported yet; make the parameter optional (`x?: T`) and use `x ?? default`");
             }
-            out.push(Param { name, span, ty, inout, optional });
+            out.push(Param { name, span, ty, inout, optional, prop, rest });
             if !self.eat(Tok::Comma) {
                 break;
             }
@@ -582,7 +791,7 @@ impl<'a> Parser<'a> {
         let tparams = self.tparams();
         let params = self.params();
         let ret = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
-        self.effects_clause();
+        let throws = self.effects_clause();
         if !self.at(Tok::LBrace) {
             let span = self.cur_span();
             let msg = format!("expected `{{` to start the function body, found {}", self.found());
@@ -591,27 +800,26 @@ impl<'a> Parser<'a> {
             return None;
         }
         let body = self.block();
-        Some(FnDecl { name, name_span, tparams, params, ret, body })
+        Some(FnDecl { name, name_span, tparams, params, ret, throws, body })
     }
 
-    /// `throws E` / `uses fs | net` (parsed, not yet checked).
-    fn effects_clause(&mut self) {
+    /// `throws E` (returned) / `uses fs | net` (not supported yet).
+    fn effects_clause(&mut self) -> Option<TypeId> {
+        let mut throws = None;
         loop {
             if self.at_word("throws") {
-                let span = self.cur_span();
-                self.err("U0004", span, "`throws` clauses are not supported yet (planned for M3)");
                 self.bump();
-                self.ty();
+                throws = Some(self.ty());
             } else if self.at_word("uses") {
                 let span = self.cur_span();
-                self.err("U0004", span, "`uses` effect clauses are not supported yet (planned for M3)");
+                self.err("U0004", span, "`uses` effect clauses are not supported yet");
                 self.bump();
                 self.ident("an effect name");
                 while self.eat(Tok::Pipe) {
                     self.ident("an effect name");
                 }
             } else {
-                return;
+                return throws;
             }
         }
     }
@@ -987,24 +1195,35 @@ impl<'a> Parser<'a> {
                 self.mk_stmt(StmtKind::Empty, start)
             }
             Tok::Throw => {
-                self.err("U0004", start, "`throw` is not supported yet (planned for M3)");
                 self.bump();
-                self.expr();
+                let e = self.expr();
                 self.terminator();
-                self.mk_stmt(StmtKind::Error, start)
+                let span = start.to(self.prev_span());
+                self.mk_stmt(StmtKind::Throw(e), span)
             }
-            Tok::Try => {
-                self.err("U0004", start, "`try`/`catch` is not supported yet (planned for M3)");
+            Tok::Try if self.nth(1) == Tok::LBrace => {
                 self.bump();
-                self.skip_balanced();
-                while self.at(Tok::Catch) || self.at(Tok::Finally) {
-                    self.bump();
-                    if self.at(Tok::LParen) {
-                        self.skip_balanced();
+                let body = self.block();
+                let mut catch = None;
+                if self.eat(Tok::Catch) {
+                    let mut param = None;
+                    if self.eat(Tok::LParen) {
+                        if let Some((name, span)) = self.ident("an error variable name") {
+                            let ty = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
+                            param = Some((name, span, ty));
+                        }
+                        self.expect(Tok::RParen, "to close `catch (...)`");
                     }
-                    self.skip_balanced();
+                    let cbody = self.block();
+                    catch = Some(Catch { param, body: cbody });
                 }
-                self.mk_stmt(StmtKind::Error, start)
+                let finally = if self.eat(Tok::Finally) { Some(self.block()) } else { None };
+                if catch.is_none() && finally.is_none() {
+                    let span = self.cur_span();
+                    self.err("P0001", span, "expected `catch` or `finally` after the `try` block");
+                }
+                let span = start.to(self.prev_span());
+                self.mk_stmt(StmtKind::Try { body, catch, finally }, span)
             }
             Tok::Function => {
                 self.push(
@@ -1359,6 +1578,12 @@ impl<'a> Parser<'a> {
                 self.err("U0003", start, "`await` is not supported yet (planned for M6)");
                 return self.unary();
             }
+            Tok::Try => {
+                self.bump();
+                let e = self.unary();
+                let span = start.to(self.expr_span(e));
+                return self.mk_expr(ExprKind::Try(e), span);
+            }
             Tok::PlusPlus | Tok::MinusMinus => {
                 let inc = self.at(Tok::PlusPlus);
                 self.bump();
@@ -1396,12 +1621,19 @@ impl<'a> Parser<'a> {
             match self.kind() {
                 Tok::Dot => {
                     self.bump();
-                    if self.at(Tok::Hash) {
-                        let span = self.cur_span();
-                        self.err("U0001", span, "private `#fields` belong to classes, which are not supported yet (planned for M2)");
-                        self.bump();
-                    }
-                    let Some((name, name_span)) = self.prop_name() else {
+                    let hashed = if self.at(Tok::Hash) {
+                        let h = self.bump();
+                        if self.at(Tok::Ident) && self.adjacent() {
+                            let t = self.bump();
+                            let sym = self.interner.intern(&format!("#{}", self.text(t)));
+                            Some((sym, self.span_of(h).to(self.span_of(t))))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    let Some((name, name_span)) = hashed.or_else(|| self.prop_name()) else {
                         let msg = format!("expected a property name after `.`, found {}", self.found());
                         let span = self.cur_span();
                         self.err("P0001", span, msg);
@@ -1521,7 +1753,7 @@ impl<'a> Parser<'a> {
         if self.at(Tok::Ident) && self.nth(1) == Tok::Arrow {
             let t = self.bump();
             let name = self.interner.intern(self.text(t));
-            let params = vec![Param { name, span: self.span_of(t), ty: None, inout: false, optional: false }];
+            let params = vec![Param { name, span: self.span_of(t), ty: None, inout: false, optional: false, prop: None, rest: false }];
             self.bump(); // =>
             return Some(self.arrow_body(start, params, None));
         }
@@ -1735,10 +1967,24 @@ impl<'a> Parser<'a> {
                 let span = start.to(self.prev_span());
                 self.mk_expr(ExprKind::New { callee, type_args, args }, span)
             }
-            Tok::This | Tok::Super | Tok::Class => {
-                let msg = format!("{} belongs to classes, which are not supported yet (planned for M2)", self.found());
-                self.err("U0001", start, msg);
+            Tok::This => {
                 self.bump();
+                self.mk_expr(ExprKind::This, start)
+            }
+            Tok::Super => {
+                self.bump();
+                self.mk_expr(ExprKind::Super, start)
+            }
+            Tok::Class => {
+                self.err("U0001", start, "class expressions are not supported; declare the class at the top level");
+                self.bump();
+                if self.at(Tok::Ident) {
+                    self.bump();
+                }
+                while !self.at(Tok::LBrace) && !self.at(Tok::Eof) {
+                    self.bump();
+                }
+                self.skip_balanced();
                 self.mk_expr(ExprKind::Error, start)
             }
             Tok::Slash | Tok::SlashEq => {
