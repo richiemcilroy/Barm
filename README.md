@@ -41,15 +41,18 @@ test("rect area", () => {
 You need Rust (to build the compiler) and a C compiler (`clang` or `gcc`).
 
 ```sh
-cargo build --release
-export PATH="$PWD/target/release:$PATH"
+cargo install --path crates/barm  # puts `barm` in ~/.cargo/bin
 
 barm run examples/shapes          # build and run main()
+barm --watch server.barm          # rebuild and restart when a source file changes
+barm dev                          # run package.json's "dev" script, as `bun dev` does
 barm test examples                # run every test(...)
 barm build examples/shapes -o app # write a native binary
 barm check src/                   # type-check only (add --json for tools)
 barm explain T0001                # what an error code means
 ```
+
+The command line works like Bun's: `barm <file>` runs a program and passes it the arguments after the file name, `barm <script>` runs a `package.json` script (with `pre`/`post` scripts, the `npm_*` environment and Bun's output), and `--watch` restarts the program when the entry file or anything it imports changes. `--hot` isn't supported yet.
 
 ## How it differs from TypeScript
 

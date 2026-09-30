@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+mod scripts;
+mod watch;
+
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
@@ -6,37 +9,60 @@ const HELP: &str = "\
 barm — the Barm toolchain
 
 usage:
+  barm <file> [args...]                     build (cached) and run a program; `barm run <file>` too
+  barm <script> [args...]                   run a package.json script (`barm dev` runs \"dev\")
   barm check [paths...] [--json] [--time]   type-check .barm files (default: current directory)
-  barm run [path] [-- args...]              build (cached) and run the program's `main`
   barm build [path] [-o out] [--emit-c f]   build a native binary
   barm test [path]                          build and run every `test(...)`
   barm explain <CODE>                       explain a diagnostic code
   barm version
 
+A script wins over a file of the same name; `check`, `build`, `test` and `run` are always
+barm's own (`barm run test` runs a \"test\" script).
+
 build options: -O0 | -O1 | -O2 | -O3 (default) | -Os, --time,
                --unchecked (integer overflow wraps instead of trapping, like Rust release builds)
+watch:         --watch (with run, test or build: rebuild when a source file changes, and
+               restart the program), --no-clear-screen, --watch-kill-signal=SIGTERM
+scripts:       --silent (don't print each command before running it)
 ";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(|s| s.as_str()) {
-        Some("check") => check(&args[1..]),
-        Some("build") => build_cmd(&args[1..], BuildCmd::Build),
-        Some("run") => build_cmd(&args[1..], BuildCmd::Run),
-        Some("test") => build_cmd(&args[1..], BuildCmd::Test),
-        Some("explain") => explain(args.get(1).map(|s| s.as_str())),
+    // Options may come before the command, as in Bun: `barm --watch server.barm`.
+    let mut lead = 0;
+    while let Some(a) = args.get(lead) {
+        if !a.starts_with("--") || matches!(a.as_str(), "--" | "--help" | "--version") {
+            break;
+        }
+        lead += if a == "--watch-kill-signal" { 2 } else { 1 };
+    }
+    let lead = lead.min(args.len());
+    let (flags, rest) = args.split_at(lead);
+    let with = |tail: &[String]| -> Vec<String> { flags.iter().chain(tail).cloned().collect() };
+    match rest.first().map(|s| s.as_str()) {
+        Some("check") => check(&rest[1..]),
+        Some("build") => build_cmd(&with(&rest[1..]), BuildCmd::Build),
+        Some("run") => run_cmd(&with(&rest[1..]), false),
+        Some("test") => build_cmd(&with(&rest[1..]), BuildCmd::Test),
+        Some("explain") => explain(rest.get(1).map(|s| s.as_str())),
         Some("version" | "--version" | "-V") => {
             println!("barm {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        Some("help" | "--help" | "-h") | None => {
+        Some("help" | "--help" | "-h") => {
             print!("{HELP}");
             ExitCode::SUCCESS
         }
-        Some(other) => {
-            eprintln!("unknown command `{other}`\n\n{HELP}");
+        None if flags.is_empty() => {
+            print!("{HELP}");
+            ExitCode::SUCCESS
+        }
+        None => {
+            eprintln!("error: {} needs a file to run, e.g. `barm {} server.barm`", flags[0], flags.join(" "));
             ExitCode::from(2)
         }
+        Some(_) => run_cmd(&with(rest), true),
     }
 }
 
@@ -111,55 +137,162 @@ enum BuildCmd {
     Test,
 }
 
-fn build_cmd(args: &[String], cmd: BuildCmd) -> ExitCode {
-    let (ours, program_args) = match args.iter().position(|a| a == "--") {
-        Some(i) => (&args[..i], &args[i + 1..]),
-        None => (args, &args[args.len()..]),
+struct Flags {
+    paths: Vec<PathBuf>,
+    program_args: Vec<String>,
+    out: Option<PathBuf>,
+    emit_c: Option<PathBuf>,
+    opt: String,
+    unchecked: bool,
+    time: bool,
+    watch: bool,
+    clear_screen: bool,
+    kill_signal: i32,
+    silent: bool,
+}
+
+/// For `run`, the first path is the program and everything after it is the program's (as in
+/// Bun); otherwise program arguments follow `--`.
+fn parse_flags(args: &[String], cmd: &BuildCmd) -> Result<Flags, ExitCode> {
+    let mut f = Flags {
+        paths: Vec::new(),
+        program_args: Vec::new(),
+        out: None,
+        emit_c: None,
+        opt: "-O3".to_string(),
+        unchecked: false,
+        time: false,
+        watch: false,
+        clear_screen: true,
+        kill_signal: watch::SIGTERM,
+        silent: false,
     };
-    let mut paths = Vec::new();
-    let mut out: Option<PathBuf> = None;
-    let mut emit_c = None;
-    let mut opt = "-O3".to_string();
-    let mut unchecked = false;
-    let mut time = false;
     let mut i = 0;
-    while i < ours.len() {
-        match ours[i].as_str() {
+    while i < args.len() {
+        let a = args[i].as_str();
+        match a {
+            "--" if *cmd != BuildCmd::Run => {
+                f.program_args = args[i + 1..].to_vec();
+                break;
+            }
             "-o" => {
                 i += 1;
-                out = ours.get(i).map(PathBuf::from);
+                f.out = args.get(i).map(PathBuf::from);
             }
             "--emit-c" => {
                 i += 1;
-                emit_c = ours.get(i).map(PathBuf::from);
+                f.emit_c = args.get(i).map(PathBuf::from);
             }
-            "--time" => time = true,
-            "--unchecked" => unchecked = true,
-            o if o.starts_with("-O") => opt = o.to_string(),
-            p => paths.push(PathBuf::from(p)),
+            "--time" => f.time = true,
+            "--unchecked" => f.unchecked = true,
+            "--watch" => f.watch = true,
+            "--no-clear-screen" => f.clear_screen = false,
+            "--silent" => f.silent = true,
+            "--hot" => {
+                eprintln!("error: --hot isn't supported yet: Barm can't swap new code into a running program");
+                eprintln!("  instead: --watch rebuilds and restarts the program when a source file changes");
+                return Err(ExitCode::from(2));
+            }
+            o if o == "--watch-kill-signal" || o.starts_with("--watch-kill-signal=") => {
+                let value = match o.strip_prefix("--watch-kill-signal=") {
+                    Some(v) => v.to_string(),
+                    None => {
+                        i += 1;
+                        args.get(i).cloned().unwrap_or_default()
+                    }
+                };
+                let Some(sig) = watch::parse_signal(&value) else {
+                    eprintln!("error: --watch-kill-signal: unknown signal \"{value}\"");
+                    eprintln!("  valid: SIGTERM (default), SIGINT, SIGHUP, SIGQUIT, SIGKILL, SIGUSR1, SIGUSR2, or a number");
+                    return Err(ExitCode::from(2));
+                };
+                f.kill_signal = sig;
+            }
+            o if o.starts_with("-O") => f.opt = o.to_string(),
+            o if o.starts_with("--") => {
+                eprintln!("error: unknown option `{o}`\n\n{HELP}");
+                return Err(ExitCode::from(2));
+            }
+            p => {
+                f.paths.push(PathBuf::from(p));
+                if *cmd == BuildCmd::Run {
+                    // a `--` right after the name is dropped, as Bun does
+                    let rest = &args[i + 1..];
+                    f.program_args = rest.strip_prefix(&["--".to_string()][..]).unwrap_or(rest).to_vec();
+                    break;
+                }
+            }
         }
         i += 1;
     }
+    Ok(f)
+}
+
+/// `barm run <name>` and `barm <name>`: a package.json script by that name wins, as in Bun;
+/// otherwise `name` is a program to build and run.
+fn run_cmd(args: &[String], bare: bool) -> ExitCode {
+    let f = match parse_flags(args, &BuildCmd::Run) {
+        Ok(f) => f,
+        Err(code) => return code,
+    };
+    if let Some(name) = f.paths.first().and_then(|p| p.to_str()) {
+        let pkg = match scripts::find() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::from(2);
+            }
+        };
+        if let Some(pkg) = pkg.as_ref().filter(|p| p.script(name).is_some()) {
+            if f.watch {
+                eprintln!("error: --watch applies to a program, not the script \"{name}\"");
+                eprintln!("  instead: put it in the script, e.g. \"{name}\": \"barm --watch server.barm\"");
+                return ExitCode::from(2);
+            }
+            return scripts::run(pkg, name, &f.program_args, f.silent);
+        }
+        // A bare word that's neither a script nor a file is a missing script, as in Bun.
+        let looks_like_file = name.contains('/') || name.ends_with(".barm") || name.ends_with(".ts");
+        if !Path::new(name).exists() && (bare || !looks_like_file) {
+            return scripts::not_found(pkg.as_ref(), name);
+        }
+    }
+    execute(f, BuildCmd::Run)
+}
+
+fn build_cmd(args: &[String], cmd: BuildCmd) -> ExitCode {
+    match parse_flags(args, &cmd) {
+        Ok(f) => execute(f, cmd),
+        Err(code) => code,
+    }
+}
+
+fn execute(f: Flags, cmd: BuildCmd) -> ExitCode {
+    let mut paths = f.paths;
     if paths.is_empty() {
         paths.push(PathBuf::from("."));
     }
     let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mode = if cmd == BuildCmd::Test { barm::codegen::Mode::Test } else { barm::codegen::Mode::Run };
-    let opts = barm::build::Options { mode, unchecked, opt, emit_c };
+    let opts = barm::build::Options { mode, unchecked: f.unchecked, opt: f.opt, emit_c: f.emit_c };
+    let dest = f.out.unwrap_or_else(|| {
+        let stem = paths[0].file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "main".into());
+        PathBuf::from(if stem == "." || stem.is_empty() { "main".to_string() } else { stem })
+    });
+    if f.watch {
+        let then = match cmd {
+            BuildCmd::Build => watch::Then::Build(dest),
+            BuildCmd::Run => watch::Then::Run,
+            BuildCmd::Test => watch::Then::Test,
+        };
+        let wopts = watch::Options { clear_screen: f.clear_screen, kill_signal: f.kill_signal };
+        return watch::run(&paths, &base, &opts, &f.program_args, then, &wopts);
+    }
     let built = match barm::build::build(&paths, &base, &opts) {
         Ok(b) => b,
-        Err(barm::build::BuildError::Diagnostics(sm, diags)) => {
-            print!("{}", barm::diag::render_text(&diags, &sm));
-            let n = diags.len();
-            println!("build: {n} error{}", if n == 1 { "" } else { "s" });
-            return ExitCode::from(1);
-        }
-        Err(barm::build::BuildError::Message(m)) => {
-            eprintln!("error: {m}");
-            return ExitCode::from(2);
-        }
+        Err(e) => return report(e),
     };
-    if time {
+    if f.time {
         let (c, g, cc) = built.timings;
         eprintln!(
             "check {:.1} ms, generate {:.1} ms, C compile {:.1} ms{}",
@@ -171,10 +304,6 @@ fn build_cmd(args: &[String], cmd: BuildCmd) -> ExitCode {
     }
     match cmd {
         BuildCmd::Build => {
-            let dest = out.unwrap_or_else(|| {
-                let stem = paths[0].file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "main".into());
-                PathBuf::from(if stem == "." || stem.is_empty() { "main".to_string() } else { stem })
-            });
             if let Err(e) = std::fs::copy(&built.binary, &dest) {
                 eprintln!("error: can't write {}: {e}", dest.display());
                 return ExitCode::from(2);
@@ -183,7 +312,7 @@ fn build_cmd(args: &[String], cmd: BuildCmd) -> ExitCode {
             ExitCode::SUCCESS
         }
         BuildCmd::Run | BuildCmd::Test => {
-            let status = std::process::Command::new(&built.binary).args(program_args).status();
+            let status = std::process::Command::new(&built.binary).args(&f.program_args).status();
             match status {
                 Ok(s) => match s.code() {
                     Some(c) => ExitCode::from(c.clamp(0, 255) as u8),
@@ -194,6 +323,22 @@ fn build_cmd(args: &[String], cmd: BuildCmd) -> ExitCode {
                     ExitCode::from(2)
                 }
             }
+        }
+    }
+}
+
+/// Prints a failed build's diagnostics or message; the exit code for it.
+fn report(e: barm::build::BuildError) -> ExitCode {
+    match e {
+        barm::build::BuildError::Diagnostics(sm, diags) => {
+            print!("{}", barm::diag::render_text(&diags, &sm));
+            let n = diags.len();
+            println!("build: {n} error{}", if n == 1 { "" } else { "s" });
+            ExitCode::from(1)
+        }
+        barm::build::BuildError::Message(m) => {
+            eprintln!("error: {m}");
+            ExitCode::from(2)
         }
     }
 }
