@@ -1294,7 +1294,7 @@ fn children(ast: &Ast, e: ExprId) -> Vec<ExprId> {
     use crate::ast::ArrowBody;
     let mut out = Vec::new();
     match &ast.expr(e).kind {
-        ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::As(x, _) => out.push(*x),
+        ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::As(x, _) | ExprKind::Try(x) | ExprKind::Await(x) => out.push(*x),
         ExprKind::Binary(_, l, r) | ExprKind::Assign(_, l, r) => out.extend([*l, *r]),
         ExprKind::Update { target, .. } => out.push(*target),
         ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args, .. } => {

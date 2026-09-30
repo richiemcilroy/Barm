@@ -1974,7 +1974,7 @@ pub(crate) fn may_throw(ast: &Ast, s: StmtId) -> bool {
         match &ast.expr(e).kind {
             ExprKind::Try(_) => true,
             ExprKind::Arrow(_) => false,
-            ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::As(x, _) => expr(ast, *x),
+            ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::As(x, _) | ExprKind::Await(x) => expr(ast, *x),
             ExprKind::Binary(_, l, r) | ExprKind::Assign(_, l, r) => expr(ast, *l) || expr(ast, *r),
             ExprKind::Update { target, .. } => expr(ast, *target),
             ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args, .. } => expr(ast, *callee) || args.iter().any(|a| expr(ast, a.expr)),

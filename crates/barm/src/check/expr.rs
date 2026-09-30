@@ -105,6 +105,8 @@ impl<'a> Checker<'a> {
             }
             ExprKind::Ident(sym) => self.ident(e, *sym, span),
             ExprKind::Paren(x) => self.expr(*x, exp),
+            // Synchronous until real async is on (BARM_ASYNC): `await e` is `e`.
+            ExprKind::Await(x) => self.expr(*x, exp),
             ExprKind::Unary(op, x) => self.unary(*op, *x, exp, span),
             ExprKind::Binary(op, l, r) => self.binary(*op, *l, *r, exp, span),
             ExprKind::Assign(op, t, v) => self.assign(*op, *t, *v, span),

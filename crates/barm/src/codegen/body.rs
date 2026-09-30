@@ -1475,6 +1475,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             ExprKind::This => self.ident(e, ty),
             ExprKind::Try(x) => self.expr(*x),
+            // Synchronous until real async is on (BARM_ASYNC): the value itself.
+            ExprKind::Await(x) => self.expr(*x),
             ExprKind::Super => Val::plain("0", ty),
         }
     }
@@ -2739,7 +2741,7 @@ fn collect_exprs_stmt(ast: &ast::Ast, s: StmtId, out: &mut Vec<ExprId>) {
 fn collect_exprs_expr(ast: &ast::Ast, e: ExprId, out: &mut Vec<ExprId>) {
     out.push(e);
     match &ast.expr(e).kind {
-        ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::As(x, _) | ExprKind::Try(x) => collect_exprs_expr(ast, *x, out),
+        ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::As(x, _) | ExprKind::Try(x) | ExprKind::Await(x) => collect_exprs_expr(ast, *x, out),
         ExprKind::Binary(_, l, r) | ExprKind::Assign(_, l, r) => {
             collect_exprs_expr(ast, *l, out);
             collect_exprs_expr(ast, *r, out);
