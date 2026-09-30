@@ -64,6 +64,8 @@ pub enum Ty {
     Rec(u32, Tys),
     /// A structural interface: (interface index, type arguments).
     Interface(u32, Tys),
+    /// A class instance (a reference): (class index, type arguments).
+    Class(u32, Tys),
     /// The value of `import * as ns` (module index).
     Namespace(u32),
     /// Built-in namespaces such as `Math` and `console`.
@@ -335,6 +337,11 @@ impl Types {
         self.intern(Ty::Interface(iface, l))
     }
 
+    pub fn class(&mut self, class: u32, args: &[TyId]) -> TyId {
+        let l = self.tys_list(args);
+        self.intern(Ty::Class(class, l))
+    }
+
     pub fn str_lit(&mut self, s: Sym) -> TyId {
         self.intern(Ty::StrLit(s))
     }
@@ -474,6 +481,11 @@ impl Types {
                 let args: Vec<TyId> = args.into_iter().map(|a| self.subst(a, map)).collect();
                 self.iface(d, &args)
             }
+            Ty::Class(d, args) => {
+                let args: Vec<TyId> = self.tys(args).to_vec();
+                let args: Vec<TyId> = args.into_iter().map(|a| self.subst(a, map)).collect();
+                self.class(d, &args)
+            }
             _ => ty,
         }
     }
@@ -490,7 +502,7 @@ impl Types {
             Ty::Record(fs) => self.fields(fs).iter().any(|f| self.mentions(f.ty, params)),
             Ty::Union(ms) => self.tys(ms).iter().any(|&m| self.mentions(m, params)),
             Ty::Func(ps, r) => self.params(ps).iter().any(|p| self.mentions(p.ty, params)) || self.mentions(r, params),
-            Ty::Rec(_, args) | Ty::Interface(_, args) => self.tys(args).iter().any(|&a| self.mentions(a, params)),
+            Ty::Rec(_, args) | Ty::Interface(_, args) | Ty::Class(_, args) => self.tys(args).iter().any(|&a| self.mentions(a, params)),
             _ => false,
         }
     }
@@ -516,6 +528,7 @@ pub struct Display<'a> {
     pub param_names: (&'a [Sym], &'a [Sym]),
     pub rec_names: &'a [String],
     pub iface_names: &'a [String],
+    pub class_names: &'a [String],
     pub module_names: &'a [String],
 }
 
@@ -652,8 +665,12 @@ impl Display<'_> {
                 let name = if (p as usize) < base.len() { base[p as usize] } else { local[p as usize - base.len()] };
                 out.push_str(self.interner.get(name));
             }
-            Ty::Rec(d, args) | Ty::Interface(d, args) => {
-                let names = if matches!(self.types.get(ty), Ty::Rec(..)) { self.rec_names } else { self.iface_names };
+            Ty::Rec(d, args) | Ty::Interface(d, args) | Ty::Class(d, args) => {
+                let names = match self.types.get(ty) {
+                    Ty::Rec(..) => self.rec_names,
+                    Ty::Interface(..) => self.iface_names,
+                    _ => self.class_names,
+                };
                 out.push_str(&names[d as usize]);
                 let args = self.types.tys(args);
                 if !args.is_empty() {
