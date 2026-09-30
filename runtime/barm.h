@@ -509,6 +509,12 @@ typedef struct bm_tls_ops {
     void (*close)(bm_tls *t, bool notify);
 } bm_tls_ops;
 extern const bm_tls_ops *bm_tls_impl;
+/* brotli and zstd bodies (runtime/codecs.c, in the same archive): set by bm_tls_install too.
+ * Append the decoded body to `out`; false if it's corrupt or cut short. */
+extern bool (*bm_decode_brotli)(const uint8_t *p, size_t n, bm_sb *out);
+extern bool (*bm_decode_zstd)(const uint8_t *p, size_t n, bm_sb *out);
+bool bm_codec_brotli(const uint8_t *p, size_t n, bm_sb *out);
+bool bm_codec_zstd(const uint8_t *p, size_t n, bm_sb *out);
 void bm_tls_install(void);
 bm_str bm_native_bytesToString(bm_arr bytes);
 bm_arr bm_native_stringToBytes(bm_str s);

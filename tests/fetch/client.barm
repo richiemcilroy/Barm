@@ -130,6 +130,9 @@ await measure("deflate (zlib)", fetch(base + "/deflate?f=fixture.zlib"), fixture
 await measure("deflate (stored blocks)", fetch(base + "/deflate?f=fixture-stored.zlib"), fixtureText.slice(0, 70000))
 await show("deflate (raw, fixed codes)", fetch(base + "/deflate?f=fixture-fixed.deflate"))
 await show("gzip (two members)", fetch(base + "/gzip?f=fixture-two.gz"))
+await measure("brotli", fetch(base + "/br?f=fixture.br"), fixtureText)
+await measure("zstd", fetch(base + "/zstd?f=fixture.zst"), fixtureText)
+await show("zstd (two frames)", fetch(base + "/zstd?f=fixture-two.zst"))
 try {
   const r = await fetch(base + "/gzip?f=fixture.gz", { decompress: false })
   const raw = await r.bytes()

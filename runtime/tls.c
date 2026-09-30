@@ -273,4 +273,6 @@ static const bm_tls_ops bm_tls_table = {
 
 void bm_tls_install(void) {
     bm_tls_impl = &bm_tls_table;
+    bm_decode_brotli = bm_codec_brotli;
+    bm_decode_zstd = bm_codec_zstd;
 }

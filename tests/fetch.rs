@@ -147,12 +147,14 @@ fn handle(s: &mut TcpStream, r: &Req, served: usize, fixtures: &Path, alt: &str)
         "/headers" => {
             let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nX-A: 1\r\nx-a: 2\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\nX-Spaces:   padded value  \r\n\r\nok");
         }
-        "/gzip" | "/deflate" => {
+        "/gzip" | "/deflate" | "/br" | "/zstd" => {
             let name = r.param("f").unwrap();
-            let enc = if r.path == "/gzip" { "gzip" } else { "deflate" };
+            let enc = &r.path[1..];
             respond(s, "200 OK", &[("Content-Encoding", enc.into())], &fixture(&name));
         }
         "/badgzip" => respond(s, "200 OK", &[("Content-Encoding", "gzip".into())], b"\x1f\x8b\x08\x00not really gzip at all"),
+        "/badbr" => respond(s, "200 OK", &[("Content-Encoding", "br".into())], b"not brotli at all, really not"),
+        "/badzstd" => respond(s, "200 OK", &[("Content-Encoding", "zstd".into())], b"\x28\xb5\x2f\xfd not zstd after the magic"),
         "/utf8" => respond(s, "200 OK", &[], b"a\xffb\xe2\x82 c\xf0\x9f\x98\x80d"),
         "/bom" => respond(s, "200 OK", &[], b"\xef\xbb\xbfbom"),
         "/big" => {

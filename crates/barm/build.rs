@@ -1,4 +1,5 @@
-//! Cargo build script: embeds the TLS sources (runtime/tls.c and the vendored BoringSSL) in the
+//! Cargo build script: embeds the fetch() library sources (runtime/tls.c and codecs.c with the
+//! vendored BoringSSL, brotli and zstd) in the
 //! compiler, so `barm build` can compile them into the TLS archive that fetch() programs link
 //! (see src/build.rs), and hashes them once here (TLS_KEY) rather than on every build.
 
@@ -19,10 +20,13 @@ fn files(dir: &Path, out: &mut Vec<PathBuf>) {
 
 fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
-    let vendor = root.join("vendor/boringssl");
+    let vendor = root.join("vendor");
     let mut list = Vec::new();
-    files(&vendor, &mut list);
+    for lib in ["boringssl", "brotli", "zstd"] {
+        files(&vendor.join(lib), &mut list);
+    }
     list.push(root.join("runtime/tls.c"));
+    list.push(root.join("runtime/codecs.c"));
     let (mut a, mut b): (u64, u64) = (0xcbf29ce484222325, 0x84222325cbf29ce4);
     let mut code = String::from("/// (path relative to the repository, contents)\npub static TLS_FILES: &[(&str, &[u8])] = &[\n");
     for p in &list {
@@ -39,6 +43,7 @@ fn main() {
     std::fs::write(out, code).unwrap();
     println!("cargo:rerun-if-changed={}", vendor.display());
     println!("cargo:rerun-if-changed={}", root.join("runtime/tls.c").display());
+    println!("cargo:rerun-if-changed={}", root.join("runtime/codecs.c").display());
     for p in &list {
         println!("cargo:rerun-if-changed={}", p.display());
     }
