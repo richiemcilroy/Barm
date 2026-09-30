@@ -193,7 +193,7 @@ static uint64_t bm_hash_bytes(const void *data, size_t len) {
 
 bm_strbuf bm_empty_strbuf = {-1, 0, {0}}; /* flexible-array initializer: GNU C (gcc, clang) */
 
-typedef struct { int64_t rc; int64_t len; char data[8]; } bm_small_strbuf;
+typedef struct { int32_t rc; int32_t len; char data[8]; } bm_small_strbuf;
 #define BM_A1(c) {-1, 1, {(char)(c), 0}}
 #define BM_A4(c) BM_A1(c), BM_A1((c) + 1), BM_A1((c) + 2), BM_A1((c) + 3)
 #define BM_A16(c) BM_A4(c), BM_A4((c) + 4), BM_A4((c) + 8), BM_A4((c) + 12)
@@ -213,13 +213,13 @@ static inline bm_str bm_ascii_str(unsigned char c) { return (bm_str){(bm_strbuf 
 /* Small strings (header + bytes + NUL <= BM_SMALL_MAX) come from per-size free lists refilled
  * from 64 KiB slabs; larger ones from malloc. The class follows from the length alone, so
  * freeing needs no flag. (Plain malloc under AddressSanitizer, so it sees every string.) */
-enum { BM_SMALL_MAX = 256, BM_SMALL_CLASSES = BM_SMALL_MAX / 16 + 1 };
+enum { BM_SMALL_MAX = 256, BM_SMALL_CLASSES = BM_SMALL_MAX / 8 + 1 }; /* 8-byte classes */
 #if defined(__SANITIZE_ADDRESS__) || (defined(__has_feature) && __has_feature(address_sanitizer))
 #define BM_PLAIN_ALLOC 1
 #endif
 static void *bm_small_bins[BM_SMALL_CLASSES];
 static __attribute__((noinline)) void *bm_small_refill(size_t c) {
-    size_t sz = c * 16, n = 65536 / sz;
+    size_t sz = c * 8, n = 65536 / sz;
     char *slab = bm_alloc(n * sz);
     for (size_t i = n - 1; i >= 1; i--) {
         void **f = (void **)(void *)(slab + i * sz);
@@ -232,7 +232,7 @@ static inline void *bm_small_alloc(size_t size) {
 #ifdef BM_PLAIN_ALLOC
     return bm_alloc(size);
 #endif
-    size_t c = (size + 15) >> 4;
+    size_t c = (size + 7) >> 3;
     void **f = bm_small_bins[c];
     if (BM_LIKELY(f != NULL)) { bm_small_bins[c] = *f; return f; }
     return bm_small_refill(c);
@@ -241,7 +241,7 @@ static inline void bm_small_free(void *p, size_t size) {
 #ifdef BM_PLAIN_ALLOC
     free(p); return;
 #endif
-    size_t c = (size + 15) >> 4;
+    size_t c = (size + 7) >> 3;
     *(void **)p = bm_small_bins[c];
     bm_small_bins[c] = p;
 }
@@ -249,9 +249,10 @@ static inline size_t bm_strbuf_size(size_t n) { return BM_STR_HDR + n + 1; }
 
 static bm_strbuf *bm_strbuf_new(size_t n) {
     size_t size = bm_size_mul_add(n, 1, BM_STR_HDR + 1);
+    if (n > INT32_MAX) bm_trap("string too long", NULL);
     bm_strbuf *b = (bm_strbuf *)(size <= BM_SMALL_MAX ? bm_small_alloc(size) : bm_alloc(size));
     b->rc = 1;
-    b->len = (int64_t)n;
+    b->len = (int32_t)n;
     b->data[n] = 0;
     return b;
 }
@@ -285,7 +286,8 @@ bm_str bm_str_from_sb(bm_sb *sb) {
     bm_strbuf *b = (bm_strbuf *)(sb->data - BM_STR_HDR);
     if (sb->cap - n > 64) b = (bm_strbuf *)bm_realloc(b, BM_STR_HDR + n + 1);
     b->rc = 1;
-    b->len = (int64_t)n;
+    if (n > INT32_MAX) bm_trap("string too long", NULL);
+    b->len = (int32_t)n;
     b->data[n] = 0;
     sb->data = NULL;
     sb->len = sb->cap = 0;
