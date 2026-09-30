@@ -1334,11 +1334,7 @@ impl<'a> Parser<'a> {
     fn for_stmt(&mut self) -> StmtId {
         let start = self.cur_span();
         self.bump(); // for
-        if self.at(Tok::Await) {
-            let span = self.cur_span();
-            self.err("U0003", span, "`for await` is not supported yet (planned for M6)");
-            self.bump();
-        }
+        let is_await = self.eat(Tok::Await);
         self.expect(Tok::LParen, "after `for`");
         if matches!(self.kind(), Tok::Const | Tok::Let | Tok::Var) && self.nth(1) == Tok::Ident {
             let is_of = self.toks.get(self.pos + 2).map(|t| t.kind == Tok::Ident && self.text(*t) == "of").unwrap_or(false);
@@ -1362,8 +1358,15 @@ impl<'a> Parser<'a> {
                 if is_in {
                     return self.mk_stmt(StmtKind::Error, span);
                 }
+                if is_await {
+                    return self.for_await(mutable, name, name_span, iter, body, span);
+                }
                 return self.mk_stmt(StmtKind::ForOf { mutable, name, name_span, iter, body }, span);
             }
+        }
+        if is_await {
+            let span = self.cur_span();
+            self.err("P0008", span, "`for await` needs `(const x of stream)`");
         }
         let init = if self.at(Tok::Semi) {
             None
@@ -1382,6 +1385,80 @@ impl<'a> Parser<'a> {
         let body = self.stmt();
         let span = start.to(self.prev_span());
         self.mk_stmt(StmtKind::For { init, cond, step, body }, span)
+    }
+
+    /// `for await (const x of stream) body` reads a ReadableStream (`res.body`) chunk by chunk:
+    ///
+    /// ```text
+    /// { const it = try stream.getReader(); let done = false
+    ///   while (true) { const r = try await it.read(); if (r.done) { done = true; break }
+    ///                  const x = r.value!; body }
+    ///   if (!done) await it.cancel()   // left early (`break`): the rest isn't wanted
+    ///   it.releaseLock() }
+    /// ```
+    fn for_await(&mut self, mutable: bool, name: Sym, name_span: Span, iter: ExprId, body: StmtId, span: Span) -> StmtId {
+        let sp = self.expr_span(iter);
+        let at = span.start;
+        // Locals are keyed by where their name starts: each hidden one gets its own offset inside
+        // the `for` keyword, where no written declaration can start.
+        let hidden = |k: u32| Span::new(span.file, span.start + k, span.start + k + 1);
+        let it = self.interner.intern(&format!("for_await_reader_{at}"));
+        let res = self.interner.intern(&format!("for_await_result_{at}"));
+        let done = self.interner.intern(&format!("for_await_done_{at}"));
+        let method = |p: &mut Self, obj: ExprId, m: &str| -> ExprId {
+            let name = p.interner.intern(m);
+            let member = p.mk_expr(ExprKind::Member { obj, name, name_span: sp, optional: false }, sp);
+            p.mk_expr(ExprKind::Call { callee: member, type_args: Vec::new(), args: Vec::new(), optional: false }, sp)
+        };
+        let field = |p: &mut Self, obj: ExprId, f: &str| -> ExprId {
+            let name = p.interner.intern(f);
+            p.mk_expr(ExprKind::Member { obj, name, name_span: sp, optional: false }, sp)
+        };
+        let ident = |p: &mut Self, s: Sym| p.mk_expr(ExprKind::Ident(s), sp);
+        // const it = try stream.getReader()
+        let get = method(self, iter, "getReader");
+        let get = self.mk_expr(ExprKind::Try(get), sp);
+        let let_it = self.mk_stmt(StmtKind::Let { mutable: false, name: it, name_span: hidden(0), ty: None, init: Some(get) }, sp);
+        // let done = false
+        let f = self.mk_expr(ExprKind::Bool(false), sp);
+        let let_done = self.mk_stmt(StmtKind::Let { mutable: true, name: done, name_span: hidden(1), ty: None, init: Some(f) }, sp);
+        // const r = try await it.read()
+        let it_e = ident(self, it);
+        let read = method(self, it_e, "read");
+        let read = self.mk_expr(ExprKind::Await(read), sp);
+        let read = self.mk_expr(ExprKind::Try(read), sp);
+        let let_r = self.mk_stmt(StmtKind::Let { mutable: false, name: res, name_span: hidden(2), ty: None, init: Some(read) }, sp);
+        // if (r.done) { done = true; break }
+        let r_e = ident(self, res);
+        let cond = field(self, r_e, "done");
+        let d_e = ident(self, done);
+        let t = self.mk_expr(ExprKind::Bool(true), sp);
+        let set = self.mk_expr(ExprKind::Assign(AssignOp::Assign, d_e, t), sp);
+        let set = self.mk_stmt(StmtKind::Expr(set), sp);
+        let brk = self.mk_stmt(StmtKind::Break, sp);
+        let then = self.mk_stmt(StmtKind::Block(vec![set, brk]), sp);
+        let if_done = self.mk_stmt(StmtKind::If(cond, then, None), sp);
+        // const x = r.value!
+        let r_e = ident(self, res);
+        let value = field(self, r_e, "value");
+        let value = self.mk_expr(ExprKind::NonNull(value), sp);
+        let let_x = self.mk_stmt(StmtKind::Let { mutable, name, name_span, ty: None, init: Some(value) }, name_span);
+        let loop_body = self.mk_stmt(StmtKind::Block(vec![let_r, if_done, let_x, body]), span);
+        let t = self.mk_expr(ExprKind::Bool(true), sp);
+        let wh = self.mk_stmt(StmtKind::While(t, loop_body), span);
+        // if (!done) await it.cancel()
+        let d_e = ident(self, done);
+        let not_done = self.mk_expr(ExprKind::Unary(UnOp::Not, d_e), sp);
+        let it_e = ident(self, it);
+        let cancel = method(self, it_e, "cancel");
+        let cancel = self.mk_expr(ExprKind::Await(cancel), sp);
+        let cancel = self.mk_stmt(StmtKind::Expr(cancel), sp);
+        let if_cancel = self.mk_stmt(StmtKind::If(not_done, cancel, None), sp);
+        // it.releaseLock()
+        let it_e = ident(self, it);
+        let release = method(self, it_e, "releaseLock");
+        let release = self.mk_stmt(StmtKind::Expr(release), sp);
+        self.mk_stmt(StmtKind::Block(vec![let_it, let_done, wh, if_cancel, release]), span)
     }
 
     fn switch_stmt(&mut self) -> StmtId {
