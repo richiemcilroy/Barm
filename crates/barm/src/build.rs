@@ -59,6 +59,11 @@ fn c_compiler() -> String {
     if let Ok(cc) = std::env::var("CC") {
         return cc;
     }
+    // macOS: the system clang generates code as fast as Homebrew's LLVM (bench/run.py) and
+    // starts faster, and it links in the same invocation.
+    if cfg!(target_vendor = "apple") && Path::new("/usr/bin/cc").is_file() {
+        return "/usr/bin/cc".into();
+    }
     for candidate in ["/opt/homebrew/opt/llvm/bin/clang", "/usr/local/opt/llvm/bin/clang", "/usr/lib/llvm-21/bin/clang", "/usr/lib/llvm-20/bin/clang"] {
         if Path::new(candidate).is_file() {
             return candidate.to_string();
@@ -136,8 +141,26 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         run_cc(cmd, &cc, &rt_c)?;
         std::fs::rename(&tmp, &rt_obj).map_err(|e| BuildError::Message(format!("can't move the runtime into the cache: {e}")))?;
     }
+    // Every program starts with the same runtime interface and prelude: precompile it once (per
+    // compiler and flags) and compile only the program's own code against it.
+    let prefix = codegen::fixed_prefix();
+    let pch = match c_src.strip_prefix(prefix.as_str()) {
+        Some(_) => precompiled_header(&cc, &flags, &c_dir, &prefix, &rt_key),
+        None => None,
+    };
     let c_path = c_dir.join(format!("{key}.c"));
-    std::fs::write(&c_path, &c_src).map_err(|e| BuildError::Message(format!("can't write {}: {e}", c_path.display())))?;
+    let c_text: &str = match &pch {
+        Some(_) => &c_src[prefix.len()..],
+        None => &c_src,
+    };
+    std::fs::write(&c_path, c_text).map_err(|e| BuildError::Message(format!("can't write {}: {e}", c_path.display())))?;
+    let mut flags = flags.clone();
+    let include;
+    if let Some(h) = &pch {
+        include = h.to_string_lossy().into_owned();
+        flags.push("-include");
+        flags.push(&include);
+    }
     // Compile to a temporary name, then rename: concurrent builds never see a partial binary.
     let tmp = bin_dir.join(format!("{key}.tmp{}", std::process::id()));
     let ld = linker(&cc);
@@ -167,6 +190,35 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     std::fs::rename(&tmp, &binary).map_err(|e| BuildError::Message(format!("can't move the binary into the cache: {e}")))?;
     let t3 = Instant::now();
     Ok(Built { binary, cached: false, sources, timings: (t1 - t0, t2 - t1, t3 - t2) })
+}
+
+/// The precompiled fixed prefix (`pre-<key>.h`, with its `.pch`/`.gch` beside it) to pass as
+/// `-include`, built on first use; `None` if the compiler can't precompile it (then programs
+/// are compiled whole, which is only slower).
+fn precompiled_header(cc: &str, flags: &[&str], c_dir: &Path, prefix: &str, rt_key: &str) -> Option<PathBuf> {
+    let clang = cfg!(target_vendor = "apple") || Path::new(cc).file_name().is_some_and(|n| n.to_string_lossy().contains("clang"));
+    let key = hash_hex(&[prefix.as_bytes(), rt_key.as_bytes()]);
+    let header = c_dir.join(format!("pre-{key}.h"));
+    let pch = c_dir.join(format!("pre-{key}.h.{}", if clang { "pch" } else { "gch" }));
+    if pch.is_file() && header.is_file() {
+        return Some(header);
+    }
+    let pid = std::process::id();
+    let tmp_h = c_dir.join(format!("pre-{key}.tmp{pid}.h"));
+    let tmp_p = c_dir.join(format!("pre-{key}.tmp{pid}.pch"));
+    // The header goes to its final path first (the .pch records it; its content is fixed by the
+    // key, so a concurrent build writes the same bytes), then the .pch appears atomically.
+    if !header.is_file() {
+        std::fs::write(&tmp_h, prefix).ok()?;
+        std::fs::rename(&tmp_h, &header).ok()?;
+    }
+    let ok = Command::new(cc).args(flags).args(["-x", "c-header", "-o"]).arg(&tmp_p).arg(&header).output().is_ok_and(|o| o.status.success());
+    if !ok {
+        let _ = std::fs::remove_file(&tmp_p);
+        return None;
+    }
+    std::fs::rename(&tmp_p, &pch).ok()?;
+    Some(header)
 }
 
 fn run_cc(mut cmd: Command, cc: &str, c_path: &Path) -> Result<(), BuildError> {

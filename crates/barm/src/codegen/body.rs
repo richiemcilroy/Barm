@@ -73,6 +73,23 @@ pub(crate) struct Body {
     /// Enclosing `try` blocks that have a `finally`, innermost last: (the `finally` block, scope
     /// depth outside the `try`). `return`, `break` and `continue` run them on the way out.
     pub finallies: Vec<(StmtId, usize)>,
+    /// Accumulator recursion elimination (see `Gen::tre_candidate`): `return a + f(args)`
+    /// becomes "add a, rebind the parameters, jump to the top".
+    pub tre: Option<Tre>,
+}
+
+/// A function whose `return a + f(args)` self-calls run as a loop: the function (module,
+/// item), its parameter types, and the source location of the `+` (for the overflow trap).
+#[derive(Clone)]
+pub(crate) struct Tre {
+    pub m: u32,
+    pub item: u32,
+    pub ptys: Vec<TyId>,
+    pub loc: String,
+    /// The first call runs the function's own code, and its tail hands off to this looping
+    /// copy (`<name>_tre(a, args...)`): calls that end at once (the leaves) keep a small frame.
+    /// `None`: this is the looping copy.
+    pub entry: Option<String>,
 }
 
 impl Body {
@@ -210,6 +227,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             async_fn: None,
             children: Vec::new(),
             finallies: Vec::new(),
+            tre: None,
         });
     }
 
@@ -395,6 +413,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             async_fn: self.pending_async.take(),
             children: Vec::new(),
             finallies: Vec::new(),
+            tre: self.pending_tre.take(),
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
             let access = if inout { format!("(*p{i})") } else { format!("p{i}") };
@@ -426,6 +445,15 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         match kind {
             FnBodyKind::Block(s) => {
+                if self.b().tre.as_ref().is_some_and(|t| t.entry.is_none()) {
+                    // The looping copy starts with the first term (parameter `tre_a0`). Every
+                    // partial sum the recursion would compute is checked at the end, from the
+                    // smallest and largest prefix sums: 64-bit while they fit, then exact 128-bit.
+                    self.line("bm_int tre_acc = 0, tre_min = 0, tre_max = 0; bool tre_on = false, tre_wide = false;");
+                    self.line("bmg_tre_wide tre_ws;");
+                    self.line("BMG_TRE_ADD(tre_a0);");
+                    self.line("tre_top:;");
+                }
                 self.stmt_list_of(s);
                 self.unwind_to(0);
                 if ret != VOID && !self.always_returns_stmt(m, s) {
@@ -458,6 +486,22 @@ impl<'c, 'a> Gen<'c, 'a> {
             self.last_children = b.children;
         }
         b.out
+    }
+
+    /// `a + f(args)` with `f` the function being emitted as a loop: (a, args).
+    fn tre_tail(&self, e: ExprId, tre: &Tre) -> Option<(ExprId, Vec<ExprId>)> {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let ExprKind::Binary(crate::ast::BinOp::Add, a, call) = &ast.expr(e).kind else { return None };
+        let ExprKind::Call { args, optional: false, .. } = &ast.expr(*call).kind else { return None };
+        let fact = self.facts(m).calls.get(call)?;
+        if !matches!(fact.callee, Callee::Fn(fm, fi) if fm == tre.m && fi == tre.item) || args.len() != tre.ptys.len() || args.iter().any(|a| a.by_ref.is_some()) {
+            return None;
+        }
+        if self.facts(m).expr_ty[e as usize] != INT || self.facts(m).expr_ty[*a as usize] != INT {
+            return None;
+        }
+        Some((*a, args.iter().map(|a| a.expr).collect()))
     }
 
     fn always_returns_stmt(&self, m: u32, s: StmtId) -> bool {
@@ -979,7 +1023,73 @@ impl<'c, 'a> Gen<'c, 'a> {
             StmtKind::Try { body, catch, finally } => self.try_stmt(s, *body, catch.as_ref(), *finally),
             StmtKind::Return(v) => {
                 let ret = self.b().ret;
+                if let (Some(x), Some(tre)) = (v, self.b().tre.clone())
+                    && let Some((a, args)) = self.tre_tail(*x, &tre)
+                {
+                    // `return a + f(args)`: acc += a (recording the prefix sum before it), rebind
+                    // the parameters (every argument first), and loop.
+                    self.push_temps();
+                    let av = self.expr(a);
+                    let av = self.coerce(av, INT);
+                    let code = self.consume(av);
+                    let t = self.fresh("tre_a");
+                    self.line(format!("bm_int {t} = {code};"));
+                    if let Some(looper) = &tre.entry {
+                        // The first call: continue in the looping copy.
+                        let mut all = vec![t.clone()];
+                        for (i, arg) in args.iter().enumerate() {
+                            let v = self.expr(*arg);
+                            let v = self.coerce(v, tre.ptys[i]);
+                            let code = self.consume(v);
+                            let ct = self.ctype(tre.ptys[i]);
+                            let n = self.fresh("tre_p");
+                            self.line(format!("{ct} {n} = {code};"));
+                            all.push(n);
+                        }
+                        let r = self.fresh("r");
+                        self.line(format!("bm_int {r} = {looper}({});", all.join(", ")));
+                        self.release_all_temps();
+                        self.unwind_for_exit(0);
+                        self.line(format!("return {r};"));
+                        self.b().temps.pop();
+                        return;
+                    }
+                    self.line(format!("BMG_TRE_ADD({t});"));
+                    let mut news = Vec::new();
+                    for (i, arg) in args.iter().enumerate() {
+                        let v = self.expr(*arg);
+                        let v = self.coerce(v, tre.ptys[i]);
+                        let code = self.consume(v);
+                        let ct = self.ctype(tre.ptys[i]);
+                        let n = self.fresh("tre_p");
+                        self.line(format!("{ct} {n} = {code};"));
+                        news.push(n);
+                    }
+                    for (i, n) in news.iter().enumerate() {
+                        self.line(format!("p{i} = {n};"));
+                    }
+                    self.release_all_temps();
+                    self.unwind_for_exit(0);
+                    self.line("goto tre_top;");
+                    self.b().temps.pop();
+                    return;
+                }
                 match v {
+                    Some(x) if ret != VOID && self.b().tre.as_ref().is_some_and(|t| t.entry.is_none()) => {
+                        // A base case of a looping function: add the accumulated terms.
+                        let loc = self.b().tre.as_ref().unwrap().loc.clone();
+                        self.push_temps();
+                        let val = self.expr(*x);
+                        let val = self.coerce(val, ret);
+                        let code = self.consume(val);
+                        let r = self.fresh("r");
+                        self.line(format!("bm_int {r} = {code};"));
+                        self.release_all_temps();
+                        self.unwind_for_exit(0);
+                        self.line(format!("if (tre_on) {r} = BMG_TRE_END({r}, {loc});"));
+                        self.line(format!("return {r};"));
+                        self.b().temps.pop();
+                    }
                     Some(x) if ret != VOID => {
                         self.push_temps();
                         let val = self.expr(*x);
@@ -2753,6 +2863,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             async_fn: self.pending_async.take(),
             children: Vec::new(),
             finallies: Vec::new(),
+            tre: None,
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
             let access = if inout { format!("(*p{i})") } else { format!("p{i}") };

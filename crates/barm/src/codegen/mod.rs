@@ -20,8 +20,8 @@ pub(crate) mod class;
 mod iface;
 mod json;
 
-use crate::ast::{self, ExprId, ItemKind};
-use crate::check::{Checker, IdentFact, ModuleFacts};
+use crate::ast::{self, ExprId, ExprKind, ItemKind, StmtKind};
+use crate::check::{Callee, Checker, IdentFact, ModuleFacts};
 use crate::diag::Diagnostic;
 use crate::hash::{FxMap, FxSet};
 use crate::intern::Sym;
@@ -199,6 +199,8 @@ pub(crate) struct Gen<'c, 'a> {
     /// The awaited calls embedded in the async body just emitted: (union member, frame type).
     pub(crate) last_children: Vec<(String, String)>,
     /// Frame structs of async functions.
+    /// The accumulator loop for the function `function_body` emits next (see `tre_candidate`).
+    pub(crate) pending_tre: Option<body::Tre>,
     pub(crate) frame_defs: Vec<asyncfn::FrameDef>,
 }
 
@@ -265,6 +267,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             needs_uncaught: false,
             pending_async: None,
             last_children: Vec::new(),
+            pending_tre: None,
             frame_defs: Vec::new(),
         }
     }
@@ -1238,8 +1241,87 @@ impl<'c, 'a> Gen<'c, 'a> {
                 entry_unique.push(*key);
             }
         }
+        if let Some(t) = self.tre_candidate(inst.m, inst.item, &inst.subst, &params, ret) {
+            // The looping copy takes the first term, then the parameters; the function's own
+            // body (first call) hands its tail to it.
+            let looper = format!("{}_tre", inst.cname);
+            let mut ps: Vec<String> = vec!["bm_int tre_a0".into()];
+            for (i, ty) in t.ptys.iter().enumerate() {
+                let ct = self.ctype(*ty);
+                ps.push(format!("{ct} p{i}"));
+            }
+            let lproto = format!("bm_int {looper}({})", ps.join(", "));
+            let _ = writeln!(self.protos, "static {lproto};");
+            self.pending_tre = Some(body::Tre { entry: None, ..t.clone() });
+            let lcode = self.function_body(inst.m, inst.subst.clone(), &params, ret, body::FnBodyKind::Block(f.body), Some(entry_unique.clone()), None, None);
+            let _ = writeln!(self.funcs, "static {lproto} {{\n{lcode}}}\n");
+            self.pending_tre = Some(body::Tre { entry: Some(looper), ..t });
+        }
         let code = self.function_body(inst.m, inst.subst.clone(), &params, ret, body::FnBodyKind::Block(f.body), Some(entry_unique), None, None);
         let _ = writeln!(self.funcs, "static {proto} {{\n{code}}}\n");
+    }
+
+    /// Accumulator recursion elimination for checked integer `+`: a function like
+    /// `fib(n) { if (n < 2) return n; return fib(n - 1) + fib(n - 2) }` runs its tail
+    /// `return a + f(args)` as a loop. Evaluation order is unchanged (`a`, then the arguments),
+    /// and overflow still traps exactly when the recursion would: the terms are summed as
+    /// 128-bit integers, and each partial sum the recursion computes (a suffix sum: the total
+    /// minus a prefix sum) is checked at the end through the smallest and largest prefix sums.
+    /// C compilers do this for wrapping `+` but not for a checked one. Only for simple
+    /// functions: non-generic, `int` result, scalar by-value parameters, no closures, no `try`,
+    /// nothing thrown.
+    fn tre_candidate(&mut self, m: u32, item: u32, subst: &FxMap<u32, TyId>, params: &[(u32, TyId, bool)], ret: TyId) -> Option<body::Tre> {
+        if !subst.is_empty() || ret != INT || self.c.sigs[&(m, item)].throws != NEVER {
+            return None;
+        }
+        let scalar = |g: &Self, t: TyId| matches!(g.tget(t), Ty::Int | Ty::F64 | Ty::F32 | Ty::Bool | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64);
+        if params.iter().any(|&(_, t, inout)| inout || !scalar(self, t)) {
+            return None;
+        }
+        let ast = self.ast(m);
+        let ItemKind::Function(f) = &ast.items[item as usize].kind else { return None };
+        // No closures (they might capture the parameters the loop rebinds) and no `try`.
+        let mut stmts = vec![f.body];
+        let mut tails = Vec::new();
+        while let Some(s) = stmts.pop() {
+            match &ast.stmt(s).kind {
+                StmtKind::Try { .. } => return None,
+                StmtKind::Block(ss) => stmts.extend(ss.iter().copied()),
+                StmtKind::If(_, t, e) => {
+                    stmts.push(*t);
+                    stmts.extend(e.iter().copied());
+                }
+                StmtKind::While(_, b) | StmtKind::DoWhile(b, _) | StmtKind::ForOf { body: b, .. } => stmts.push(*b),
+                StmtKind::For { init, body: b, .. } => {
+                    stmts.extend(init.iter().copied());
+                    stmts.push(*b);
+                }
+                StmtKind::Switch(_, cases) => stmts.extend(cases.iter().flat_map(|c| c.body.iter().copied())),
+                StmtKind::Return(Some(e)) => tails.push(*e),
+                _ => {}
+            }
+        }
+        let mut exprs = Vec::new();
+        body::collect_exprs_stmt_pub(ast, f.body, &mut exprs);
+        if exprs.iter().any(|&e| matches!(ast.expr(e).kind, ExprKind::Arrow(_))) {
+            return None;
+        }
+        let ptys: Vec<TyId> = params.iter().map(|p| p.1).collect();
+        for e in tails {
+            if let ExprKind::Binary(ast::BinOp::Add, a, call) = &ast.expr(e).kind
+                && let ExprKind::Call { args, optional: false, .. } = &ast.expr(*call).kind
+                && args.len() == ptys.len()
+                && let Some(fact) = self.facts(m).calls.get(call)
+                && matches!(fact.callee, Callee::Fn(fm, fi) if fm == m && fi == item)
+                && self.facts(m).expr_ty[e as usize] == INT
+                && self.facts(m).expr_ty[*a as usize] == INT
+            {
+                let span = ast.expr(e).span;
+                let loc = self.loc(span);
+                return Some(body::Tre { m, item, ptys, loc, entry: None });
+            }
+        }
+        None
     }
 
     /// Prints an error that escaped `main` (stderr) or fails the running test.
@@ -1625,6 +1707,48 @@ static void bmg_sort_f64(double *a, bm_int n, bool desc) {
     if (zs) bm_free(zs);
 }
 
+/* Accumulator recursion elimination (tre_candidate): add a term to the running sum,
+ * remembering the smallest and largest prefix sum; at the end, the total must make every
+ * suffix sum (total - prefix) fit, as the recursion's own additions would have checked.
+ * 64-bit while the prefix sums fit; after that, exact 128-bit state kept out of registers. */
+typedef struct { __int128 acc, mn, mx; } bmg_tre_wide;
+static __attribute__((noinline, cold)) void bmg_tre_widen(bmg_tre_wide *w, bm_int acc, bm_int mn, bm_int mx, bm_int t) {
+    w->mn = mn < acc ? mn : acc;
+    w->mx = mx > acc ? mx : acc;
+    w->acc = (__int128)acc + t;
+}
+static __attribute__((noinline, cold)) void bmg_tre_add_wide(bmg_tre_wide *w, bm_int t) {
+    if (w->acc < w->mn) w->mn = w->acc;
+    if (w->acc > w->mx) w->mx = w->acc;
+    w->acc += t;
+}
+static __attribute__((noinline, cold)) bm_int bmg_tre_end_wide(bmg_tre_wide *w, bm_int b, const char *loc) {
+    __int128 T = w->acc + b;
+#ifndef BARM_UNCHECKED
+    if (T - w->mx < INT64_MIN || T - w->mn > INT64_MAX) bm_trap("integer overflow in +", loc);
+#endif
+    (void)loc;
+    return (bm_int)T;
+}
+#define BMG_TRE_ADD(t) do { bm_int tre_t_ = (t), tre_n_; \
+    if (__builtin_expect(tre_wide, 0)) bmg_tre_add_wide(&tre_ws, tre_t_); \
+    else if (__builtin_expect(__builtin_add_overflow(tre_acc, tre_t_, &tre_n_), 0)) { bmg_tre_widen(&tre_ws, tre_acc, tre_min, tre_max, tre_t_); tre_wide = true; } \
+    else { tre_min = tre_acc < tre_min ? tre_acc : tre_min; tre_max = tre_acc > tre_max ? tre_acc : tre_max; tre_acc = tre_n_; } \
+    tre_on = true; } while (0)
+static inline bm_int bmg_tre_end64(bm_int acc, bm_int mn, bm_int mx, bm_int b, const char *loc) {
+    bm_int t, u;
+    if (__builtin_add_overflow(acc, b, &t) || __builtin_sub_overflow(t, mx, &u) || __builtin_sub_overflow(t, mn, &u)) {
+        /* the 64-bit total or a difference overflowed: decide exactly */
+        __int128 T = (__int128)acc + b;
+#ifndef BARM_UNCHECKED
+        if (T - mx < INT64_MIN || T - mn > INT64_MAX) bm_trap("integer overflow in +", loc);
+#endif
+        return (bm_int)T;
+    }
+    (void)loc;
+    return t;
+}
+#define BMG_TRE_END(b, loc) (__builtin_expect(tre_wide, 0) ? bmg_tre_end_wide(&tre_ws, (b), (loc)) : bmg_tre_end64(tre_acc, tre_min, tre_max, (b), (loc)))
 #ifdef BARM_UNCHECKED
 /* --unchecked: two's-complement wrapping (defined behaviour, like Rust release builds). */
 #define BM_ADD(T, a, b, loc) ({ T bm__r; (void)__builtin_add_overflow((a), (b), &bm__r); bm__r; })
