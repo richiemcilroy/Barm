@@ -1687,11 +1687,76 @@ static inline uint64_t bmg_f64_key(double x) {
     else memcpy(&u, &x, 8);
     return (u >> 63) ? ~u : (u ^ 0x8000000000000000ull);
 }
-/* xs.sort((a, b) => a - b) / (b - a) on f64[]: radix sort of keys, decoded back; zeros keep
- * their original relative order (their signs are replayed in encounter order). */
+/* In-place radix sort of 64-bit keys, not stable (callers use it only where equal keys are
+ * indistinguishable). One in-place pass (American flag) splits the keys by the 11 highest bits
+ * on which they differ; buckets then finish with LSD radix sort through a scratch buffer the
+ * size of the bucket (small, in cache) — or, if a bucket is still large, recursively in place.
+ * Extra memory: the largest small bucket, not a copy of the array. */
+enum { BMG_RX_SMALL = 1 << 15 };
+static void bmg_lsd_bucket(uint64_t *k, size_t n, uint64_t *tmp, uint64_t diff) {
+    uint64_t *src = k, *dst = tmp;
+    for (int shift = 0; shift < 64; shift += 8) {
+        if (!((diff >> shift) & 255)) continue; /* a byte every key shares */
+        size_t cnt[256] = {0};
+        for (size_t i = 0; i < n; i++) cnt[(src[i] >> shift) & 255]++;
+        size_t pos = 0;
+        for (int b = 0; b < 256; b++) { size_t c = cnt[b]; cnt[b] = pos; pos += c; }
+        for (size_t i = 0; i < n; i++) { uint64_t v = src[i]; dst[cnt[(v >> shift) & 255]++] = v; }
+        uint64_t *t = src; src = dst; dst = t;
+    }
+    if (src != k) memcpy(k, src, n * sizeof *k);
+}
+static void bmg_radix_inplace(uint64_t *k, size_t n, uint64_t *tmp) {
+    if (n < 64) {
+        for (size_t i = 1; i < n; i++) {
+            uint64_t v = k[i];
+            size_t j = i;
+            while (j > 0 && k[j - 1] > v) { k[j] = k[j - 1]; j--; }
+            k[j] = v;
+        }
+        return;
+    }
+    uint64_t diff = 0, k0 = k[0];
+    for (size_t i = 1; i < n; i++) diff |= k[i] ^ k0;
+    if (!diff) return;
+    if (n <= BMG_RX_SMALL) { bmg_lsd_bucket(k, n, tmp, diff); return; }
+    int top = 63 - __builtin_clzll(diff);
+    int shift = top >= 10 ? top - 10 : 0;
+    enum { B = 2048 };
+    size_t *cnt = calloc(B * 3, sizeof(size_t));
+    if (!cnt) bm_trap("out of memory", "sort");
+    size_t *head = cnt + B, *tail = cnt + 2 * B;
+    for (size_t i = 0; i < n; i++) cnt[(k[i] >> shift) & (B - 1)]++;
+    size_t pos = 0;
+    for (int b = 0; b < B; b++) { head[b] = pos; pos += cnt[b]; tail[b] = pos; }
+    for (int b = 0; b < B; b++) {
+        while (head[b] < tail[b]) {
+            uint64_t v = k[head[b]];
+            size_t d = (v >> shift) & (B - 1);
+            while (d != (size_t)b) { /* cycle: place v, pick up what was there */
+                uint64_t t = k[head[d]];
+                k[head[d]++] = v;
+                v = t;
+                d = (v >> shift) & (B - 1);
+            }
+            k[head[b]++] = v;
+        }
+    }
+    size_t start = 0;
+    for (int b = 0; b < B; b++) {
+        if (shift > 0 && cnt[b] > 1) bmg_radix_inplace(k + start, cnt[b], tmp);
+        start += cnt[b];
+    }
+    free(cnt);
+}
+/* xs.sort((a, b) => a - b) / (b - a) on f64[]: the doubles become order-preserving keys in
+ * place, are radix-sorted in place, and are decoded back. Equal keys are equal values (NaNs
+ * share one key; both zeros share a key and keep their original order: their signs are
+ * replayed in encounter order), so the unstable in-place sort is unobservable. No copy of the
+ * array is made. */
 static void bmg_sort_f64(double *a, bm_int n, bool desc) {
     if (n < 2) return;
-    uint64_t *k = bm_alloc((size_t)n * sizeof(uint64_t));
+    uint64_t *k = (uint64_t *)(void *)a;
     uint8_t *zs = NULL;
     bm_int nz = 0;
     for (bm_int i = 0; i < n; i++) {
@@ -1703,7 +1768,9 @@ static void bmg_sort_f64(double *a, bm_int n, bool desc) {
         uint64_t key = bmg_f64_key(x);
         k[i] = desc ? ~key : key;
     }
-    bmg_radix64(k, NULL, n);
+    uint64_t *tmp = bm_alloc(sizeof(uint64_t) * (size_t)(n < BMG_RX_SMALL ? n : BMG_RX_SMALL));
+    bmg_radix_inplace(k, (size_t)n, tmp);
+    bm_free(tmp);
     uint64_t kz = desc ? ~0x8000000000000000ull : 0x8000000000000000ull;
     bm_int zi = 0;
     for (bm_int i = 0; i < n; i++) {
@@ -1712,7 +1779,6 @@ static void bmg_sort_f64(double *a, bm_int n, bool desc) {
         uint64_t u = (key >> 63) ? (key ^ 0x8000000000000000ull) : ~key;
         memcpy(&a[i], &u, 8);
     }
-    bm_free(k);
     if (zs) bm_free(zs);
 }
 
