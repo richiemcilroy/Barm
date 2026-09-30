@@ -1,0 +1,55 @@
+// The web types (as in Bun and Node): URL, URLSearchParams, Headers, Request, Response.
+const urls = [
+  "http://localhost:3000/a/b?x=1&y=2#frag",
+  "https://Example.COM:443/./a/../b/c?",
+  "http://h:80/p",
+  "http://h",
+  "https://user:pw@h.com:8443/x%2Fy?q=a b#h",
+  "mailto:ada@example.com",
+  "not a url",
+  "/relative?x",
+  "../up/one",
+]
+for (const s of urls) {
+  const u = URL.parse(s, "http://base.test/dir/page")
+  if (u === undefined) {
+    console.log("invalid:", s)
+    continue
+  }
+  console.log(u.href, "|", u.protocol, u.hostname, u.port, u.pathname, u.search, u.hash, u.host, u.origin)
+}
+console.log(URL.canParse("http://ok/"), URL.canParse("nope"))
+
+const u = try new URL("http://x/?a=1&b=two+words&a=3&c=%E2%9C%93&flag")
+const sp = u.searchParams
+console.log(sp.get("a"), sp.getAll("a").join(","), sp.get("b"), sp.get("c"), sp.get("flag"), sp.has("z"), sp.size)
+sp.set("a", "x y")
+sp.append("d", "é&=")
+sp.delete("c")
+console.log(sp.toString())
+const q = new URLSearchParams("?k=v&k=w")
+console.log(q.getAll("k").join("+"), q.get("missing") ?? "none")
+
+const h = new Headers({ "Content-Type": "text/plain", "X-Id": "7" })
+h.append("Set-Cookie", "a=1")
+h.set("x-id", "8")
+h.delete("content-type")
+console.log(h.get("X-ID"), h.has("content-type"), h.get("set-cookie"))
+h.forEach((value, name) => {
+  console.log("header", name, value)
+})
+
+const req = new Request("http://example.com/api?x=1", { method: "post", headers: { "X-Custom": "yes" }, body: '{"n":5}' })
+console.log(req.method, req.url, req.headers.get("x-custom"))
+type Body = { n: int }
+const body: Body = try await req.json()
+console.log(body.n)
+
+const res = Response.json({ ok: true, list: [1, 2] }, { status: 201, headers: { "X-A": "b" } })
+console.log(res.status, res.ok, (res.headers.get("content-type") ?? "").startsWith("application/json"), res.headers.get("x-a"), await res.text())
+const plain = new Response("hi")
+console.log(plain.status, plain.ok, await plain.text())
+const red = Response.redirect("http://example.com/next", 307)
+console.log(red.status, red.headers.get("location"))
+const nf = new Response("gone", { status: 404, statusText: "Not Found" })
+console.log(nf.status, nf.statusText, nf.ok)

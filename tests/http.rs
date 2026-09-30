@@ -144,7 +144,7 @@ fn main() {
     let r = roundtrip(&s, "GET /nope HTTP/1.1\r\n\r\n");
     check(f, "404", r.status == 404 && r.head.starts_with("HTTP/1.1 404 Not Found"), &r);
     let r = roundtrip(&s, "GET /json HTTP/1.1\r\n\r\n");
-    check(f, "json", r.status == 201 && r.header("content-type").as_deref() == Some("application/json") && r.text() == r#"[{"id":1,"name":"a"},{"id":2,"name":"b"}]"#, &r);
+    check(f, "json", r.status == 201 && r.header("content-type").as_deref() == Some("application/json;charset=utf-8") && r.text() == r#"[{"id":1,"name":"a"},{"id":2,"name":"b"}]"#, &r);
     let r = roundtrip(&s, "GET /info?a=1&b=2 HTTP/1.1\r\nHost: example.test:8080\r\nx-name:   Ada  \r\nUser-Agent: t/1\r\n\r\n");
     check(f, "request fields", r.text() == "GET /info ?a=1&b=2 Ada t/1 http://example.test:8080/info?a=1&b=2", r.text());
     let r = roundtrip(&s, "GET /empty HTTP/1.1\r\n\r\n");
@@ -276,6 +276,27 @@ fn main() {
     }
     check(f, "supervisor stops workers", TcpStream::connect(("127.0.0.1", s.port)).is_err(), "port still open");
     drop(s);
+
+    // SIGTERM to the whole process group (as a shell or a process manager sends it): the
+    // workers die first, and the supervisor must not mistake that for crashes and respawn.
+    for round in 0..5 {
+        let mut s = start(&built.binary, 3);
+        let _ = roundtrip(&s, "GET / HTTP/1.1\r\n\r\n");
+        kill_group(s.child.id());
+        let end = Instant::now() + Duration::from_secs(3);
+        let mut exited = false;
+        while Instant::now() < end {
+            if let Ok(Some(_)) = s.child.try_wait() {
+                exited = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        let open = TcpStream::connect(("127.0.0.1", s.port)).is_ok();
+        check(f, "group SIGTERM stops everything", exited && !open, (round, exited, open));
+        let _ = s.child.kill();
+    }
 
     for x in &failed {
         eprintln!("FAIL {x}");

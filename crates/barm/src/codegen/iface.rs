@@ -27,7 +27,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             let mut fields = String::new();
             for (k, f) in self.iface_members(t).iter().enumerate() {
                 match self.tget(f.ty) {
-                    Ty::Func(ps, ret) => {
+                    Ty::Func(ps, ret, _) => {
                         let ps = self.c.types.params(ps).to_vec();
                         let rct = if ret == VOID { "void".to_string() } else { self.ctype(ret) };
                         let mut args = vec!["void *".to_string()];
@@ -126,7 +126,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         for (k, f) in members.iter().enumerate() {
             let tname = format!("{name}_m{k}");
             match self.tget(f.ty) {
-                Ty::Func(ps, ret) => {
+                Ty::Func(ps, ret, _) => {
                     let ps = self.c.types.params(ps).to_vec();
                     let rct = if ret == VOID { "void".to_string() } else { self.ctype(ret) };
                     let mut decl_params = vec!["void *self".to_string()];
@@ -162,7 +162,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                                 self.end_scratch();
                                 return None;
                             };
-                            let Ty::Func(fps, fret) = self.tget(rf.ty) else {
+                            let Ty::Func(fps, fret, _) = self.tget(rf.ty) else {
                                 self.end_scratch();
                                 return None;
                             };
@@ -198,7 +198,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                                 return None;
                             };
                             let sit = self.itab_type(src);
-                            let Ty::Func(sps, sret) = self.tget(sm[sk].ty) else {
+                            let Ty::Func(sps, sret, _) = self.tget(sm[sk].ty) else {
                                 self.end_scratch();
                                 return None;
                             };
@@ -290,7 +290,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     pub(crate) fn iface_call(&mut self, v: &Val, name: crate::intern::Sym, argv: Vec<String>) -> Option<(String, TyId)> {
         let members = self.iface_members(v.ty);
         let k = members.iter().position(|f| f.name == name)?;
-        let Ty::Func(_, ret) = self.tget(members[k].ty) else { return None };
+        let Ty::Func(_, ret, _) = self.tget(members[k].ty) else { return None };
         let it = self.itab_type(v.ty);
         let mut all = vec![format!("({}).p", v.code)];
         all.extend(argv);

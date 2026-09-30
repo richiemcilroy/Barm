@@ -5,10 +5,11 @@ Barm is TypeScript-shaped. **If code looks like TypeScript it behaves like TypeS
 Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 
 ## 1. Files, modules, entry point
-- Source files end in `.barm`. One file = one module.
+- Source files end in `.barm` (`.ts` works too). One file = one module.
 - `import { a, b } from "./other"` (relative, no extension) and `import * as fs from "std/fs"`. No default imports/exports, no `import x as y` renaming, no re-exports (`export { x } from`), no side-effect imports. **[M0]**
 - `export` goes on declarations: `export function`, `export type`, `export interface`, `export const`, `export class` [M2].
-- Top level may contain only declarations, `const` bindings, and `test(...)` calls. Mutable module state (`let` at top level) is an error. The program entry point is `function main()` (optionally `main(): int` for an exit code). **[M0]**
+- **Entry point.** The program's entry file is either a **script** — top-level statements run in source order, with its module `const`/`let` initialized where they're declared — or has `function main()` (optionally `main(): int` for an exit code). Imported modules hold only declarations, `const`/`let` bindings and `test(...)` calls: importing a module has no side effects.
+- **Module state.** Module-level `let` can be reassigned in its module; a module `const` can't be rebound, but its contents can change (`todos.push(t)`), as in TS. Imported bindings are read-only.
 
 ## 2. Lexical
 - Comments `//`, `/* */`. Identifiers as in TS (ASCII + `_` + `$`).
@@ -28,7 +29,9 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 | `Map<K, V>`, `Set<T>` | hash map/set (value) |
 | `{ a: T, b?: U }` | exact record (value) |
 | `A \| B` | union; `"lit"` string-literal types |
-| `(a: T) => U` | function type |
+| `(a: T) => U` | function type (`(a: T) => U throws E` if it can throw, §7) |
+| `Record<string, V>` | string-keyed map built with an object literal: `{ "Content-Type": "text/plain" }`; read with `.get(k)` (it is a `Map<string, V>`) |
+| `Promise<T>` | `T` (async is synchronous until M6, see §7b) |
 
 - Removed: `any`, `null` (use `undefined`), `object`, `symbol`, `bigint`, tuples [later], intersection `&`, conditional/mapped/indexed-access types, `keyof`, `typeof` in types, enums (use literal unions), namespaces, decorators.
 - `number` is exactly `f64`; `boolean` is exactly `bool`.
@@ -55,10 +58,10 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 - Methods in interfaces (`area(): f64`) are function-typed members: a class satisfies them with methods, a record with fields holding functions.
 
 ### Generics
-- `function f<T>(x: T): T`, `function g<T extends I>(...)`, `type Box<T> = { value: T }`. Type arguments are inferred from arguments. Bodies are checked once, at definition: a `T` can only be used through its bound.
+- `function f<T>(x: T): T`, `function g<T extends I>(...)`, `type Box<T> = { value: T }`, generic classes, and generic methods (`static of<T>(x: T)`, `json<T>(): T`; a generic method can't be overridden yet). Type arguments are inferred from arguments and from the expected type (`const t: Todo = try req.json()`). Bodies are checked once, at definition: a `T` can only be used through its bound.
 
 ## 4. Declarations and statements **[M0]**
-- `function`, `const`, `let`, `type`, `interface`, arrow functions `(x: T) => expr` / `=> { ... }`.
+- `function`, `const`, `let`, `type`, `interface`, arrow functions `(x: T) => expr` / `=> { ... }`, and methods in object literals (`{ fetch(req) { ... } }`, a field holding an arrow function).
 - Exported functions must annotate every parameter and the return type (unannotated return means `void`). Local and unexported functions may omit the return type when it can be inferred.
 - `if/else`, `while`, `do/while`, `for (init; cond; step)`, `for (const x of xs)`, `switch`, `break`, `continue`, `return`, blocks.
 - Conditions must be `bool`, or an optional of a non-primitive type (tests "is defined"). `if (n)` on a number or `if (s)` on a string is an error with the explicit rewrite (`n !== 0`, `s !== ""`).
@@ -131,7 +134,7 @@ try {
 - Only `Error` objects (the built-in `Error`, `TypeError`, `RangeError`, `SyntaxError`, or classes extending them) are thrown. `e.message`, `e.name`, and `String(e)` / `${e}` (`"Name: message"`) work as in JavaScript.
 - A call that can throw is either inside a `try { }` block, or marked `try f(x)`: the error then passes on to the caller. Unmarked calls are errors with the fix. `throws E` declares what a function can throw; unexported functions and methods infer it, exported ones must declare it.
 - `catch (e)` gives `e` the most specific class covering everything the block can throw (else `Error`); narrow with `instanceof`. `finally` runs on every path out of the block (no `return`/`break` inside a `try` that has `finally` yet).
-- Closures can't pass errors on yet: catch inside them. An error that escapes `main` prints `uncaught Name: message` to stderr and exits with status 1; in a test it fails the test.
+- A closure can pass errors on only when its function type says so: `type Handler = (req: Request) => Response throws Error`. An arrow checked against that type may `throw` and use `try f()`; calls through a value of that type are calls that can throw. Otherwise catch inside the closure. An error that escapes a script or `main` prints `uncaught Name: message` to stderr and exits with status 1; in a test it fails the test.
 - Errors are return values underneath (no unwinding): a call that can throw costs one branch.
 - Bugs (index out of range with `!`, integer overflow, failed `as`) are traps, not errors: they can't be caught.
 - Effects (`uses fs | net`) are planned.
@@ -144,18 +147,41 @@ Node's names, so existing habits work:
 - `Date.now()` and `performance.now()` (milliseconds).
 - `JSON.stringify(value, undefined, indent?)` as in JavaScript (maps with string keys are written as objects, where JavaScript writes `{}`). `JSON.parse(text)` takes its type from context — `const c: Config = try JSON.parse(text)` or `try JSON.parse(text) as Config` — and **checks** the input against it (exact integers, string literals, discriminants, required fields; extra keys ignored, `null` and missing keys read as `undefined`), throwing `SyntaxError` otherwise.
 - Rest parameters: `function f(first: T, ...rest: U[])` (not in methods yet).
-- `import { serve, Request, Response, Headers, json } from "std/http"`: a Bun-style HTTP/1.1 server.
-  ```ts
-  function route(req: Request): Response {
-    if (req.pathname === "/") return new Response("hello")
-    if (req.method === "POST") return new Response(req.text(), { status: 201 })
-    return json(JSON.stringify({ error: "not found" }), 404)
-  }
-  function main(): void throws Error {
-    try serve({ port: 3000, workers: 8, fetch: route })   // blocks; throws if the port can't be bound
-  }
-  ```
-  `Request`: `method`, `url` (`http://host/path?q`), `pathname`, `search`, `headers` (a `Headers`), `header(name)`, `text()`. `Response(body?, { status?, headers? })`; `json(body, status?)` sets `content-type: application/json`. `Headers`: `get`/`has`/`set`/`append`/`delete`, case-insensitive; CR/LF in names and values are dropped. The server handles keep-alive, pipelining, `Content-Length` and chunked request bodies, `Expect: 100-continue` and `HEAD`, and adds `content-length`, `date`, and `content-type: text/plain;charset=utf-8` when none is set; malformed or oversized requests get `400`/`413`/`431` and are closed. `workers` forks that many processes that share the listening socket, and connections are spread evenly between them. The handler can't throw (catch inside it); it runs to completion for each request (no `async` yet).
+- Web servers: see §7c.
+
+## 7b. Async (synchronous until M6)
+`async` functions, arrows and methods, and `await`, are accepted so web-style code ports unchanged; for now they run synchronously: `await e` is `e`, and a `Promise<T>` is its `T`. An `async` call finishes before the caller continues, so code whose output depends on interleaving (two un-awaited tasks) behaves differently; request handlers and `await req.json()` behave as in Bun. `for await` is not supported.
+
+## 7c. Web servers (Bun's API)
+`Bun.serve`, `Request`, `Response`, `Headers`, `URL` and `URLSearchParams` are globals, as in Bun (also `import { serve, ... } from "std/http"`). A Bun server ports with Barm's usual edits only — `try` on calls that can throw, `.byteLength` for `.length` on strings; `tests/parity` runs a Bun server and its port side by side and compares every response.
+```ts
+const server = Bun.serve({
+  port: Number(process.env.PORT ?? 3000),
+  routes: {
+    "/": new Response("Welcome"),
+    "/users/:id": (req) => Response.json({ id: req.params.id }),   // req.params: { id: string }
+    "/todos": {
+      GET: () => Response.json(todos),
+      POST: async (req) => {
+        const t = try (await req.json()) as Todo   // a bad body → SyntaxError → 500
+        todos.push(t)
+        return Response.json(t, { status: 201 })
+      },
+    },
+  },
+  fetch(req) {
+    const url = try new URL(req.url)
+    return new Response(`Not Found: ${url.pathname}`, { status: 404 })
+  },
+})
+console.log(`Listening on ${server.url}`)
+```
+- **Serving.** `Bun.serve` binds right away (an unusable port prints the error and exits, as an uncaught error does in Bun) and returns a `Server` (`port`, `hostname`, `url`, `stop(closeActive?)`); requests are served once the script's top level (or `main`) has finished, until every server is stopped. `workers: n` (Barm only) forks `n` processes sharing the sockets, supervised: a worker that dies is replaced, and SIGTERM/SIGINT stop them all.
+- **Routing** as in Bun: exact paths first, then `:param` and `/*` routes; a route is a `Response`, a handler, or an object of per-method handlers (`GET`, `POST`, ...; others fall through to `fetch`). `req.params` is typed from the route. Unmatched requests go to `fetch`, else `404`.
+- **Errors.** Handlers can throw (their type is `(req, server) => Response throws Error`): the error is logged to stderr and answered by `error(err)` if given, else `500 Something went wrong!`, like Bun in production.
+- **Types.** `Request`: `method`, `url`, `headers`, `text()`, `json<T>()` (checked against the expected type, throws `SyntaxError`). `Response(body?, { status?, statusText?, headers? })`, `Response.json(value, init?)`, `Response.redirect(url, status?)`, `status`, `ok`, `headers`, `text()`, `json<T>()`. `Headers(init?)`: `get`/`has`/`set`/`append`/`delete`/`forEach`/`toJSON`, case-insensitive; CR/LF in names and values are dropped. `URL(input, base?)` (throws `TypeError`): `href`, `protocol`, `host`, `hostname`, `port`, `pathname`, `search`, `hash`, `origin`, `searchParams`; `URL.parse`, `URL.canParse`. `URLSearchParams`: `get`/`getAll`/`has`/`set`/`append`/`delete`/`size`/`toString`.
+- **Protocol.** HTTP/1.1 with keep-alive, pipelining, `Content-Length` and chunked request bodies, `Expect: 100-continue` and `HEAD`; `content-length` and `date` are added, and `content-type: text/plain;charset=utf-8` when a body has none. Malformed or oversized requests get `400`/`413`/`431` and are closed.
+- Not yet: TLS, HTTP/2, WebSockets, streaming bodies, `Bun.file`, `fetch()` (the client).
 
 ## 8. Tests **[M0]**
 ```ts

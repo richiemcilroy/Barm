@@ -57,7 +57,8 @@ pub enum Ty {
     Record(Fields),
     /// Flattened, deduplicated, sorted, at least two members.
     Union(Tys),
-    Func(Params, TyId),
+    /// (parameters, return type, what it can throw — `never` if nothing).
+    Func(Params, TyId, TyId),
     /// A generic type parameter (index into the checker's parameter table).
     Param(u32),
     /// A recursive type alias, kept nominal: (alias index, type arguments).
@@ -323,8 +324,12 @@ impl Types {
     }
 
     pub fn func(&mut self, params: Vec<FnParam>, ret: TyId) -> TyId {
+        self.func_throws(params, ret, NEVER)
+    }
+
+    pub fn func_throws(&mut self, params: Vec<FnParam>, ret: TyId, throws: TyId) -> TyId {
         let l = self.params_list(&params);
-        self.intern(Ty::Func(l, ret))
+        self.intern(Ty::Func(l, ret, throws))
     }
 
     pub fn rec(&mut self, alias: u32, args: &[TyId]) -> TyId {
@@ -465,11 +470,12 @@ impl Types {
                 let ms: Vec<TyId> = ms.into_iter().map(|m| self.subst(m, map)).collect();
                 self.union(&ms)
             }
-            Ty::Func(ps, ret) => {
+            Ty::Func(ps, ret, throws) => {
                 let params: Vec<FnParam> = self.params(ps).to_vec();
                 let params = params.into_iter().map(|p| FnParam { ty: self.subst(p.ty, map), ..p }).collect();
                 let ret = self.subst(ret, map);
-                self.func(params, ret)
+                let throws = self.subst(throws, map);
+                self.func_throws(params, ret, throws)
             }
             Ty::Rec(d, args) => {
                 let args: Vec<TyId> = self.tys(args).to_vec();
@@ -501,7 +507,7 @@ impl Types {
             Ty::Map(k, v) => self.mentions(k, params) || self.mentions(v, params),
             Ty::Record(fs) => self.fields(fs).iter().any(|f| self.mentions(f.ty, params)),
             Ty::Union(ms) => self.tys(ms).iter().any(|&m| self.mentions(m, params)),
-            Ty::Func(ps, r) => self.params(ps).iter().any(|p| self.mentions(p.ty, params)) || self.mentions(r, params),
+            Ty::Func(ps, r, _) => self.params(ps).iter().any(|p| self.mentions(p.ty, params)) || self.mentions(r, params),
             Ty::Rec(_, args) | Ty::Interface(_, args) | Ty::Class(_, args) => self.tys(args).iter().any(|&a| self.mentions(a, params)),
             _ => false,
         }
@@ -636,7 +642,7 @@ impl Display<'_> {
                     out.push(')');
                 }
             }
-            Ty::Func(params, ret) => {
+            Ty::Func(params, ret, throws) => {
                 let params = self.types.params(params);
                 if in_array {
                     out.push('(');
@@ -656,6 +662,10 @@ impl Display<'_> {
                 }
                 out.push_str(") => ");
                 self.write(ret, out, false);
+                if throws != NEVER {
+                    out.push_str(" throws ");
+                    self.write(throws, out, false);
+                }
                 if in_array {
                     out.push(')');
                 }

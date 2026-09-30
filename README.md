@@ -6,7 +6,7 @@ A TypeScript-shaped language built for coding agents. It compiles to small, fast
 - **Native and fast.** Compiles to a single binary with no bundled runtime. It keeps pace with Rust and is far ahead of Node and Bun.
 - **Quick feedback.** Builds take around 0.1 s. Error messages name the problem and the fix, and every error has a code you can look up with `barm explain`.
 
-> **Status:** early (milestone 2). Command-line programs with records, unions, generics, classes and interfaces compile and run. Error handling, a standard library and async are still to come.
+> **Status:** early (milestone 3). Command-line programs and web servers compile and run: records, unions, generics, classes, interfaces, checked errors, a Node-style standard library, and Bun's server API. Real async (concurrent I/O) is still to come.
 
 ## Example
 
@@ -85,29 +85,45 @@ Binaries are about 50 KB (Rust's are about 470 KB), and a build takes 0.08–0.1
 
 ### HTTP server
 
-`std/http` is a Bun-style server (`serve({ port, fetch })`). Requests per second on Linux (M4 Max, Docker), 128 keep-alive connections, JSON route:
+Barm speaks Bun's server API — `Bun.serve`, `routes` with typed `req.params`, `Request`, `Response`, `Headers`, `URL` — so a Bun server ports with only Barm's usual edits (a `try` on calls that can throw). `tests/parity` runs a Bun server under Bun and its port under Barm and checks that every response matches.
+
+```ts
+type Todo = { id: number; title: string }
+const todos: Todo[] = []
+
+const server = Bun.serve({
+  port: 3000,
+  routes: {
+    "/todos/:id": (req) => {
+      const todo = todos.find((t) => t.id === Number(req.params.id))
+      return todo === undefined ? new Response("Not Found", { status: 404 }) : Response.json(todo)
+    },
+    "/todos": {
+      GET: () => Response.json(todos),
+      POST: async (req) => {
+        const todo = try (await req.json()) as Todo
+        todos.push(todo)
+        return Response.json(todo, { status: 201 })
+      },
+    },
+  },
+  fetch(req) {
+    return new Response("Not Found", { status: 404 })
+  },
+})
+console.log(`Listening on ${server.url}`)
+```
+
+Requests per second on Linux (M4 Max, Docker), 128 keep-alive connections, JSON route — Barm running the Bun benchmark's own code:
 
 | | Rust (axum) | Bun | **Barm** |
 |---|---:|---:|---:|
-| 1 core | 277k | 234k | **400k** |
-| 4 cores | 1.11M\* | 790k | **1.63M** |
-| p99 latency, 4 cores | 1.06 ms | 1.42 ms | **0.19 ms** |
-| memory | 6 MB | 178 MB | **9 MB** |
+| 1 core | 294k | 254k | **379k** |
+| 4 cores | 1.20M\* | 872k | **1.62M** |
+| p99 latency, 4 cores | 0.31 ms | 1.47 ms | **0.20 ms** |
+| memory | **6 MB** | 177 MB | 12 MB |
 
-\* Thread-per-core Rust; tokio's default multi-thread runtime reaches 613k. With pipelining, Barm serves 13M requests/s on 4 cores. Method, macOS numbers and caveats are in [bench/http/README.md](bench/http/README.md).
-
-```ts
-import { serve, Request, Response, json } from "std/http"
-
-function route(req: Request): Response {
-  if (req.pathname === "/users") return json(JSON.stringify([{ id: 1, name: "Ada" }]))
-  return new Response("not found", { status: 404 })
-}
-
-function main(): void throws Error {
-  try serve({ port: 3000, workers: 8, fetch: route })
-}
-```
+\* Thread-per-core Rust; tokio's default multi-thread runtime reaches 708k. With pipelining, Barm serves 6.9M JSON requests/s on 4 cores (Rust 2.4M). Method, macOS numbers and caveats are in [bench/http/README.md](bench/http/README.md).
 
 ## Development
 

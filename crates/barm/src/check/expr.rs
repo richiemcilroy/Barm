@@ -21,7 +21,8 @@ pub(super) struct Place {
 
 enum Root {
     Local(LocalId),
-    ModuleConst(Sym),
+    /// A module variable: (module, item).
+    ModuleConst(u32, u32),
     Temp,
     /// Inside a class instance: changes the shared object, whatever variable holds it.
     Heap,
@@ -496,13 +497,22 @@ impl<'a> Checker<'a> {
             }
             return;
         }
-        let (can_throw, marked, decl) = (frame.can_throw, frame.try_expr > 0, frame.throws_decl);
+        let (can_throw, marked, decl, module_init) = (frame.can_throw, frame.try_expr > 0, frame.throws_decl, frame.module_init);
         let shown = self.show(t);
+        if !can_throw && module_init {
+            let what = callee.map(|c| format!("`{c}` can throw `{shown}`")).unwrap_or_else(|| format!("this throws `{shown}`"));
+            self.report(
+                Diagnostic::new("T0832", span, format!("{what}, but a module constant's initializer can't pass errors on"))
+                    .note("instead", "initialize it in a function that can throw, or catch the error in a helper function"),
+            );
+            return;
+        }
         if !can_throw {
             let what = callee.map(|c| format!("`{c}` can throw `{shown}`")).unwrap_or_else(|| format!("this throws `{shown}`"));
             self.report(
-                Diagnostic::new("T0832", span, format!("{what}, but a closure can't pass errors on"))
-                    .note("instead", "catch it inside the closure: `try { ... } catch (e) { ... }`"),
+                Diagnostic::new("T0832", span, format!("{what}, but this closure's type doesn't let it pass errors on"))
+                    .note("instead", "catch it inside the closure: `try { ... } catch (e) { ... }`")
+                    .note("or", format!("let the function type throw: `(...) => T throws {shown}`")),
             );
             return;
         }
@@ -807,7 +817,7 @@ impl<'a> Checker<'a> {
             ExprKind::Ident(s) => match self.lookup(*s) {
                 Some((id, _)) => Root::Local(id),
                 None => match self.scopes[self.cur as usize].values.get(s).map(|d| d.0) {
-                    Some(Decl::Const(..)) => Root::ModuleConst(*s),
+                    Some(Decl::Const(m, i)) => Root::ModuleConst(m, i),
                     _ => Root::Temp,
                 },
             },
@@ -855,9 +865,11 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Root::ModuleConst(s) => {
-                let n = self.name(s).to_string();
-                self.report(Diagnostic::new("V0102", span, format!("can't modify module constant `{n}`")));
+            // Module state is mutable, as in TypeScript (`const` only fixes the binding).
+            Root::ModuleConst(m, i) => {
+                if let Some(f) = self.facts_mut() {
+                    f.mutated_globals.insert((m, i));
+                }
                 None
             }
             Root::Temp => {
@@ -905,9 +917,28 @@ impl<'a> Checker<'a> {
                 }
                 let n = self.name(*sym).to_string();
                 match self.scopes[self.cur as usize].values.get(sym).map(|d| d.0) {
-                    Some(Decl::Const(..)) => {
-                        self.report(Diagnostic::new("V0102", span, format!("can't reassign module constant `{n}`")));
-                        None
+                    Some(Decl::Const(cm, ci)) => {
+                        let ItemKind::Const { mutable, name_span, .. } = &self.modules[cm as usize].ast.items[ci as usize].kind else { return None };
+                        if !*mutable || cm != self.cur {
+                            let mut d = Diagnostic::new("V0102", span, format!("can't reassign module constant `{n}`"));
+                            if cm == self.cur {
+                                let kw = self.modules[cm as usize].ast.items[ci as usize].span;
+                                let kw = Span::new(kw.file, kw.start, kw.start + if self.modules[cm as usize].ast.items[ci as usize].exported { 12 } else { 5 });
+                                d = d.fix(Applicability::Safe, format!("declare `{n}` with `let`"), kw, if self.modules[cm as usize].ast.items[ci as usize].exported { "export let" } else { "let" });
+                            } else {
+                                d = d.note("why", "imported bindings are read-only; export a function that changes it");
+                            }
+                            let _ = name_span;
+                            self.report(d);
+                            return None;
+                        }
+                        let ty = self.const_type(cm, ci);
+                        self.rec_ident(e, IdentFact::Const(cm, ci));
+                        if let Some(f) = self.facts_mut() {
+                            f.expr_ty[e as usize] = ty;
+                            f.mutated_globals.insert((cm, ci));
+                        }
+                        Some(Place { ty, local: None, root: None })
                     }
                     Some(Decl::Fn(..)) => {
                         self.report(Diagnostic::new("V0105", span, format!("can't assign to function `{n}`")));
@@ -1155,6 +1186,31 @@ impl<'a> Checker<'a> {
         if t == ERROR {
             return ERROR;
         }
+        // `req.params` in a `routes` handler: `{ id: string }` for "/users/:id".
+        if self.name(name) == "params"
+            && let ExprKind::Ident(s) = self.ast().expr(obj).kind
+            && let Some((id, _)) = self.lookup(s)
+            && let Some(&(_, key)) = self.fcx.last().unwrap().route_locals.iter().find(|(l, _)| *l == id)
+        {
+            let path = self.name(key).to_string();
+            let mut fields = Vec::new();
+            let mut order = Vec::new();
+            for seg in path.split('/') {
+                if let Some(p) = seg.strip_prefix(':')
+                    && let Some(sym) = self.interner.lookup(p)
+                    && !order.contains(&sym)
+                {
+                    fields.push(Field { name: sym, ty: STR, optional: false });
+                    order.push(sym);
+                }
+            }
+            let rt = self.types.record(fields);
+            self.types.note_field_order(rt, order);
+            if let Some(f) = self.facts_mut() {
+                f.members.insert(e, MemberFact::RouteParams(rt));
+            }
+            return rt;
+        }
         let base = if optional {
             self.types.without_undefined(t)
         } else {
@@ -1378,12 +1434,65 @@ impl<'a> Checker<'a> {
         out
     }
 
+    /// std/http's `BunRequest` (a `routes` handler's request).
+    fn is_route_request(&self, t: TyId) -> bool {
+        match *self.types.get(t) {
+            Ty::Class(c, _) => self.class_names[c as usize] == "BunRequest" && self.modules[self.classes[c as usize].module as usize].std,
+            _ => false,
+        }
+    }
+
+    /// The `Record<string, V>` (string-keyed map) an object literal builds, if the context wants one.
+    fn map_literal_target(&mut self, exp: TyId) -> Option<TyId> {
+        let exp = self.unfold(exp);
+        let exp = self.types.without_undefined(exp);
+        let members: Vec<TyId> = match self.types.get(exp) {
+            Ty::Union(ms) => self.types.tys(*ms).to_vec(),
+            _ => vec![exp],
+        };
+        let mut map = None;
+        for &mt in &members {
+            match self.types.get(mt) {
+                Ty::Map(k, _) if *k == STR => map = Some(mt),
+                Ty::Record(_) | Ty::Interface(..) => return None,
+                _ => {}
+            }
+        }
+        map
+    }
+
     fn object(&mut self, fields: &[crate::ast::ObjField], exp: Option<TyId>, span: Span) -> TyId {
         let mut seen = HashSet::default();
         for f in fields {
             if !seen.insert(f.name) {
                 let n = self.name(f.name).to_string();
                 self.report(Diagnostic::new("N0006", f.name_span, format!("duplicate field `{n}`")));
+            }
+        }
+        // `{ "Content-Type": v }` for a `Record<string, V>`: a map literal.
+        if let Some(mt) = exp.and_then(|e| self.map_literal_target(e)) {
+            let Ty::Map(_, vt) = *self.types.get(mt) else { unreachable!() };
+            for f in fields {
+                let key = self.name(f.name).to_string();
+                let saved = self.route_key.take();
+                if key.contains("/:") {
+                    self.route_key = Some(f.name);
+                }
+                let t = self.expr(f.value, Some(vt));
+                self.route_key = saved;
+                let vspan = self.ast().expr(f.value).span;
+                self.expect_assignable(t, vt, vspan, Some(format!("key \"{key}\"")));
+            }
+            return mt;
+        }
+        for f in fields {
+            let text = self.name(f.name);
+            let ident = text.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$') && text.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$');
+            if f.quoted && !ident {
+                self.report(
+                    Diagnostic::new("X0017", f.name_span, format!("\"{text}\" isn't a field name: records have identifier field names"))
+                        .note("instead", "for dynamic keys, give the value a `Record<string, V>` (or `Map<string, V>`) type"),
+                );
             }
         }
         let target = exp.and_then(|e| self.pick_record(fields, e, span));
@@ -1555,10 +1664,19 @@ impl<'a> Checker<'a> {
     pub(super) fn arrow(&mut self, f: &ArrowFn, exp: Option<TyId>, span: Span) -> TyId {
         let exp_fn = exp.and_then(|e| {
             self.flat_members(e).into_iter().find_map(|m| match *self.types.get(m) {
-                Ty::Func(ps, r) => Some((self.types.params(ps).to_vec(), r)),
+                Ty::Func(ps, r, _) => Some((self.types.params(ps).to_vec(), r)),
                 _ => None,
             })
         });
+        // A closure can throw when its context allows it (`(req) => Response throws Error`).
+        let exp_throws = exp
+            .and_then(|e| {
+                self.flat_members(e).into_iter().find_map(|m| match *self.types.get(m) {
+                    Ty::Func(_, _, th) => Some(th),
+                    _ => None,
+                })
+            })
+            .unwrap_or(NEVER);
         let tscope = self.tscope();
         let mut params = Vec::new();
         for (i, p) in f.params.iter().enumerate() {
@@ -1585,13 +1703,23 @@ impl<'a> Checker<'a> {
         let exp_ret = exp_fn.as_ref().map(|(_, r)| *r).filter(|&r| r != VOID && !self.types.mentions(r, &self.infer_free));
         let ret = declared_ret.or(exp_ret);
         let fcx = self.fcx.last_mut().unwrap();
-        // Closures can't throw (yet), except a test's body: an uncaught error fails the test.
-        let can_throw = fcx.test_body && fcx.frames.is_empty();
-        fcx.frames.push(Frame::new(declared_ret, None, can_throw, None));
+        // A test's body can throw (an uncaught error fails the test); other closures only when
+        // their function type says so.
+        let test_body = fcx.test_body && fcx.frames.is_empty();
+        let can_throw = test_body || exp_throws != NEVER;
+        let decl = if exp_throws != NEVER && exp_throws != ERROR { Some(exp_throws) } else { None };
+        fcx.frames.push(Frame::new(declared_ret, None, can_throw, decl));
         fcx.scopes.push(Vec::new());
         for (p, fp) in f.params.iter().zip(&params) {
             let kind = if p.inout { LocalKind::Inout } else { LocalKind::Param };
             self.declare(p.name, fp.ty, kind, p.span, None, false);
+        }
+        // A `routes` handler: its request's `params` are typed from the route.
+        if let (Some(key), Some(p0), Some(fp0)) = (self.route_key, f.params.first(), params.first())
+            && self.is_route_request(fp0.ty)
+            && let Some((id, _)) = self.lookup(p0.name)
+        {
+            self.fcx().route_locals.push((id, key));
         }
         let body_ty = match &f.body {
             ArrowBody::Expr(x) => {
@@ -1635,8 +1763,9 @@ impl<'a> Checker<'a> {
         };
         let fcx = self.fcx.last_mut().unwrap();
         fcx.scopes.pop();
-        fcx.frames.pop();
-        self.types.func(params, body_ty)
+        let frame = fcx.frames.pop().unwrap();
+        let thrown = if test_body || frame.thrown.is_empty() { NEVER } else { self.types.union(&frame.thrown) };
+        self.types.func_throws(params, body_ty, thrown)
     }
 
     fn new_expr(&mut self, e: ExprId, callee: ExprId, type_args: &[crate::ast::TypeId], args: &[Arg], exp: Option<TyId>, span: Span) -> TyId {
@@ -1802,7 +1931,7 @@ impl<'a> Checker<'a> {
                                 let ret = self.method_ret(&mm);
                                 let names = mm.param_names.iter().map(|&p| self.name(p).to_string()).collect();
                                 let throws = self.method_throws(&mm);
-                                let cs = CallSig { tparams: Vec::new(), params: mm.params.clone(), names, rest: None, ret, throws };
+                                let cs = CallSig { tparams: mm.tparams.clone(), params: mm.params.clone(), names, rest: None, ret, throws };
                                 self.rec_call(e, Callee::StaticMethod(c, mm.member));
                                 self.pending_call = Some(e);
                                 return self.call_sig(&cs, &format!("{cls}.{mtext}"), type_args, args, exp, span);
@@ -1849,7 +1978,7 @@ impl<'a> Checker<'a> {
                     let ret = self.method_ret(&mm);
                     let names = mm.param_names.iter().map(|&p| self.name(p).to_string()).collect();
                     let throws = self.method_throws(&mm);
-                    let cs = CallSig { tparams: Vec::new(), params: mm.params.clone(), names, rest: None, ret, throws };
+                    let cs = CallSig { tparams: mm.tparams.clone(), params: mm.params.clone(), names, rest: None, ret, throws };
                     self.rec_call(e, Callee::ClassMethod { recv: base, name, sup: false });
                     self.pending_call = Some(e);
                     let cls = self.show(base);
@@ -1873,6 +2002,9 @@ impl<'a> Checker<'a> {
                 let is_field = self.flat_members(base).iter().all(|&m| self.field_of(m, name).is_some());
                 let result = if is_field {
                     let ft = self.member_of(base, name, name_span, span, obj).unwrap_or(ERROR);
+                    if let Some(f) = self.facts_mut() {
+                        f.expr_ty[callee as usize] = ft;
+                    }
                     self.rec_call(e, Callee::Value);
                     self.pending_call = Some(e);
                     self.call_value(ft, &mtext, args, exp, span)
@@ -1970,10 +2102,10 @@ impl<'a> Checker<'a> {
 
     fn call_value(&mut self, t: TyId, desc: &str, args: &[Arg], exp: Option<TyId>, span: Span) -> TyId {
         match *self.types.get(t) {
-            Ty::Func(params, ret) => {
+            Ty::Func(params, ret, throws) => {
                 let params = self.types.params(params).to_vec();
                 let names = (0..params.len()).map(|i| format!("arg{i}")).collect();
-                let cs = CallSig { tparams: Vec::new(), params, names, rest: None, ret, throws: NEVER };
+                let cs = CallSig { tparams: Vec::new(), params, names, rest: None, ret, throws };
                 self.call_sig(&cs, desc, &[], args, exp, span)
             }
             Ty::Error => {
@@ -2195,8 +2327,8 @@ impl<'a> Checker<'a> {
                     self.unify(pv, av, free, map);
                 }
             }
-            Ty::Func(pps, pr) => {
-                if let Ty::Func(aps, ar) = *self.types.get(actual) {
+            Ty::Func(pps, pr, _) => {
+                if let Ty::Func(aps, ar, _) = *self.types.get(actual) {
                     let (pps, aps) = (self.types.params(pps).to_vec(), self.types.params(aps).to_vec());
                     for (pp, ap) in pps.iter().zip(&aps) {
                         self.unify(pp.ty, ap.ty, free, map);

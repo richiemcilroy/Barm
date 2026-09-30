@@ -1,10 +1,16 @@
-// std/http — a Bun-style HTTP/1.1 server:
+// std/http — Bun's web server API for native programs. The names are also globals, as in
+// Bun: `Bun.serve`, `Request`, `Response`, `Headers`, `URL`, `URLSearchParams`.
 //
-//   serve({ port: 3000, fetch: (req: Request): Response => new Response("hi") })
+//   const server = Bun.serve({
+//     port: 3000,
+//     routes: { "/users/:id": (req) => Response.json({ id: req.params.id }) },
+//     fetch(req) { return new Response("Not Found", { status: 404 }) },
+//   })
 //
-// The event loop, parser and writer are native (kqueue/epoll, keep-alive, pipelining);
-// `workers` > 1 forks that many processes sharing the listening socket, supervised by the
-// parent: a worker that dies is replaced, and SIGTERM/SIGINT stop them all.
+// The event loop, HTTP/1.1 parser and writer are native (kqueue/epoll, keep-alive, pipelining).
+// Servers start serving when the program's top level (or `main`) finishes. `workers: n` (a
+// Barm extension) forks n processes that share the sockets, supervised by the parent: a worker
+// that dies is replaced, and SIGTERM/SIGINT stop them all.
 
 function check(): void throws Error {
   const err = __native.takeError()
@@ -13,12 +19,27 @@ function check(): void throws Error {
   }
 }
 
-// Header names are case-insensitive; the block is "name: value\r\n" lines.
+export type HeadersInit = Headers | Record<string, string>
+
+// Header names are case-insensitive; the block is "name: value\r\n" lines, as sent.
 export class Headers {
   private raw: string
 
-  constructor(raw?: string) {
-    this.raw = raw ?? ""
+  constructor(init?: HeadersInit) {
+    this.raw = ""
+    if (init instanceof Headers) {
+      this.raw = init.raw
+    } else if (init !== undefined) {
+      for (const k of init.keys()) {
+        this.raw = __native.headerAppend(this.raw, k, init.get(k) ?? "")
+      }
+    }
+  }
+
+  static fromWire(raw: string): Headers {
+    const h = new Headers()
+    h.raw = raw
+    return h
   }
 
   get(name: string): string | undefined {
@@ -38,110 +59,585 @@ export class Headers {
   }
 
   set(name: string, value: string): void {
-    this.delete(name)
-    this.append(name, value)
+    this.raw = __native.headerAppend(__native.headerRemove(this.raw, name), name, value)
   }
 
   delete(name: string): void {
     this.raw = __native.headerRemove(this.raw, name)
   }
 
-  // The raw block, as sent on the wire.
-  toString(): string {
+  // `f(value, name)` for each header (names in lower case, as in the Fetch API).
+  forEach(f: (value: string, name: string) => void): void {
+    for (const line of this.raw.split("\r\n")) {
+      const colon = line.indexOf(":")
+      if (colon > 0) {
+        f(line.slice(colon + 1).trim(), line.slice(0, colon).toLowerCase())
+      }
+    }
+  }
+
+  toJSON(): Record<string, string> {
+    const out: Record<string, string> = {}
+    for (const line of this.raw.split("\r\n")) {
+      const colon = line.indexOf(":")
+      if (colon > 0) {
+        out.set(line.slice(0, colon).toLowerCase(), line.slice(colon + 1).trim())
+      }
+    }
+    return out
+  }
+
+  wire(): string {
     return this.raw
   }
 }
 
+// `?a=1&b=x+y`, percent-decoded (`+` is a space).
+export class URLSearchParams {
+  private names: string[]
+  private values: string[]
+
+  constructor(init?: string) {
+    this.names = []
+    this.values = []
+    let q = init ?? ""
+    if (q.startsWith("?")) {
+      q = q.slice(1)
+    }
+    if (q === "") {
+      return
+    }
+    for (const part of q.split("&")) {
+      if (part === "") {
+        continue
+      }
+      const eq = part.indexOf("=")
+      if (eq < 0) {
+        this.names.push(__native.urlDecode(part, true))
+        this.values.push("")
+      } else {
+        this.names.push(__native.urlDecode(part.slice(0, eq), true))
+        this.values.push(__native.urlDecode(part.slice(eq + 1), true))
+      }
+    }
+  }
+
+  get(name: string): string | undefined {
+    for (let i = 0; i < this.names.length; i++) {
+      if (this.names[i]! === name) {
+        return this.values[i]!
+      }
+    }
+    return undefined
+  }
+
+  getAll(name: string): string[] {
+    const out: string[] = []
+    for (let i = 0; i < this.names.length; i++) {
+      if (this.names[i]! === name) {
+        out.push(this.values[i]!)
+      }
+    }
+    return out
+  }
+
+  has(name: string): bool {
+    return this.names.includes(name)
+  }
+
+  // Replaces the first `name` in place and drops the rest (or appends).
+  set(name: string, value: string): void {
+    const names: string[] = []
+    const values: string[] = []
+    let found = false
+    for (let i = 0; i < this.names.length; i++) {
+      if (this.names[i]! !== name) {
+        names.push(this.names[i]!)
+        values.push(this.values[i]!)
+      } else if (!found) {
+        found = true
+        names.push(name)
+        values.push(value)
+      }
+    }
+    if (!found) {
+      names.push(name)
+      values.push(value)
+    }
+    this.names = names
+    this.values = values
+  }
+
+  append(name: string, value: string): void {
+    this.names.push(name)
+    this.values.push(value)
+  }
+
+  delete(name: string): void {
+    const names: string[] = []
+    const values: string[] = []
+    for (let i = 0; i < this.names.length; i++) {
+      if (this.names[i]! !== name) {
+        names.push(this.names[i]!)
+        values.push(this.values[i]!)
+      }
+    }
+    this.names = names
+    this.values = values
+  }
+
+  get size(): int {
+    return this.names.length
+  }
+
+  toString(): string {
+    const parts: string[] = []
+    for (let i = 0; i < this.names.length; i++) {
+      parts.push(__native.urlEncode(this.names[i]!) + "=" + __native.urlEncode(this.values[i]!))
+    }
+    return parts.join("&")
+  }
+}
+
+// A WHATWG URL: `new URL("http://host:8080/a?b#c")`, or relative with a base. Kept as its
+// normalized href; the parts are sliced from it when read.
+export class URL {
+  private h: string
+  // parsed on first use
+  private params: URLSearchParams | undefined
+
+  constructor(input: string, base?: string) throws TypeError {
+    const href = __native.urlNormalize(input, base ?? "")
+    if (href === "") {
+      throw new TypeError(`"${input}" cannot be parsed as a URL.`)
+    }
+    this.h = href
+    this.params = undefined
+  }
+
+  get protocol(): string {
+    return __native.urlPart(this.h, 0)
+  }
+
+  get hostname(): string {
+    return __native.urlPart(this.h, 1)
+  }
+
+  get port(): string {
+    return __native.urlPart(this.h, 2)
+  }
+
+  get pathname(): string {
+    return __native.urlPart(this.h, 3)
+  }
+
+  get search(): string {
+    return __native.urlPart(this.h, 4)
+  }
+
+  get hash(): string {
+    return __native.urlPart(this.h, 5)
+  }
+
+  get searchParams(): URLSearchParams {
+    const p = this.params
+    if (p !== undefined) {
+      return p
+    }
+    const made = new URLSearchParams(this.search)
+    this.params = made
+    return made
+  }
+
+  get host(): string {
+    return this.port === "" ? this.hostname : this.hostname + ":" + this.port
+  }
+
+  // "null" for schemes without an origin (`mailto:`, `file:`, ...), as in the URL standard.
+  get origin(): string {
+    const p = this.protocol
+    if (p !== "http:" && p !== "https:" && p !== "ws:" && p !== "wss:" && p !== "ftp:") {
+      return "null"
+    }
+    return p + "//" + this.host
+  }
+
+  get href(): string {
+    return this.h
+  }
+
+  toString(): string {
+    return this.href
+  }
+
+  toJSON(): string {
+    return this.href
+  }
+
+  // The URL, or undefined if `input` isn't one.
+  static parse(input: string, base?: string): URL | undefined {
+    try {
+      return new URL(input, base)
+    } catch (e) {
+      return undefined
+    }
+  }
+
+  static canParse(input: string, base?: string): bool {
+    return __native.urlParse(input, base ?? "").length > 0
+  }
+}
+
+export type RequestInit = { method?: string, headers?: HeadersInit, body?: string }
+
 export class Request {
-  readonly method: string
+  private verb: string
+  // a full URL, or for a request from the wire, its target ("/path?query")
   private target: string
+  private fromWire: bool
   private rawHeaders: string
   private rawBody: string
 
-  constructor(method: string, target: string, rawHeaders: string, body: string) {
-    this.method = method
-    this.target = target
-    this.rawHeaders = rawHeaders
-    this.rawBody = body
+  constructor(input: string, init?: RequestInit) {
+    const m = init?.method
+    this.verb = m === undefined ? "GET" : m.toUpperCase()
+    this.target = input
+    this.fromWire = false
+    const h = init?.headers
+    this.rawHeaders = h === undefined ? "" : new Headers(h).wire()
+    this.rawBody = init?.body ?? ""
   }
 
-  // "http://host/path?query", as in the Fetch API.
+  get method(): string {
+    return this.verb
+  }
+
+  // The full URL ("http://host/path?query").
   get url(): string {
-    const host = __native.headerIndex(this.rawHeaders, "host")
-    return "http://" + (host < 0 ? "localhost" : __native.headerValue(this.rawHeaders, host)) + this.target
-  }
-
-  // "/path" (no query).
-  get pathname(): string {
-    const q = this.target.indexOf("?")
-    return q < 0 ? this.target : this.target.slice(0, q)
-  }
-
-  // "?query", or "" when there is none.
-  get search(): string {
-    const q = this.target.indexOf("?")
-    return q < 0 ? "" : this.target.slice(q)
+    if (!this.fromWire) {
+      return this.target
+    }
+    return __native.requestUrl(this.rawHeaders, this.target)
   }
 
   get headers(): Headers {
-    return new Headers(this.rawHeaders)
-  }
-
-  header(name: string): string | undefined {
-    const at = __native.headerIndex(this.rawHeaders, name)
-    if (at < 0) {
-      return undefined
-    }
-    return __native.headerValue(this.rawHeaders, at)
+    return Headers.fromWire(this.rawHeaders)
   }
 
   text(): string {
     return this.rawBody
   }
+
+  // The body parsed as JSON, checked against the type the context expects.
+  json<T>(): T throws SyntaxError {
+    return try JSON.parse(this.rawBody)
+  }
+
+  // Internal: fills in a request read from the wire.
+  wire(method: string, target: string, headers: string, body: string): void {
+    this.verb = method
+    this.target = target
+    this.fromWire = true
+    this.rawHeaders = headers
+    this.rawBody = body
+  }
 }
 
-export type ResponseInit = { status?: int, headers?: Headers }
+// The request a `routes` handler gets: `req.params` holds the route's `:name` segments
+// (typed from the route, e.g. `{ id: string }` for "/users/:id").
+export class BunRequest extends Request {
+  readonly params: Record<string, string>
+
+  constructor(input: string, params: Record<string, string>) {
+    super(input)
+    this.params = params
+  }
+}
+
+export type ResponseInit = { status?: number, statusText?: string, headers?: HeadersInit }
 
 export class Response {
   readonly status: int
-  readonly body: string
-  readonly rawHeaders: string
+  readonly statusText: string
+  private rawHeaders: string
+  private bodyText: string
+  // without a body there's no default Content-Type
+  private hasBody: bool
 
   constructor(body?: string, init?: ResponseInit) {
-    this.body = body ?? ""
-    this.status = init?.status ?? 200
+    this.bodyText = body ?? ""
+    this.hasBody = body !== undefined
+    const status = init?.status
+    this.status = status === undefined ? 200 : Math.trunc(status)
+    this.statusText = init?.statusText ?? ""
     const h = init?.headers
-    this.rawHeaders = h === undefined ? "" : h.toString()
+    this.rawHeaders = h === undefined ? "" : new Headers(h).wire()
   }
 
   get headers(): Headers {
-    return new Headers(this.rawHeaders)
+    return Headers.fromWire(this.rawHeaders)
+  }
+
+  get ok(): bool {
+    return this.status >= 200 && this.status < 300
   }
 
   text(): string {
-    return this.body
+    return this.bodyText
+  }
+
+  json<T>(): T throws SyntaxError {
+    return try JSON.parse(this.bodyText)
+  }
+
+  // `data` as JSON, with `Content-Type: application/json;charset=utf-8`.
+  static json<T>(data: T, init?: ResponseInit): Response {
+    const r = new Response(JSON.stringify(data), init)
+    if (r.rawHeaders === "") {
+      r.rawHeaders = "Content-Type: application/json;charset=utf-8\r\n"
+    } else if (__native.headerIndex(r.rawHeaders, "content-type") < 0) {
+      r.rawHeaders = __native.headerAppend(r.rawHeaders, "Content-Type", "application/json;charset=utf-8")
+    }
+    return r
+  }
+
+  // A redirect (302 unless given) to `url`.
+  static redirect(url: string, status?: number): Response {
+    const r = new Response(undefined, { status: status ?? 302 })
+    r.rawHeaders = __native.headerAppend("", "Location", url)
+    return r
+  }
+
+  wireHeaders(): string {
+    return this.rawHeaders
+  }
+
+  wireTyped(): bool {
+    return this.hasBody
   }
 }
 
-// A response with `content-type: application/json`; `body` is already serialized:
-// `json(JSON.stringify(value))`.
-export function json(body: string, status?: int): Response {
-  return new Response(body, { status: status ?? 200, headers: new Headers("content-type: application/json\r\n") })
+export class Server {
+  readonly hostname: string
+  private id: int
+  private boundPort: int
+
+  constructor(hostname: string) {
+    this.id = -1
+    this.boundPort = 0
+    this.hostname = hostname
+  }
+
+  get port(): int {
+    return this.boundPort
+  }
+
+  // Internal: the server is listening.
+  bound(id: int, port: int): void {
+    this.id = id
+    this.boundPort = port
+  }
+
+  get url(): URL {
+    return URL.parse(`http://${this.hostname}:${this.port}/`)!
+  }
+
+  get development(): bool {
+    return false
+  }
+
+  // Stops accepting connections; open ones finish the request in hand (or close now with
+  // `closeActiveConnections`). The program exits when every server has stopped.
+  stop(closeActiveConnections?: bool): void {
+    __native.httpStop(this.id, closeActiveConnections ?? false)
+  }
 }
+
+export type Handler = (req: Request, server: Server) => Response throws Error
+export type RouteHandler = (req: BunRequest, server: Server) => Response throws Error
+export type MethodRoutes = {
+  GET?: RouteHandler
+  POST?: RouteHandler
+  PUT?: RouteHandler
+  PATCH?: RouteHandler
+  DELETE?: RouteHandler
+  HEAD?: RouteHandler
+  OPTIONS?: RouteHandler
+}
+export type RouteValue = Response | RouteHandler | MethodRoutes
 
 export type ServeOptions = {
-  port?: int
+  port?: number | string
   hostname?: string
+  routes?: Record<string, RouteValue>
+  fetch?: Handler
+  error?: (error: Error) => Response
+  development?: bool
+  // Barm: serve from this many processes.
   workers?: int
-  fetch: (req: Request) => Response
 }
 
-// Serves until the process is killed; throws if the address can't be bound.
-export function serve(options: ServeOptions): void throws Error {
-  const handler = options.fetch
-  __native.httpServe(options.port ?? 3000, options.hostname ?? "0.0.0.0", options.workers ?? 1, (method: string, target: string, headers: string, body: string): void => {
-    const res = handler(new Request(method, target, headers, body))
-    __native.httpRespond(res.status, res.rawHeaders, res.body)
-  })
-  try check()
+// A route with `:name` segments or a trailing `*`.
+type Pattern = { segments: string[], wildcard: bool, value: RouteValue }
+
+function methodHandler(m: MethodRoutes, method: string): RouteHandler | undefined {
+  switch (method) {
+    case "GET":
+      return m.GET
+    case "POST":
+      return m.POST
+    case "PUT":
+      return m.PUT
+    case "PATCH":
+      return m.PATCH
+    case "DELETE":
+      return m.DELETE
+    case "HEAD":
+      return m.HEAD ?? m.GET
+    case "OPTIONS":
+      return m.OPTIONS
+  }
+  return undefined
 }
+
+function specificity(p: Pattern): int {
+  let statics = 0
+  for (const s of p.segments) {
+    if (!s.startsWith(":")) {
+      statics++
+    }
+  }
+  return (p.wildcard ? 0 : 1000) + statics
+}
+
+// The params of `path` for a pattern route, or undefined if it doesn't match.
+function matchPattern(p: Pattern, path: string): Record<string, string> | undefined {
+  const parts = path.split("/")
+  const segs = p.segments
+  if (p.wildcard) {
+    // "/files/*": the prefix, then at least one more segment
+    if (parts.length <= segs.length) {
+      return undefined
+    }
+  } else if (parts.length !== segs.length) {
+    return undefined
+  }
+  const params: Record<string, string> = {}
+  for (let i = 0; i < segs.length; i++) {
+    const seg = segs[i]!
+    const part = parts[i]!
+    if (seg.startsWith(":")) {
+      if (part === "") {
+        return undefined
+      }
+      params.set(seg.slice(1), __native.urlDecode(part, false))
+    } else if (seg !== part) {
+      return undefined
+    }
+  }
+  if (p.wildcard && parts[segs.length]! === "") {
+    return undefined
+  }
+  return params
+}
+
+function internalError(e: Error, method: string, target: string, onError: ((error: Error) => Response) | undefined): Response {
+  console.error(`error: ${e.message}\n${method} - ${target} failed`)
+  if (onError !== undefined) {
+    return onError(e)
+  }
+  return new Response("Something went wrong!", { status: 500, headers: { "content-type": "text/plain" } })
+}
+
+// Starts a server (it serves once the program's top level has run). Exits the program with
+// an error if the port can't be bound, as an uncaught error would in Bun.
+export function serve(options: ServeOptions): Server {
+  const portOpt = options.port ?? 3000
+  const port = typeof portOpt === "string" ? parseInt(portOpt) ?? 0 : Math.trunc(portOpt)
+  const hostname = options.hostname ?? "0.0.0.0"
+  const exact = new Map<string, RouteValue>()
+  const patterns: Pattern[] = []
+  const routes = options.routes
+  if (routes !== undefined) {
+    for (const path of routes.keys()) {
+      const value = routes.get(path)!
+      if (path.includes(":") || path.endsWith("/*")) {
+        const wildcard = path.endsWith("/*")
+        const segs = (wildcard ? path.slice(0, path.byteLength - 2) : path).split("/")
+        patterns.push({ segments: segs, wildcard, value })
+      } else {
+        exact.set(path, value)
+      }
+    }
+    // More specific first, as in Bun: `:param` routes before wildcards, then more static
+    // segments; otherwise in declaration order (the sort is stable).
+    patterns.sort((a, b) => specificity(b) - specificity(a))
+  }
+  const fetch = options.fetch
+  const onError = options.error
+  const server = new Server(hostname === "0.0.0.0" ? "localhost" : hostname)
+  const noParams: Record<string, string> = {}
+
+  const run = (value: RouteValue, params: Record<string, string>, method: string, target: string, headers: string, body: string): Response | undefined => {
+    if (value instanceof Response) {
+      return value
+    }
+    const h = typeof value === "function" ? value : methodHandler(value, method)
+    if (h === undefined) {
+      return undefined
+    }
+    const req = new BunRequest(target, params)
+    req.wire(method, target, headers, body)
+    try {
+      return h(req, server)
+    } catch (e) {
+      return internalError(e, method, target, onError)
+    }
+  }
+
+  const handle = (method: string, target: string, headers: string, body: string): Response => {
+    const q = target.indexOf("?")
+    const path = q < 0 ? target : target.slice(0, q)
+    const v = exact.get(path)
+    if (v !== undefined) {
+      const r = run(v, noParams, method, target, headers, body)
+      if (r !== undefined) {
+        return r
+      }
+    }
+    for (const p of patterns) {
+      const params = matchPattern(p, path)
+      if (params !== undefined) {
+        const r = run(p.value, params, method, target, headers, body)
+        if (r !== undefined) {
+          return r
+        }
+      }
+    }
+    if (fetch !== undefined) {
+      const req = new Request(target)
+      req.wire(method, target, headers, body)
+      try {
+        return fetch(req, server)
+      } catch (e) {
+        return internalError(e, method, target, onError)
+      }
+    }
+    return new Response("Not Found", { status: 404 })
+  }
+
+  const id = __native.httpListen(port, hostname, (method: string, target: string, headers: string, body: string): void => {
+    const res = handle(method, target, headers, body)
+    __native.httpRespond(res.status, res.wireHeaders(), res.text(), res.wireTyped())
+  })
+  if (id < 0) {
+    console.error(`error: ${__native.takeError()}`)
+    process.exit(1)
+  }
+  __native.httpWorkers(options.workers ?? 1)
+  server.bound(id, __native.httpPort(id))
+  return server
+}
+
+// The `Bun` global (only `Bun.serve` so far).
+export const Bun = { serve: serve }

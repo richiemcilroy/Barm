@@ -6,7 +6,7 @@ use crate::ast::Arg;
 
 pub(super) const BUILTIN_TYPES: &[&str] = &[
     "int", "i64", "f64", "number", "f32", "i8", "i16", "i32", "u8", "u16", "u32", "u64", "bool", "boolean", "string", "never", "unknown", "undefined", "void", "Array", "Map",
-    "Set",
+    "Set", "Promise", "Record",
 ];
 
 pub(super) const GLOBAL_NAMES: &[&str] = &[
@@ -26,12 +26,21 @@ pub(super) fn native_sig(types: &mut Types, name: &str) -> Option<(Vec<TyId>, Ty
         "mkdir" => (vec![STR, BOOL], VOID),
         "unlink" => (vec![STR], VOID),
         "rm" => (vec![STR, BOOL, BOOL], VOID),
-        "httpServe" => {
+        "httpListen" => {
             let p = |ty| FnParam { ty, inout: false, optional: false };
             let handler = types.func(vec![p(STR), p(STR), p(STR), p(STR)], VOID);
-            (vec![INT, STR, INT, handler], VOID)
+            (vec![INT, STR, handler], INT)
         }
-        "httpRespond" => (vec![INT, STR, STR], VOID),
+        "httpPort" => (vec![INT], INT),
+        "httpStop" => (vec![INT, BOOL], VOID),
+        "httpWorkers" => (vec![INT], VOID),
+        "urlParse" => (vec![STR, STR], str_arr),
+        "urlDecode" => (vec![STR, BOOL], STR),
+        "urlEncode" => (vec![STR], STR),
+        "requestUrl" => (vec![STR, STR], STR),
+        "urlNormalize" => (vec![STR, STR], STR),
+        "urlPart" => (vec![STR, INT], STR),
+        "httpRespond" => (vec![INT, STR, STR, BOOL], VOID),
         "headerIndex" => (vec![STR, STR], INT),
         "headerValue" => (vec![STR, INT], STR),
         "headerRemove" => (vec![STR, STR], STR),
@@ -540,6 +549,8 @@ impl<'a> Checker<'a> {
         seen.push(t);
         match *self.types.get(t) {
             Ty::Error | Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::Bool | Ty::Str | Ty::StrLit(_) | Ty::Undefined => true,
+            // A generic `T`: the instantiated type is written (functions come out as `null`).
+            Ty::Param(_) => true,
             Ty::Array(e) => self.json_ok_in(e, allow_class, seen),
             Ty::Map(k, v) => k == STR && self.json_ok_in(v, allow_class, seen),
             Ty::Record(fs) => {
@@ -658,7 +669,9 @@ impl<'a> Checker<'a> {
                     self.check_args_loose(args);
                 } else {
                     let t = self.expr(args[0].expr, Some(STR));
-                    if t != ERROR && !self.types.is_string(t) {
+                    // `Number(x)` also takes numbers (and `number | string`), as in JavaScript.
+                    let number_ok = name == "Number" && self.flat_members(t).iter().all(|&m| self.types.is_string(m) || self.types.is_numeric(m));
+                    if t != ERROR && !self.types.is_string(t) && !number_ok {
                         let msg = format!("`{name}` parses a `string`, found `{}`", self.show(t));
                         let s = self.ast().expr(args[0].expr).span;
                         let mut d = Diagnostic::new("T0001", s, msg);

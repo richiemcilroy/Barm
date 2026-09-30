@@ -350,12 +350,26 @@ bm_str bm_jp_error(bm_jp *p);
 
 /* ------------------------------------------------------------------ HTTP server (std/http) */
 
-/* Serves HTTP/1.1 on host:port with `workers` processes (forked after binding), calling
- * handler(env, method, target, headers, body) for each request; the handler answers with
- * bm_native_httpRespond. Returns only on error (reported through bm_native_takeError). */
-void bm_native_httpServe(bm_int port, bm_str host, bm_int workers, bm_fn handler);
-void bm_native_httpRespond(bm_int status, bm_str headers, bm_str body);
+/* HTTP servers (std/http): httpListen binds and registers a server (returns its id, or -1 with
+ * the error in bm_native_takeError); bm_http_run, called after the program, serves every
+ * registered server — in httpWorkers processes — until all are stopped. For each request the
+ * handler(env, method, target, headers, body) answers with bm_native_httpRespond. */
+bm_int bm_native_httpListen(bm_int port, bm_str host, bm_fn handler);
+bm_int bm_native_httpPort(bm_int id);
+void bm_native_httpStop(bm_int id, bool force);
+void bm_native_httpWorkers(bm_int n);
+/* URLs: parse → [protocol, hostname, port, pathname, search, hash] (empty if invalid; `base`
+ * resolves a relative input, "" for none); percent-decoding (`plus`: '+' is a space) and
+ * application/x-www-form-urlencoded encoding. */
+struct bm_arr bm_native_urlParse(bm_str input, bm_str base);
+bm_str bm_native_requestUrl(bm_str headers, bm_str target);   /* "http://" + Host + target */
+bm_str bm_native_urlNormalize(bm_str input, bm_str base);      /* normalized href, "" if invalid */
+bm_str bm_native_urlPart(bm_str href, bm_int k);               /* 0 protocol .. 5 hash */
+bm_str bm_native_urlDecode(bm_str s, bool plus);
+bm_str bm_native_urlEncode(bm_str s);
+void bm_native_httpRespond(bm_int status, bm_str headers, bm_str body, bool typed);  /* typed: add the default content-type */
 bm_int bm_native_headerIndex(bm_str block, bm_str name);   /* offset of the value, or -1 */
 bm_str bm_native_headerValue(bm_str block, bm_int at);
+void bm_http_run(void);   /* after the program: serves registered servers until stopped (no-op if none) */
 bm_str bm_native_headerRemove(bm_str block, bm_str name);  /* the block without `name` lines */
 bm_str bm_native_headerAppend(bm_str block, bm_str name, bm_str value);

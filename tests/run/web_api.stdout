@@ -1,0 +1,22 @@
+http://localhost:3000/a/b?x=1&y=2#frag | http: localhost 3000 /a/b ?x=1&y=2 #frag localhost:3000 http://localhost:3000
+https://example.com/b/c? | https: example.com  /b/c   example.com https://example.com
+http://h/p | http: h  /p   h http://h
+http://h/ | http: h  /   h http://h
+https://user:pw@h.com:8443/x%2Fy?q=a%20b#h | https: h.com 8443 /x%2Fy ?q=a%20b #h h.com:8443 https://h.com:8443
+mailto:ada@example.com | mailto:   ada@example.com    null
+http://base.test/dir/not%20a%20url | http: base.test  /dir/not%20a%20url   base.test http://base.test
+http://base.test/relative?x | http: base.test  /relative ?x  base.test http://base.test
+http://base.test/up/one | http: base.test  /up/one   base.test http://base.test
+true false
+1 1,3 two words ✓  false 5
+a=x+y&b=two+words&flag=&d=%C3%A9%26%3D
+v+w none
+8 false a=1
+header set-cookie a=1
+header x-id 8
+POST http://example.com/api?x=1 yes
+5
+201 true true b {"ok":true,"list":[1,2]}
+200 true hi
+307 http://example.com/next
+404 Not Found false

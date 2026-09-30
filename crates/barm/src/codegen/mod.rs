@@ -113,6 +113,9 @@ struct Instance {
     cname: String,
 }
 
+/// A generic instantiation's type arguments (parameter → type), sorted.
+pub(crate) type TypeArgs = Vec<(u32, TyId)>;
+
 pub(crate) struct Gen<'c, 'a> {
     pub(crate) c: &'c mut Checker<'a>,
     /// Section buffers, assembled in this order.
@@ -133,8 +136,15 @@ pub(crate) struct Gen<'c, 'a> {
     instances: FxMap<InstanceKey, String>,
     queue: Vec<Instance>,
     fn_values: FxMap<String, String>,
+    static_insts: FxMap<(u32, u32, TypeArgs), String>,
+    /// Closure environment structs (after all value structs they may contain).
+    pub(crate) env_structs: String,
     consts_done: FxSet<(u32, u32)>,
     const_init: String,
+    /// Running a script: its module variables are initialized by the script, in source order.
+    script_module: Option<u32>,
+    /// Module variables some module changes (union of the facts).
+    pub(crate) mutated_globals: FxSet<(u32, u32)>,
     counter: u32,
     pub(crate) errors: Vec<Diagnostic>,
     /// Memo for `inout_leak_free`: (module, item, parameter) → leak-free.
@@ -150,6 +160,7 @@ pub(crate) struct Gen<'c, 'a> {
     pub(crate) class_list: Vec<TyId>,
     pub(crate) ctor_insts: FxMap<TyId, String>,
     pub(crate) method_insts: FxMap<(TyId, u32), String>,
+    pub(crate) generic_method_insts: FxMap<(TyId, u32, TypeArgs), String>,
     pub(crate) dispatch_names: FxMap<(TyId, Sym), String>,
     pub(crate) dispatchers: Vec<class::Dispatcher>,
     pub(crate) dispatch_bodies: String,
@@ -197,8 +208,12 @@ impl<'c, 'a> Gen<'c, 'a> {
             instances: FxMap::default(),
             queue: Vec::new(),
             fn_values: FxMap::default(),
+            static_insts: FxMap::default(),
+            env_structs: String::new(),
             consts_done: FxSet::default(),
             const_init: String::new(),
+            script_module: None,
+            mutated_globals: FxSet::default(),
             counter: 0,
             errors: Vec::new(),
             internal: Vec::new(),
@@ -209,6 +224,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             class_list: Vec::new(),
             ctor_insts: FxMap::default(),
             method_insts: FxMap::default(),
+            generic_method_insts: FxMap::default(),
             dispatch_names: FxMap::default(),
             dispatchers: Vec::new(),
             dispatch_bodies: String::new(),
@@ -268,8 +284,22 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
             }
         }
+        for mi in 0..modules.len() {
+            let globals: Vec<(u32, u32)> = self.facts(mi as u32).mutated_globals.iter().copied().collect();
+            self.mutated_globals.extend(globals);
+        }
+        let script = modules.iter().enumerate().find(|(_, m)| m.entry && m.ast.script.is_some()).map(|(mi, m)| (mi as u32, m.ast.script.unwrap()));
         let mut main_body = String::new();
         match mode {
+            Mode::Run if script.is_some() => {
+                let (m, i) = script.unwrap();
+                self.script_module = Some(m);
+                let cname = self.instance(m, i, FxMap::default());
+                let throws = self.c.sigs[&(m, i)].throws != NEVER;
+                self.needs_uncaught |= throws;
+                let uncaught = if throws { "    if (bmg_err) { bmg_uncaught(); return 1; }\n" } else { "" };
+                let _ = writeln!(main_body, "    {cname}();\n{uncaught}    bm_http_run();\n    bm_out_flush();\n    return 0;");
+            }
             Mode::Run => {
                 let Some((m, i)) = main_fn else {
                     self.errors.push(Diagnostic::new("C0002", crate::source::Span::new(modules[0].file, 0, 0), "no `function main()` to run"));
@@ -281,9 +311,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.needs_uncaught |= throws;
                 let uncaught = if throws { "    if (bmg_err) { bmg_uncaught(); return 1; }\n" } else { "" };
                 if ret == INT {
-                    let _ = writeln!(main_body, "    bm_int code = {cname}();\n{uncaught}    bm_out_flush();\n    return (int)code;");
+                    let _ = writeln!(main_body, "    bm_int code = {cname}();\n{uncaught}    bm_http_run();\n    bm_out_flush();\n    return (int)code;");
                 } else {
-                    let _ = writeln!(main_body, "    {cname}();\n{uncaught}    bm_out_flush();\n    return 0;");
+                    let _ = writeln!(main_body, "    {cname}();\n{uncaught}    bm_http_run();\n    bm_out_flush();\n    return 0;");
                 }
             }
             Mode::Test => {
@@ -313,7 +343,22 @@ impl<'c, 'a> Gen<'c, 'a> {
                 break;
             }
         }
+        let classes_before = self.class_list.len();
         let tables = self.emit_class_tables();
+        // Tables (printing) may call methods not called elsewhere (`toString`): emit them too.
+        loop {
+            while let Some(inst) = self.queue.pop() {
+                self.emit_function(inst);
+            }
+            if let Some(w) = self.class_work.pop() {
+                self.emit_class_work(w);
+                continue;
+            }
+            break;
+        }
+        if self.class_list.len() != classes_before {
+            self.internal.push("a class was first used by a printing method".into());
+        }
         while let Some(t) = self.pending_boxes.pop() {
             self.define_struct(t);
         }
@@ -338,7 +383,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         out.push('\n');
         out.push_str("#include <math.h>\n#include <pthread.h>\n#include <stdio.h>\n#include <stdlib.h>\n");
         out.push_str(PRELUDE);
-        for s in [&self.typedefs, &self.structs, &self.class_structs, &self.lits, &self.protos, &self.helpers, &self.funcs] {
+        for s in [&self.typedefs, &self.structs, &self.class_structs, &self.env_structs, &self.lits, &self.protos, &self.helpers, &self.funcs] {
             out.push_str(s);
             out.push('\n');
         }
@@ -1054,7 +1099,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             return n.clone();
         }
         let ItemKind::Function(f) = &self.ast(m).items[item as usize].kind else { unreachable!() };
-        let base = format!("f{m}_{}", self.sym(f.name));
+        let name = self.sym(f.name);
+        let base = if name == "<script>" { format!("f{m}_script_") } else { format!("f{m}_{name}") };
         let cname = if subst.is_empty() { base } else { format!("{base}_{}", self.instances.len()) };
         self.instances.insert(key, cname.clone());
         // Prototype now, body later.
@@ -1160,7 +1206,10 @@ impl<'c, 'a> Gen<'c, 'a> {
             let code = self.function_body(m, FxMap::default(), &[], ty, body::FnBodyKind::Expr(*init), None, None, None);
             let fname = format!("init_{gname}");
             let _ = writeln!(self.funcs, "static {ct} {fname}(void) {{\n{code}}}\n");
-            let _ = writeln!(self.const_init, "    {gname} = {fname}();");
+            // A script initializes its own variables where they're declared.
+            if self.script_module != Some(m) {
+                let _ = writeln!(self.const_init, "    {gname} = {fname}();");
+            }
         }
         Val::plain(gname, ty)
     }

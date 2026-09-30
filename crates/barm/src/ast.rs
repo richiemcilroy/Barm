@@ -13,6 +13,11 @@ pub struct Ast {
     pub stmts: Vec<Stmt>,
     pub types: Vec<TypeExpr>,
     pub items: Vec<Item>,
+    /// A script (a module with top-level statements): the item index of the synthesized
+    /// function `<script>` that runs them, with module variables initialized in source order.
+    pub script: Option<u32>,
+    /// Where the first top-level statement is (for "statements only in the entry file").
+    pub script_span: Option<Span>,
 }
 
 impl Ast {
@@ -121,6 +126,8 @@ pub struct ObjField {
     pub name: Sym,
     pub name_span: Span,
     pub value: ExprId,
+    /// Written as a string literal (`{ "Content-Type": v }`): a key for a `Record<string, V>`.
+    pub quoted: bool,
 }
 
 pub enum ArrowBody {
@@ -207,6 +214,8 @@ pub enum StmtKind {
     Block(Vec<StmtId>),
     Throw(ExprId),
     Try { body: StmtId, catch: Option<Catch>, finally: Option<StmtId> },
+    /// In a script's body: initialize module variable (item index) here, in source order.
+    InitGlobal(u32),
     Empty,
     Error,
 }
@@ -235,7 +244,8 @@ pub enum TypeExprKind {
     Record(Vec<FieldTy>),
     Union(Vec<TypeId>),
     StrLit(Sym),
-    Func(Vec<Param>, TypeId),
+    /// `(params) => ret`, with an optional `throws E`.
+    Func(Vec<Param>, TypeId, Option<TypeId>),
     Undefined,
     Null,
     Void,
@@ -311,7 +321,8 @@ pub enum ItemKind {
     Function(FnDecl),
     TypeAlias { name: Sym, name_span: Span, tparams: Vec<TypeParam>, ty: TypeId },
     Interface { name: Sym, name_span: Span, tparams: Vec<TypeParam>, members: Vec<FieldTy> },
-    Const { name: Sym, name_span: Span, ty: Option<TypeId>, init: ExprId },
+    /// A module-level `const` (or `let`, with `mutable`).
+    Const { name: Sym, name_span: Span, ty: Option<TypeId>, init: ExprId, mutable: bool },
     Test { name: String, name_span: Span, body: ExprId },
     Class(ClassDecl),
 }
@@ -354,7 +365,7 @@ impl Ast {
                 }
                 TypeExprKind::Record(fs) => fields(fs),
                 TypeExprKind::StrLit(s) => *s = f(*s),
-                TypeExprKind::Func(ps, _) => params(ps),
+                TypeExprKind::Func(ps, _, _) => params(ps),
                 _ => {}
             }
         }

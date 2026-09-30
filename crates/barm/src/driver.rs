@@ -18,6 +18,9 @@ const PRELUDE: &str = include_str!("prelude.barm");
 const STD_MODULES: &[(&str, &str, bool)] =
     &[("fs", include_str!("std/fs.barm"), true), ("path", include_str!("std/path.barm"), true), ("http", include_str!("std/http.barm"), false)];
 
+/// Globals that come from std/http, as in Bun.
+pub(crate) const WEB_GLOBALS: &[&str] = &["Bun", "Request", "Response", "Headers", "URL", "URLSearchParams"];
+
 /// The standard module an import names (`"node:fs"`, `"fs"`, `"std/http"`), if any.
 fn std_module(spec: &str) -> Option<&'static (&'static str, &'static str, bool)> {
     if let Some(name) = spec.strip_prefix("std/") {
@@ -117,12 +120,23 @@ pub fn load(paths: &[PathBuf], base: &Path) -> Result<Loaded, String> {
             let file = sm.add(source);
             diags.extend(pd);
             by_path.insert(path.clone(), modules.len() as u32);
-            modules.push(Module { file, path, name, ast, imports: HashMap::default(), builtin: false, std: false });
+            modules.push(Module { file, path, name, ast, imports: HashMap::default(), builtin: false, std: false, entry: true });
         }
     }
 
     if std::env::var("BARM_TRACE").is_ok() {
         eprintln!("walk {:?}, parse {:?}, merge {:?}", tw - t0, tp - tw, tp.elapsed());
+    }
+    // The web globals (`Bun`, `Request`, `Response`, ...) live in std/http: load it when a
+    // program mentions one of them.
+    if WEB_GLOBALS.iter().any(|n| interner.lookup(n).is_some()) {
+        let target = PathBuf::from("<std>/http");
+        let src = STD_MODULES.iter().find(|m| m.0 == "http").unwrap().1;
+        let file = sm.add(SourceFile::new(target.clone(), "std/http".into(), src.to_string()));
+        let (ast, pd) = parser::parse(&sm.get(file).text, file, &mut interner);
+        diags.extend(pd);
+        by_path.insert(target.clone(), modules.len() as u32);
+        modules.push(Module { file, path: target, name: "std/http".into(), ast, imports: HashMap::default(), builtin: false, std: true, entry: false });
     }
     // Follow imports (files outside the roots are parsed here, sequentially).
     let mut mi = 0;
@@ -154,7 +168,7 @@ pub fn load(paths: &[PathBuf], base: &Path) -> Result<Loaded, String> {
                     diags.extend(pd);
                     let t = modules.len() as u32;
                     by_path.insert(target.clone(), t);
-                    modules.push(Module { file, path: target, name, ast, imports: HashMap::default(), builtin: false, std: std_src.is_some() });
+                    modules.push(Module { file, path: target, name, ast, imports: HashMap::default(), builtin: false, std: std_src.is_some(), entry: false });
                     t
                 }
             };
@@ -166,7 +180,7 @@ pub fn load(paths: &[PathBuf], base: &Path) -> Result<Loaded, String> {
     let file = sm.add(SourceFile::new(PathBuf::from("<builtin>"), "<builtin>".into(), PRELUDE.into()));
     let (ast, pd) = parser::parse(&sm.get(file).text, file, &mut interner);
     diags.extend(pd);
-    modules.push(Module { file, path: PathBuf::from("<builtin>"), name: "<builtin>".into(), ast, imports: HashMap::default(), builtin: true, std: true });
+    modules.push(Module { file, path: PathBuf::from("<builtin>"), name: "<builtin>".into(), ast, imports: HashMap::default(), builtin: true, std: true, entry: false });
 
     Ok(Loaded { sm, interner, modules, diags })
 }

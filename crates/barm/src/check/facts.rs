@@ -63,6 +63,9 @@ pub enum MemberFact {
     StaticField(u32, u32),
     /// `process.env.NAME` (the variable's name).
     Env(Sym),
+    /// `req.params` in a `routes` handler: the route's `:name` segments as this record type,
+    /// read from the request's params map.
+    RouteParams(TyId),
 }
 
 #[derive(Default)]
@@ -75,6 +78,9 @@ pub struct ModuleFacts {
     pub bindings: FxMap<StmtId, TyId>,
     /// Calls and `new` expressions that can throw (checked for an error right after).
     pub throwing: crate::hash::FxSet<ExprId>,
+    /// Module variables (module, item) this module changes: code generation treats them like
+    /// heap values (arguments read from them are owned, since a call may change them).
+    pub mutated_globals: crate::hash::FxSet<(u32, u32)>,
 }
 
 impl ModuleFacts {

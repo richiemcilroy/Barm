@@ -16,6 +16,8 @@ text = re.sub(r'^cyclic\s+class\b', 'class', text, flags=re.M)
 # `throws E` clauses and `try f()` markers (not `try {` blocks).
 text = re.sub(r'\)\s*(:\s*[^{=;]+?)?\s+throws\s+[^{;]+?\s*\{', lambda m: ')' + (m.group(1) or '') + ' {', text)
 text = re.sub(r'\btry\s+(?!\{)', '', text)
+# `throws E` in function types: `(x: T) => R throws E`.
+text = re.sub(r'(=>\s*[^\n;,)=]+?)\s+throws\s+[A-Za-z_][\w]*(\s*\|\s*[A-Za-z_][\w]*)*', r'\1', text)
 
 def match_close(t, i, o, c):
     d = 0
@@ -69,7 +71,8 @@ while True:
     text = (text[:cls_open + 1] + ' ' + decls + text[cls_open + 1:open_p + 1] + new_params + text[close_p:body_open + 1] + body + text[body_close:])
     pos = cls_open + len(decls) + 1
 
-text += "\nmain();\n"
+if re.search(r"^(export )?function main\(", text, flags=re.M):
+    text += "\nmain();\n"
 open(sys.argv[2], 'w').write(text)
 PY
 cat > "$work/prelude.mjs" <<'JS'
