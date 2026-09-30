@@ -256,6 +256,9 @@ console.log(`signal state: ${signal.aborted}`)
 
 // failures
 await show("connection refused", fetch("http://127.0.0.1:1/"))
+// the ClientHello goes out while TCP connects: a refusal is still reported as one
+await show("https connection refused", fetch("https://127.0.0.1:1/"))
+await show("https connection refused (every address)", fetch("https://localhost:1/"))
 await show("invalid URL", fetch("not a url"))
 try {
   await fetch("ftp://example.com/")
