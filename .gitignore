@@ -2,6 +2,9 @@
 .DS_Store
 bench/http/out/
 bench/http/rust/target/
+bench/fetch/out/
+bench/fetch/server/target/
+bench/fetch/rust-client/target/
 
 # Internal docs stay local
 docs/design.md
