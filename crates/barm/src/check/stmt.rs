@@ -982,24 +982,25 @@ fn stmt_exprs(ast: &Ast, s: StmtId, out: &mut Vec<ExprId>) {
     }
 }
 
-/// Locals assigned or changed inside closures anywhere in a function body.
-pub(super) fn closure_mutated_stmt(ast: &Ast, s: StmtId) -> HashSet<Sym> {
+/// Locals changed inside closures anywhere in a function body: (assigned or changed through —
+/// a field, an element, a method call on them —, only assigned).
+pub(super) fn closure_mutated_stmt(ast: &Ast, s: StmtId) -> (HashSet<Sym>, HashSet<Sym>) {
     let mut exprs = Vec::new();
     stmt_exprs(ast, s, &mut exprs);
-    let mut out = HashSet::default();
+    let mut out = (HashSet::default(), HashSet::default());
     for e in exprs {
         closure_mutated_into(ast, e, false, &mut out);
     }
     out
 }
 
-pub(super) fn closure_mutated_expr(ast: &Ast, e: ExprId) -> HashSet<Sym> {
-    let mut out = HashSet::default();
+pub(super) fn closure_mutated_expr(ast: &Ast, e: ExprId) -> (HashSet<Sym>, HashSet<Sym>) {
+    let mut out = (HashSet::default(), HashSet::default());
     closure_mutated_into(ast, e, false, &mut out);
     out
 }
 
-fn closure_mutated_into(ast: &Ast, e: ExprId, inside: bool, out: &mut HashSet<Sym>) {
+fn closure_mutated_into(ast: &Ast, e: ExprId, inside: bool, out: &mut (HashSet<Sym>, HashSet<Sym>)) {
     let mut kids: Vec<ExprId> = Vec::new();
     match &ast.expr(e).kind {
         ExprKind::Arrow(f) => {
@@ -1015,8 +1016,9 @@ fn closure_mutated_into(ast: &Ast, e: ExprId, inside: bool, out: &mut HashSet<Sy
         }
         _ if inside => {
             let fx = effects_of_expr(ast, e);
-            out.extend(fx.assigned);
-            out.extend(fx.roots);
+            out.1.extend(fx.assigned.iter().copied());
+            out.0.extend(fx.assigned);
+            out.0.extend(fx.roots);
         }
         _ => {}
     }
