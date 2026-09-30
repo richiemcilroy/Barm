@@ -2185,6 +2185,25 @@ impl<'c, 'a> Gen<'c, 'a> {
             self.close("}");
             return Val::plain(res, STR);
         }
+        // A union of classes → a class they all extend (`Error | DOMException` → `Error`): the
+        // member it holds, as that class.
+        if let (Ty::Union(fms), Ty::Class(..)) = (tf, tt) {
+            let fms = self.c.types.tys(fms).to_vec();
+            if fms.iter().all(|&m| matches!(self.tget(m), Ty::Class(..))) {
+                let ct = self.ctype(to);
+                let owned = v.owned;
+                let code = if owned { self.consume(v) } else { v.code.clone() };
+                let res = self.fresh("c");
+                self.line(format!("{ct} {res};"));
+                self.open(&format!("switch (({code}).tag) {{"));
+                for i in 0..fms.len() {
+                    self.line(format!("case {i}: {res} = ({ct})({code}).u.m{i}; break;"));
+                }
+                self.line(format!("default: {res} = NULL; break;"));
+                self.close("}");
+                return if owned { self.tmp(to, &res, true) } else { Val::plain(res, to) };
+            }
+        }
         // Structural conversions between records / arrays with assignable parts.
         match (tf, tt) {
             (Ty::Record(ffs), Ty::Record(tfs)) => {
