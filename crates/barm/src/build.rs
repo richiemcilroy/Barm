@@ -374,7 +374,7 @@ impl TlsArchive {
         if archive.is_file() {
             return Ok(archive);
         }
-        eprintln!("barm: compiling the TLS library (BoringSSL, brotli, zlib, zstd); this happens once");
+        eprintln!("barm: compiling the TLS library (BoringSSL, brotli, libdeflate, zlib, zstd); this happens once");
         let fail = |what: String| BuildError::Message(format!("can't build the TLS library: {what}"));
         let dir = c_dir.join(format!("tls-{}.tmp{}", self.key, std::process::id()));
         for (rel, bytes) in tls_files::TLS_FILES.iter().copied().chain([("runtime/barm.h", codegen::RUNTIME_H.as_bytes())]) {
@@ -384,7 +384,7 @@ impl TlsArchive {
         }
         let sources: Vec<&str> = tls_files::TLS_FILES.iter().map(|f| f.0).filter(|p| p.ends_with(".cc") || p.ends_with(".S") || p.ends_with(".c")).collect();
         let cxx = Self::cxx(cc);
-        let include = ["vendor/boringssl/include", "vendor/brotli/c/include", "vendor/zlib", "vendor/zstd/lib", "runtime"].map(|p| format!("-I{}", dir.join(p).display()));
+        let include = ["vendor/boringssl/include", "vendor/brotli/c/include", "vendor/libdeflate", "vendor/zlib", "vendor/zstd/lib", "runtime"].map(|p| format!("-I{}", dir.join(p).display()));
         // compile in parallel: ~400 files, once
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(sources.len());
         let next = std::sync::atomic::AtomicUsize::new(0);

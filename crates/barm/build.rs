@@ -1,5 +1,5 @@
 //! Cargo build script: embeds the fetch() library sources (runtime/tls.c and codecs.c with the
-//! vendored BoringSSL, brotli, zlib and zstd) in the
+//! vendored BoringSSL, brotli, libdeflate, zlib and zstd) in the
 //! compiler, so `barm build` can compile them into the TLS archive that fetch() programs link
 //! (see src/build.rs), and hashes them once here (TLS_KEY) rather than on every build.
 
@@ -22,7 +22,7 @@ fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
     let vendor = root.join("vendor");
     let mut list = Vec::new();
-    for lib in ["boringssl", "brotli", "zlib", "zstd"] {
+    for lib in ["boringssl", "brotli", "libdeflate", "zlib", "zstd"] {
         files(&vendor.join(lib), &mut list);
     }
     list.push(root.join("runtime/tls.c"));
