@@ -469,6 +469,11 @@ impl<'c, 'a> Gen<'c, 'a> {
         // Programs that never start a task, timer or server skip the event loop entirely, so
         // dead stripping drops it (and the HTTP runtime behind it) from the binary.
         let mut main_body = main_body;
+        // A program that fetches links TLS (runtime/tls.c with mbedTLS; see build.rs): this call
+        // is what pulls it in.
+        if self.funcs.contains("bm_native_fetchStart(") {
+            init.insert_str(0, "    bm_tls_install();\n");
+        }
         if self.uses_event_loop() || main_body.contains("bm_task_") {
             init.insert_str(0, "    bm_async_init(bmg_async_retain, bmg_async_release, bmg_async_report);\n");
         } else {

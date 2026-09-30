@@ -5208,7 +5208,10 @@ typedef struct bm_origin {
 
 enum { BM_FR_HEAD, BM_FR_FIXED, BM_FR_CHUNK_SIZE, BM_FR_CHUNK_DATA, BM_FR_CHUNK_END, BM_FR_TRAILERS, BM_FR_UNTIL_CLOSE, BM_FR_DONE };
 enum { BM_FETCH_FOLLOW, BM_FETCH_MANUAL, BM_FETCH_ERROR };
-enum { BM_FETCH_DECOMPRESS = 1 };
+enum { BM_FETCH_DECOMPRESS = 1, BM_FETCH_INSECURE = 2 };
+
+/* Set by bm_tls_install() in programs linked with TLS (runtime/tls.c). */
+const bm_tls_ops *bm_tls_impl;
 
 typedef struct bm_fr {
     bm_int id;
@@ -5219,10 +5222,13 @@ typedef struct bm_fr {
     bm_str method, headers, body, url;
     int redirect_mode, redirects;
     bool decompress;
+    bool https, insecure;      /* TLS; without certificate checks (tls.rejectUnauthorized: false) */
+    bm_str ca;                 /* extra trusted certificates (PEM), for tls.ca */
     char *host;                /* hostname (IPv6 in brackets) */
-    char *key;                 /* "host:port", the pool key */
+    char *key;                 /* the pool key: scheme, host, port and TLS options */
     int port;
     bm_sb head;                /* the serialized request head */
+    bool merged;               /* the body was appended to head (one TLS record for both) */
     size_t sent;               /* bytes of head + body written */
     bm_fc *c;
     bool retried;
@@ -5254,6 +5260,8 @@ struct bm_fc {
     int ai;                    /* the address being tried */
     int err;                   /* the last connect error */
     int port;
+    bm_tls *tls;               /* https: the TLS session (NULL for http) */
+    bool handshaking;
     char *in;
     size_t in_off, in_len, in_cap;
 };
@@ -5301,6 +5309,7 @@ static void bm_fc_interest(bm_fc *c, bool read, bool write) {
 static void bm_fc_close(bm_fc *c) {
     if (c->dead) return;
     c->dead = true;
+    if (c->tls) { bm_tls_impl->close(c->tls, false); c->tls = NULL; }
     if (c->fd >= 0) close(c->fd); /* also leaves the event queue */
     c->fd = -1;
     c->next = bm_fc_graveyard;
@@ -5383,18 +5392,19 @@ static bool bm_fr_prepare(bm_fr *r) {
         bm_fr_fail(r, "ERR_INVALID_ARG_VALUE", "protocol must be http: or https:");
         return false;
     }
-    if (https) {
-        bm_fr_fail(r, "ERR_TLS_UNSUPPORTED", "https: URLs aren't supported yet (TLS is coming): %s", s);
+    if (https && !bm_tls_impl) {
+        bm_fr_fail(r, "ERR_TLS_UNSUPPORTED", "https: isn't available: this program was built without TLS");
         return false;
     }
-    const char *a = s + 7, *auth_end = a;
+    r->https = https;
+    const char *a = s + (https ? 8 : 7), *auth_end = a;
     while (auth_end < end && *auth_end != '/' && *auth_end != '?' && *auth_end != '#') auth_end++;
     const char *host = a, *userinfo = NULL, *userinfo_end = NULL;
     for (const char *x = a; x < auth_end; x++) if (*x == '@') { userinfo = a; userinfo_end = x; host = x + 1; }
     const char *hend = host;
     if (hend < auth_end && *hend == '[') { while (hend < auth_end && *hend != ']') hend++; if (hend < auth_end) hend++; }
     while (hend < auth_end && *hend != ':') hend++;
-    int port = 80;
+    int port = https ? 443 : 80;
     if (hend < auth_end) port = atoi(hend + 1);
     bm_free(r->host);
     bm_free(r->key);
@@ -5403,12 +5413,16 @@ static bool bm_fr_prepare(bm_fr *r) {
     memcpy(r->host, host, hl);
     r->host[hl] = 0;
     r->port = port;
-    r->key = bm_alloc(hl + 8);
-    snprintf(r->key, hl + 8, "%s:%d", r->host, port);
+    /* connections are pooled per scheme, host, port and TLS options */
+    size_t kl = hl + 64;
+    r->key = bm_alloc(kl);
+    if (https) snprintf(r->key, kl, "https://%s:%d%s|%08x", r->host, port, r->insecure ? "|insecure" : "", r->ca.p->len ? bm_hash_cstr(r->ca.p->data) : 0);
+    else snprintf(r->key, kl, "http://%s:%d", r->host, port);
     const char *target = auth_end, *hash = memchr(target, '#', (size_t)(end - target));
     if (!hash) hash = end;
     bm_sb *h = &r->head;
     h->len = 0;
+    r->merged = false;
     bm_sb_push(h, r->method.p->data, (size_t)r->method.p->len);
     bm_sb_push_char(h, ' ');
     if (target == hash || *target != '/') bm_sb_push_char(h, '/');
@@ -5447,9 +5461,25 @@ static bool bm_fr_prepare(bm_fr *r) {
 
 /* ---- writing */
 
+/* Bytes of request still to write: the head, then the body (unless merged into the head). */
+static size_t bm_fr_out_len(const bm_fr *r) { return r->head.len + (r->merged ? 0 : (size_t)r->body.p->len); }
+
 static bool bm_fc_write(bm_fc *c) {
     bm_fr *r = c->r;
-    size_t hn = r->head.len, bn = (size_t)r->body.p->len;
+    size_t hn = r->head.len, bn = r->merged ? 0 : (size_t)r->body.p->len;
+    if (c->tls) {
+        while (r->sent < hn + bn) {
+            const char *p = r->sent < hn ? r->head.data + r->sent : r->body.p->data + (r->sent - hn);
+            size_t n = r->sent < hn ? hn - r->sent : bn - (r->sent - hn);
+            long w = bm_tls_impl->write(c->tls, p, n);
+            if (w > 0) { r->sent += (size_t)w; continue; }
+            if (w == -1) { bm_fc_interest(c, true, false); return true; }
+            if (w == -2) { bm_fc_interest(c, true, true); return true; }
+            return false;
+        }
+        bm_fc_interest(c, true, false);
+        return true;
+    }
     while (r->sent < hn + bn) {
         struct iovec iov[2];
         int n = 0;
@@ -5707,6 +5737,17 @@ static void bm_fc_release(bm_fc *c, bool reusable) {
     o->nidle++;
 }
 
+/* > 0 bytes; 0 the connection ended; -1 nothing more for now; -2 TLS wants to write; -3 failed. */
+static long bm_fc_recv(bm_fc *c, char *buf, size_t n) {
+    if (c->tls) return bm_tls_impl->read(c->tls, buf, n);
+    for (;;) {
+        ssize_t r = read(c->fd, buf, n);
+        if (r >= 0) return r;
+        if (errno == EINTR) continue;
+        return errno == EAGAIN || errno == EWOULDBLOCK ? -1 : -3;
+    }
+}
+
 static bool bm_fc_open(bm_fc *c) {
     for (; c->ai < c->addrs.n; c->ai++) {
         struct sockaddr_storage *sa = &c->addrs.a[c->ai];
@@ -5747,6 +5788,11 @@ static void bm_fr_send(bm_fr *r, bm_fc *c) {
     r->c = c;
     c->r = r;
     r->sent = 0;
+    if (c->tls && !r->merged && r->body.p->len && r->body.p->len <= 8192) {
+        /* one TLS record (and one write) for a small request */
+        bm_sb_push(&r->head, r->body.p->data, (size_t)r->body.p->len);
+        r->merged = true;
+    }
     r->state = BM_FR_HEAD;
     r->got_any = false;
     if (!bm_fc_write(c)) {
@@ -5758,6 +5804,29 @@ static void bm_fr_send(bm_fr *r, bm_fc *c) {
         if (retry) { r->retried = true; bm_fr_step(r); }
         else bm_fr_fail(r, "ECONNRESET", "The socket connection was closed unexpectedly. %s", BM_FETCH_VERBOSE);
     }
+}
+
+/* Continues a TLS handshake; sends the request once it's done. */
+static void bm_fc_handshake(bm_fc *c) {
+    bm_fr *r = c->r;
+    int rc = bm_tls_impl->handshake(c->tls);
+    if (rc == 0) { c->handshaking = false; bm_fr_send(r, c); return; }
+    if (rc == 1) { bm_fc_interest(c, true, false); return; }
+    if (rc == 2) { bm_fc_interest(c, true, true); return; }
+    const char *code = "ERR_SSL";
+    char msg[512];
+    bm_tls_impl->why(c->tls, r->url.p->data, &code, msg, sizeof msg);
+    bm_fr_fail(r, code, "%s", msg);
+}
+
+/* The TCP connection is up: start TLS (https), or send the request. */
+static void bm_fc_connected(bm_fc *c) {
+    bm_fr *r = c->r;
+    if (!r->https) { bm_fr_send(r, c); return; }
+    c->tls = bm_tls_impl->open(c->fd, r->host, r->key, !r->insecure, r->ca.p->data, (size_t)r->ca.p->len);
+    if (!c->tls) { bm_fr_fail(r, "ERR_SSL", "TLS setup failed"); return; }
+    c->handshaking = true;
+    bm_fc_handshake(c);
 }
 
 /* Connects to the resolved addresses (DNS done). */
@@ -5776,8 +5845,10 @@ static void bm_fr_connect(bm_fr *r, const bm_addrs *addrs) {
         bm_fr_connect_failed(r, err);
         return;
     }
-    if (c->connecting) { r->c = c; c->r = r; return; }
-    bm_fr_send(r, c);
+    r->c = c;
+    c->r = r;
+    if (c->connecting) return;
+    bm_fc_connected(c);
 }
 
 static void bm_dns_resolved(bm_dns *d) {
@@ -5987,6 +6058,11 @@ static void bm_fc_ready(bm_io *h, bool readable, bool writable, bool broken) {
     if (!r) {
         /* idle: the server closed it (or sent something unasked for) */
         if (readable || broken) {
+            if (c->tls && !broken) {
+                /* a late TLS 1.3 session ticket arrives this way: that's all right */
+                char b;
+                if (bm_tls_impl->read(c->tls, &b, 1) == -1) return;
+            }
             bm_origin_unlink(c);
             bm_fc_close(c);
         }
@@ -6011,7 +6087,7 @@ static void bm_fc_ready(bm_io *h, bool readable, bool writable, bool broken) {
             c->fd = -1;
             c->ai++;
             if (bm_fc_open(c)) {
-                if (!c->connecting) bm_fr_send(r, c);
+                if (!c->connecting) bm_fc_connected(c);
                 return;
             }
             c->r = NULL;
@@ -6021,10 +6097,14 @@ static void bm_fc_ready(bm_io *h, bool readable, bool writable, bool broken) {
             return;
         }
         c->connecting = false;
-        bm_fr_send(r, c);
+        bm_fc_connected(c);
         return;
     }
-    if (writable && r->sent < r->head.len + (size_t)r->body.p->len) {
+    if (c->handshaking) {
+        if (readable || writable || broken) bm_fc_handshake(c);
+        return;
+    }
+    if (writable && r->sent < bm_fr_out_len(r)) {
         if (!bm_fc_write(c)) {
             bool retry = c->reused && !r->retried && !r->got_any;
             c->r = NULL;
@@ -6042,19 +6122,20 @@ static void bm_fc_ready(bm_io *h, bool readable, bool writable, bool broken) {
         if (r->state == BM_FR_FIXED && c->in_off == c->in_len && !r->discard) {
             size_t want = (size_t)(r->remaining < (1 << 20) ? r->remaining : (1 << 20));
             if (r->rbody.cap - r->rbody.len < want) bm_sb_grow(&r->rbody, r->rbody.len + want);
-            ssize_t n = read(c->fd, r->rbody.data + r->rbody.len, want);
+            long n = bm_fc_recv(c, r->rbody.data + r->rbody.len, want);
             if (n > 0) {
                 r->got_any = true;
                 r->rbody.len += (size_t)n;
                 r->remaining -= n;
                 bm_fr_check_utf8(r);
                 if (r->remaining == 0) { r->state = BM_FR_DONE; break; }
-                if ((size_t)n == want) continue;
+                /* TLS returns a record at a time: read until it has no more */
+                if ((size_t)n == want || c->tls) continue;
                 break;
             }
             if (n == 0) { eof = true; break; }
-            if (errno == EINTR) continue;
-            if (errno != EAGAIN && errno != EWOULDBLOCK) error = true;
+            if (n == -2) { bm_fc_interest(c, true, true); break; }
+            if (n == -3) error = true;
             break;
         }
         if (c->in_off == c->in_len) c->in_off = c->in_len = 0;
@@ -6071,7 +6152,7 @@ static void bm_fc_ready(bm_io *h, bool readable, bool writable, bool broken) {
             }
         }
         size_t room = c->in_cap - c->in_len;
-        ssize_t n = read(c->fd, c->in + c->in_len, room);
+        long n = bm_fc_recv(c, c->in + c->in_len, room);
         if (n > 0) {
             r->got_any = true;
             c->in_len += (size_t)n;
@@ -6081,12 +6162,12 @@ static void bm_fc_ready(bm_io *h, bool readable, bool writable, bool broken) {
                 return;
             }
             if (st > 0) break;
-            if ((size_t)n == room) continue;
+            if ((size_t)n == room || c->tls) continue;
             break;
         }
         if (n == 0) { eof = true; break; }
-        if (errno == EINTR) continue;
-        if (errno != EAGAIN && errno != EWOULDBLOCK) error = true;
+        if (n == -2) { bm_fc_interest(c, true, true); break; }
+        if (n == -3) error = true;
         break;
     }
     if (r->state == BM_FR_DONE) {
@@ -6150,7 +6231,7 @@ static bm_fr *bm_fr_get(bm_int id) {
     return r && r->id == id ? r : NULL;
 }
 
-bm_int bm_native_fetchStart(bm_str method, bm_str url, bm_str headers, bm_str body, bm_int redirect, bm_int flags) {
+bm_int bm_native_fetchStart(bm_str method, bm_str url, bm_str headers, bm_str body, bm_int redirect, bm_int flags, bm_str ca) {
     bm_io_after_batch = bm_fc_reap;
     bm_io_after_fork = bm_fetch_after_fork;
     signal(SIGPIPE, SIG_IGN);
@@ -6176,6 +6257,9 @@ bm_int bm_native_fetchStart(bm_str method, bm_str url, bm_str headers, bm_str bo
     r->body = body;
     r->redirect_mode = (int)redirect;
     r->decompress = (flags & BM_FETCH_DECOMPRESS) != 0;
+    r->insecure = (flags & BM_FETCH_INSECURE) != 0;
+    bm_str_retain(ca);
+    r->ca = ca;
     r->url = bm_native_urlNormalize(url, BM_EMPTY_STR);
     if (r->url.p->len == 0) {
         bm_fr_fail(r, "ERR_INVALID_URL", "fetch() URL is invalid");
@@ -6274,6 +6358,7 @@ void bm_native_fetchFree(bm_int id) {
     bm_str_release(r->headers);
     bm_str_release(r->body);
     bm_str_release(r->url);
+    bm_str_release(r->ca);
     bm_free(r->host);
     bm_free(r->key);
     bm_sb_free(&r->head);

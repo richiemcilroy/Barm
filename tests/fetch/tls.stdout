@@ -1,0 +1,15 @@
+unknown CA: UNABLE_TO_VERIFY_LEAF_SIGNATURE: unable to verify the first certificate
+with tls.ca: 200 https://localhost:GOOD/text | secure hello
+IP address: 200 https://127.0.0.1:GOOD/text | secure hello
+expired: CERT_HAS_EXPIRED: certificate has expired
+self-signed: DEPTH_ZERO_SELF_SIGNED_CERT: self signed certificate
+rejectUnauthorized: false: 200 https://localhost:SELF/text | secure hello
+plain HTTP to a TLS port: ECONNRESET: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()
+keep-alive: reused=true
+POST: 200 https://localhost:GOOD/echo | got over TLS
+POST 100 KB: 200 https://localhost:GOOD/echo | 100004 bytes
+3 MB body: 200 https://localhost:GOOD/big?n=3000000 | 3000000 bytes
+chunked: 200 https://localhost:GOOD/chunked | tls chunked body
+concurrent: 200,200,200,200,200,200,200,200
+http → https: 200 https://localhost:GOOD/text | secure hello
+https → http: 200 BASE/text | hello

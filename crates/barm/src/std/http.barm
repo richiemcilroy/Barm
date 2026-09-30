@@ -322,9 +322,15 @@ export type RequestInit = {
   signal?: AbortSignal
   // fetch() (Bun): decode gzip and deflate bodies (default true)
   decompress?: bool
+  // fetch() (Bun): TLS options for https: URLs
+  tls?: TLSOptions
   // accepted for compatibility; connections are always pooled
   keepalive?: bool
 }
+
+// `rejectUnauthorized: false` skips certificate checks (as NODE_TLS_REJECT_UNAUTHORIZED=0 does);
+// `ca` adds trusted certificates (PEM) to the system's.
+export type TLSOptions = { rejectUnauthorized?: bool, ca?: string }
 
 function bodyText(b: BodyInit): string {
   if (typeof b === "string") {
@@ -994,6 +1000,7 @@ export async function fetch(input: string | URL | Request, init?: RequestInit): 
   }
   let redirect = 0
   let flags = 1
+  let ca = ""
   let signal: AbortSignal | undefined = undefined
   if (init !== undefined) {
     const m = init.method
@@ -1017,6 +1024,13 @@ export async function fetch(input: string | URL | Request, init?: RequestInit): 
     if (init.decompress === false) {
       flags = 0
     }
+    const tls = init.tls
+    if (tls !== undefined) {
+      if (tls.rejectUnauthorized === false) {
+        flags += 2
+      }
+      ca = tls.ca ?? ""
+    }
     signal = init.signal
   }
   if ((method === "GET" || method === "HEAD") && body !== "") {
@@ -1025,7 +1039,7 @@ export async function fetch(input: string | URL | Request, init?: RequestInit): 
   if (signal !== undefined) {
     try signal.throwIfAborted()
   }
-  const id = __native.fetchStart(method, url, headers, body, redirect, flags)
+  const id = __native.fetchStart(method, url, headers, body, redirect, flags, ca)
   if (signal !== undefined) {
     signal.watch(id)
   }
