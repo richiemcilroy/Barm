@@ -1,0 +1,53 @@
+// node:fs — the synchronous file API. Errors are `Error`s with Node's messages
+// ("ENOENT: no such file or directory, open 'x'").
+
+function check(): void throws Error {
+  const err = __native.takeError()
+  if (err !== "") {
+    throw new Error(err)
+  }
+}
+
+export function readFileSync(path: string, encoding?: "utf8" | "utf-8"): string throws Error {
+  const text = __native.readFile(path)
+  try check()
+  return text
+}
+
+export function writeFileSync(path: string, data: string): void throws Error {
+  __native.writeFile(path, data, false)
+  try check()
+}
+
+export function appendFileSync(path: string, data: string): void throws Error {
+  __native.writeFile(path, data, true)
+  try check()
+}
+
+export function existsSync(path: string): bool {
+  return __native.exists(path)
+}
+
+export function readdirSync(path: string): string[] throws Error {
+  const names = __native.readDir(path)
+  try check()
+  return names
+}
+
+export function mkdirSync(path: string, options?: { recursive?: bool }): void throws Error {
+  const recursive = options?.recursive ?? false
+  __native.mkdir(path, recursive)
+  try check()
+}
+
+export function unlinkSync(path: string): void throws Error {
+  __native.unlink(path)
+  try check()
+}
+
+export function rmSync(path: string, options?: { recursive?: bool, force?: bool }): void throws Error {
+  const recursive = options?.recursive ?? false
+  const force = options?.force ?? false
+  __native.rm(path, recursive, force)
+  try check()
+}
