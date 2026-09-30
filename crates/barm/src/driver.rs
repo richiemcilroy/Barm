@@ -20,7 +20,7 @@ const STD_MODULES: &[(&str, &str, bool)] =
 
 /// Globals that come from std/http, as in Bun.
 pub(crate) const WEB_GLOBALS: &[&str] =
-    &["Bun", "Request", "Response", "Headers", "URL", "URLSearchParams", "fetch", "AbortController", "AbortSignal", "DOMException", "FetchError"];
+    &["Bun", "Request", "Response", "Headers", "URL", "URLSearchParams", "fetch", "AbortController", "AbortSignal", "DOMException", "FetchError", "ReadableStream", "TextEncoder", "TextDecoder"];
 
 /// The standard module an import names (`"node:fs"`, `"fs"`, `"std/http"`), if any.
 fn std_module(spec: &str) -> Option<&'static (&'static str, &'static str, bool)> {

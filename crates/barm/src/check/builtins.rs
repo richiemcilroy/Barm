@@ -49,7 +49,12 @@ pub(super) fn native_sig(types: &mut Types, name: &str) -> Option<(Vec<TyId>, Ty
         "headerRemove" => (vec![STR, STR], STR),
         "headerAppend" => (vec![STR, STR, STR], STR),
         "fetchStart" => (vec![STR, STR, STR, STR, INT, INT, STR], INT),
-        "fetchWait" => (vec![INT], types.promise(INT, NEVER)),
+        "fetchWait" | "fetchBodyWait" | "fetchRead" | "fetchHandle" => (vec![INT], types.promise(INT, NEVER)),
+        "fetchTake" => {
+            let bytes = types.array(U8);
+            (vec![INT], bytes)
+        }
+        "fetchShare" => (vec![INT], VOID),
         "fetchStatus" => (vec![INT], INT),
         "fetchStatusText" | "fetchHeaders" | "fetchUrl" | "fetchBody" | "fetchErrorCode" | "fetchErrorMessage" => (vec![INT], STR),
         "fetchRedirected" | "fetchBodyClean" => (vec![INT], BOOL),
@@ -63,6 +68,10 @@ pub(super) fn native_sig(types: &mut Types, name: &str) -> Option<(Vec<TyId>, Ty
             (vec![STR], bytes)
         }
         "utf8Clean" => (vec![STR], STR),
+        "utf8Complete" => {
+            let bytes = types.array(U8);
+            (vec![bytes], INT)
+        }
         "headerGet" => (vec![STR, STR], STR),
         "headerEntries" => (vec![STR], str_arr),
         "headerValues" => (vec![STR, STR], str_arr),
