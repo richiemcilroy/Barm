@@ -1,0 +1,24 @@
+import { serve, Request, Response, json } from "std/http"
+
+type User = { id: int, name: string, email: string }
+
+function route(req: Request): Response {
+  const path = req.pathname
+  if (path === "/") {
+    return new Response("Hello, World!")
+  }
+  if (path === "/json") {
+    const u: User = { id: 1, name: "Ada Lovelace", email: "ada@example.com" }
+    return json(JSON.stringify(u))
+  }
+  if (path === "/echo" && req.method === "POST") {
+    return new Response(req.text())
+  }
+  return new Response("not found", { status: 404 })
+}
+
+function main(): void throws Error {
+  const workers = parseInt(process.env.WORKERS ?? "1") ?? 1
+  const port = parseInt(process.env.PORT ?? "3000") ?? 3000
+  try serve({ port, workers, fetch: route })
+}
