@@ -479,7 +479,7 @@ void bm_http_run(void);   /* after the program: serves registered servers until 
 bm_str bm_native_headerRemove(bm_str block, bm_str name);  /* the block without `name` lines */
 bm_str bm_native_headerAppend(bm_str block, bm_str name, bm_str value);
 /* fetch(): see the HTTP client section of barm.c */
-bm_int bm_native_fetchStart(bm_str method, bm_str url, bm_str headers, bm_str body, bm_int redirect, bm_int flags, bm_str ca);
+bm_int bm_native_fetchStart(bm_str method, bm_str url, bm_str headers, bm_str body, bm_int redirect, bm_int flags, bm_str ca, bm_str unix_path);
 bm_promise *bm_native_fetchWait(bm_int id);    /* Promise<int>: 0 the head arrived, -1 failed, -2 aborted */
 bm_promise *bm_native_fetchBodyWait(bm_int id);   /* ... 0 the whole body is in */
 bm_promise *bm_native_fetchRead(bm_int id);    /* ... > 0 bytes to take, 0 the end */

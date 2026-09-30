@@ -212,6 +212,11 @@ try {
   console.log(`abort mid-body: ${describe(e)}`)
 }
 
+// Bun's `unix`: the same request over a Unix socket
+const unixPath = process.env.UNIX ?? "/nonexistent.sock"
+await show("unix", fetch("http://localhost/echo?over=unix", { unix: unixPath }))
+await show("unix, missing socket", fetch("http://localhost/text", { unix: unixPath + ".missing" }))
+
 // connections
 // consecutive requests reuse the connection; after "Connection: close" a new one starts
 async function served(): Promise<number, Error> {

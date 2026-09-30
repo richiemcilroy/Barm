@@ -61,6 +61,8 @@ cut: head 200
 cut: TypeError ECONNRESET: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()
 abort mid-body: head 200
 abort mid-body: AbortError: The operation was aborted.
+unix: 200 "OK" ok=true redirected=false http://localhost/echo?over=unix | GET ?over=unix|body=
+unix, missing socket: TypeError FailedToOpenSocket: Was there a typo in the url or port?
 keep-alive: reused=true
 Connection: close: closing after this
 after close: request 1
