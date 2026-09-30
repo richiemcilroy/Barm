@@ -7,6 +7,8 @@ pub(super) struct CallSig {
     pub names: Vec<String>,
     pub rest: Option<TyId>,
     pub ret: TyId,
+    /// Errors the callee can throw (`NEVER`: none).
+    pub throws: TyId,
 }
 
 pub(super) struct Place {
@@ -21,6 +23,8 @@ enum Root {
     Local(LocalId),
     ModuleConst(Sym),
     Temp,
+    /// Inside a class instance: changes the shared object, whatever variable holds it.
+    Heap,
 }
 
 impl<'a> Checker<'a> {
@@ -49,6 +53,11 @@ impl<'a> Checker<'a> {
         let t = self.expr_inner(e, exp);
         if let Some(f) = self.facts_mut() {
             f.expr_ty[e as usize] = t;
+        }
+        if matches!(self.types.get(self.types_without_undef(t)), Ty::Class(..))
+            && let Some(f) = self.fcx.last_mut()
+        {
+            f.class_valued.insert(e);
         }
         t
     }
@@ -108,6 +117,8 @@ impl<'a> Checker<'a> {
             }
             ExprKind::Call { callee, type_args, args, optional } => {
                 let t = self.call(e, *callee, type_args, args, *optional, exp, span);
+                // The callee may change class instances through any reference.
+                self.invalidate_heap();
                 if let Some(f) = self.facts_mut()
                     && let Some(c) = f.calls.get_mut(&e)
                 {
@@ -115,32 +126,22 @@ impl<'a> Checker<'a> {
                 }
                 t
             }
-            ExprKind::New { callee, type_args, args } => self.new_expr(*callee, type_args, args, exp, span),
+            ExprKind::New { callee, type_args, args } => {
+                let t = self.new_expr(e, *callee, type_args, args, exp, span);
+                self.invalidate_heap();
+                t
+            }
             ExprKind::Member { obj, name, name_span, optional } => self.member(e, *obj, *name, *name_span, *optional, span),
             ExprKind::Index { obj, index, optional } => self.index(*obj, *index, *optional, span),
             ExprKind::Object(fields) => self.object(fields, exp, span),
             ExprKind::Array(elems) => self.array_lit(elems, exp, span),
             ExprKind::Arrow(f) => self.arrow(f, exp, span),
             ExprKind::Cond(c, a, b) => {
-                self.cond(*c);
-                let pos = self.narrowings(*c, true);
-                let neg = self.narrowings(*c, false);
-                self.push_scope();
-                self.apply(&pos);
-                let ta = self.expr(*a, exp);
-                self.pop_scope();
-                self.push_scope();
-                self.apply(&neg);
-                let tb = self.expr(*b, exp.or(Some(ta)));
-                self.pop_scope();
-                if let Some(x) = exp
-                    && self.assignable(ta, x) && self.assignable(tb, x) {
-                        return self.types.union(&[ta, tb]);
-                    }
-                if self.types.is_int(ta) && self.types.is_float(tb) || self.types.is_float(ta) && self.types.is_int(tb) {
-                    return F64;
-                }
-                self.types.union(&[ta, tb])
+                let fx = super::stmt::effects_of_expr(self.ast(), *a).with(super::stmt::effects_of_expr(self.ast(), *b));
+                let entry = self.fcx().locals.len();
+                let t = self.cond_expr(*c, *a, *b, exp);
+                self.apply_effects(&fx, entry, &[]);
+                t
             }
             ExprKind::As(x, te) => {
                 if let TypeExprKind::Named { name, ns: None, args, .. } = &self.ast().ty(*te).kind
@@ -179,7 +180,41 @@ impl<'a> Checker<'a> {
                 self.expr(*x, None);
                 STR
             }
+            ExprKind::This => self.this_expr(e, span),
+            ExprKind::Super => {
+                self.report(Diagnostic::new("T0801", span, "`super` is only valid as `super(...)` in a constructor or `super.method(...)`"));
+                ERROR
+            }
+            ExprKind::Try(x) => {
+                self.cur_frame().try_expr += 1;
+                let t = self.expr(*x, exp);
+                self.cur_frame().try_expr -= 1;
+                t
+            }
         }
+    }
+
+    fn cond_expr(&mut self, c: ExprId, a: ExprId, b: ExprId, exp: Option<TyId>) -> TyId {
+        let (c, a, b) = (&c, &a, &b);
+        self.cond(*c);
+        let pos = self.narrowings(*c, true);
+        let neg = self.narrowings(*c, false);
+        self.push_scope();
+        self.apply(&pos);
+        let ta = self.expr(*a, exp);
+        self.pop_scope();
+        self.push_scope();
+        self.apply(&neg);
+        let tb = self.expr(*b, exp.or(Some(ta)));
+        self.pop_scope();
+        if let Some(x) = exp
+            && self.assignable(ta, x) && self.assignable(tb, x) {
+                return self.types.union(&[ta, tb]);
+            }
+        if self.types.is_int(ta) && self.types.is_float(tb) || self.types.is_float(ta) && self.types.is_int(tb) {
+            return F64;
+        }
+        self.types.union(&[ta, tb])
     }
 
     fn ident(&mut self, e: ExprId, sym: Sym, span: Span) -> TyId {
@@ -193,6 +228,7 @@ impl<'a> Checker<'a> {
             Some(Decl::Fn(m, i)) => self.rec_ident(e, IdentFact::Fn(m, i)),
             Some(Decl::Const(m, i)) => self.rec_ident(e, IdentFact::Const(m, i)),
             Some(Decl::Ns(m)) => self.rec_ident(e, IdentFact::Ns(m)),
+            Some(Decl::Class(c)) => self.rec_ident(e, IdentFact::Class(c)),
             _ => self.rec_ident(e, IdentFact::Builtin),
         }
         match self.scopes[self.cur as usize].values.get(&sym).map(|d| d.0) {
@@ -214,10 +250,18 @@ impl<'a> Checker<'a> {
             }
             Some(Decl::Const(m, i)) => return self.const_type(m, i),
             Some(Decl::Ns(m)) => return self.types.intern(Ty::Namespace(m)),
+            Some(Decl::Class(_)) => {
+                let n = self.name(sym).to_string();
+                self.report(
+                    Diagnostic::new("T0803", span, format!("class `{n}` is not a value"))
+                        .note("instead", format!("create an instance with `new {n}(...)`, or use its static members (`{n}.name`)")),
+                );
+                return ERROR;
+            }
             _ => {}
         }
         let text = self.name(sym).to_string();
-        if builtins::is_builtin_ns(&text) {
+        if self.is_ns(&text) {
             return self.types.intern(Ty::BuiltinNs(sym));
         }
         if let Some(msg) = builtins::removed_global(&text) {
@@ -235,7 +279,7 @@ impl<'a> Checker<'a> {
         let mut candidates: Vec<String> = Vec::new();
         if let Some(fcx) = self.fcx.last() {
             for scope in &fcx.scopes {
-                candidates.extend(scope.iter().filter(|(s, _, _)| *s != super::PATH_SYM).map(|(s, _, _)| self.name(*s).to_string()));
+                candidates.extend(scope.iter().filter(|(s, _, _)| *s != super::PATH_SYM && *s != super::THIS_SYM).map(|(s, _, _)| self.name(*s).to_string()));
             }
         }
         candidates.extend(self.scopes[self.cur as usize].values.keys().map(|&s| self.name(s).to_string()));
@@ -314,6 +358,8 @@ impl<'a> Checker<'a> {
             And | Or => {
                 let left_ok = self.logical_operand(l, op, r);
                 let n = self.narrowings(l, op == And);
+                let fx = super::stmt::effects_of_expr(self.ast(), r);
+                let entry = self.fcx().locals.len();
                 self.push_scope();
                 self.apply(&n);
                 if left_ok {
@@ -322,6 +368,7 @@ impl<'a> Checker<'a> {
                     self.expr(r, None);
                 }
                 self.pop_scope();
+                self.apply_effects(&fx, entry, &[]);
                 BOOL
             }
             Nullish => {
@@ -417,11 +464,134 @@ impl<'a> Checker<'a> {
                 BOOL
             }
             Instanceof => {
-                self.expr(l, None);
-                self.report(Diagnostic::new("U0001", span, "`instanceof` needs classes, which are not supported yet (planned for M2)"));
+                let tl = self.expr(l, None);
+                let Some(c) = self.instanceof_class(r) else { return BOOL };
+                let members = self.flat_members(tl);
+                let possible = tl == ERROR || tl == UNKNOWN || members.iter().any(|&m| match self.class_of(m) {
+                    Some((mc, _)) => self.class_descends(mc, c) || self.class_descends(c, mc),
+                    None => false,
+                });
+                if !possible {
+                    let (ls, cs) = (self.show(tl), self.class_names[c as usize].clone());
+                    self.report(Diagnostic::new("T0502", span, format!("this check is always false: `{ls}` is never a `{cs}`")));
+                }
                 BOOL
             }
         }
+    }
+
+    pub(super) fn cur_frame(&mut self) -> &mut Frame {
+        self.fcx().frames.last_mut().expect("in a function")
+    }
+
+    /// An error of type `t` leaves the current expression: caught by an enclosing `try` block,
+    /// or passed on (a call must then be marked `try`). `callee`: the call's description.
+    pub(super) fn on_throw(&mut self, t: TyId, span: Span, callee: Option<&str>, call: Option<ExprId>) {
+        let cur = self.cur as usize;
+        let Some(frame) = self.fcx.last_mut().and_then(|f| f.frames.last_mut()) else { return };
+        if let Some(tf) = frame.try_frames.last_mut() {
+            tf.push(t);
+            if let (Some(c), Some(f)) = (call, self.facts.as_mut()) {
+                f[cur].throwing.insert(c);
+            }
+            return;
+        }
+        let (can_throw, marked, decl) = (frame.can_throw, frame.try_expr > 0, frame.throws_decl);
+        let shown = self.show(t);
+        if !can_throw {
+            let what = callee.map(|c| format!("`{c}` can throw `{shown}`")).unwrap_or_else(|| format!("this throws `{shown}`"));
+            self.report(
+                Diagnostic::new("T0832", span, format!("{what}, but a closure can't pass errors on"))
+                    .note("instead", "catch it inside the closure: `try { ... } catch (e) { ... }`"),
+            );
+            return;
+        }
+        if let Some(c) = callee
+            && !marked
+        {
+            let text = self.src(span).to_string();
+            self.report(
+                Diagnostic::new("T0831", span, format!("`{c}` can throw `{shown}`; mark the call `try` to pass the error on, or catch it"))
+                    .note("why", "errors are values in Barm: every call that can fail is marked, so control flow is visible")
+                    .fix(Applicability::Safe, format!("pass it on: `try {text}`"), span.empty_at_start(), "try ")
+                    .note("or", "wrap it in `try { ... } catch (e) { ... }`"),
+            );
+        }
+        if let Some(d) = decl
+            && !self.assignable(t, d)
+        {
+            let ds = self.show(d);
+            self.report(
+                Diagnostic::new("T0833", span, format!("this can throw `{shown}`, but the function declares `throws {ds}`"))
+                    .note("instead", format!("widen the declaration (`throws {ds} | {shown}`), or catch it here")),
+            );
+        }
+        if let Some(c) = call
+            && let Some(f) = self.facts.as_mut()
+        {
+            f[cur].throwing.insert(c);
+        }
+        self.cur_frame().thrown.push(t);
+    }
+
+    /// Checks that a `throws` type is made of `Error` classes.
+    pub(crate) fn check_throws_type(&mut self, t: TyId, span: Span) {
+        let err = self.error_class();
+        if err != ERROR && t != ERROR && !self.assignable(t, err) {
+            let shown = self.show(t);
+            self.report(Diagnostic::new("T0834", span, format!("`throws {shown}`: errors must be classes that extend `Error`")).note("example", "`class NotFound extends Error {}`, then `throws NotFound`"));
+        }
+    }
+
+    /// A built-in namespace (`Math`, `process`, ...; `__native` only in standard-library modules).
+    pub(super) fn is_ns(&self, text: &str) -> bool {
+        builtins::is_builtin_ns(text) || (text == "__native" && self.modules[self.cur as usize].std)
+    }
+
+    /// A class declared by the built-in prelude (`Error`, `SyntaxError`, ...).
+    pub(super) fn builtin_class(&mut self, name: &str) -> TyId {
+        let b = self.modules.iter().position(|m| m.builtin);
+        let sym = self.interner.lookup(name);
+        match (b, sym) {
+            (Some(b), Some(sym)) => match self.scopes[b].types.get(&sym).map(|d| d.0) {
+                Some(Decl::Class(c)) => {
+                    self.resolve_class(c);
+                    self.classes[c as usize].this_ty
+                }
+                _ => ERROR,
+            },
+            _ => ERROR,
+        }
+    }
+
+    /// The class named on the right of `instanceof`.
+    fn instanceof_class(&mut self, r: ExprId) -> Option<u32> {
+        if let ExprKind::Ident(s) = self.ast().expr(r).kind
+            && self.lookup(s).is_none()
+            && let Some(Decl::Class(c)) = self.scopes[self.cur as usize].values.get(&s).map(|d| d.0)
+        {
+            self.rec_ident(r, IdentFact::Class(c));
+            self.resolve_class(c);
+            return Some(c);
+        }
+        let span = self.ast().expr(r).span;
+        let text = self.src(span).to_string();
+        self.report(
+            Diagnostic::new("T0803", span, format!("`instanceof` needs a class name, found `{text}`"))
+                .note("note", "records and unions are told apart by a discriminant: `x.kind === \"...\"`"),
+        );
+        None
+    }
+
+    /// Class `c` as a subtype of class type `m` (solving `c`'s type parameters).
+    fn downcast_ty(&mut self, m: TyId, c: u32) -> TyId {
+        let Some((mc, _)) = self.class_of(m) else { return ERROR };
+        let info = self.classes[c as usize].clone();
+        let Some(up) = self.upcast_to(info.this_ty, mc) else { return ERROR };
+        let mut map = HashMap::default();
+        self.unify(up, m, &info.params, &mut map);
+        let args: Vec<TyId> = info.params.iter().map(|p| map.get(p).copied().unwrap_or(UNKNOWN)).collect();
+        self.types.class(c, &args)
     }
 
     /// Returns false if an error was reported.
@@ -539,6 +709,10 @@ impl<'a> Checker<'a> {
         let t = self.assign_inner(op, target, value, span);
         // After the value: `cur = cur.left` reads the narrowed `cur.left` first.
         self.invalidate_place(target);
+        // A field of a class instance may be reached through other references too.
+        if !matches!(self.ast().expr(target).kind, ExprKind::Ident(_)) {
+            self.invalidate_heap();
+        }
         t
     }
 
@@ -623,7 +797,13 @@ impl<'a> Checker<'a> {
     fn root_of(&self, e: ExprId) -> Root {
         match &self.ast().expr(e).kind {
             ExprKind::Paren(x) | ExprKind::NonNull(x) => self.root_of(*x),
-            ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } => self.root_of(*obj),
+            ExprKind::This => Root::Heap,
+            ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } => {
+                if self.fcx.last().map(|f| f.class_valued.contains(obj)).unwrap_or(false) {
+                    return Root::Heap;
+                }
+                self.root_of(*obj)
+            }
             ExprKind::Ident(s) => match self.lookup(*s) {
                 Some((id, _)) => Root::Local(id),
                 None => match self.scopes[self.cur as usize].values.get(s).map(|d| d.0) {
@@ -644,6 +824,7 @@ impl<'a> Checker<'a> {
     pub(super) fn check_mutable_root_ext(&mut self, e: ExprId, span: Span, allow_temp: bool) -> Option<LocalId> {
         match self.root_of(e) {
             Root::Temp if allow_temp => None,
+            Root::Heap => None,
             Root::Local(id) => {
                 let (kind, name, lspan) = {
                     let l = self.local(id);
@@ -749,6 +930,13 @@ impl<'a> Checker<'a> {
                     self.report(Diagnostic::new("X0034", span, "assigning an array's `length` is not supported").note("instead", "reassign: `xs = []`, or `xs = xs.slice(0, n)`"));
                     return None;
                 }
+                if let Some(cls) = self.class_of(self.types_without_undef(t)) {
+                    if self.types.has_undefined(t) {
+                        let d = self.possibly_undefined(*obj, span);
+                        self.report(d);
+                    }
+                    return self.class_field_place(self.types_without_undef(t), cls.0, *obj, *name, *name_span);
+                }
                 let ft = self.member_of(t, *name, *name_span, span, *obj)?;
                 let root = self.check_mutable_root(*obj, span)?;
                 Some(Place { ty: ft, local: None, root: Some(root) })
@@ -785,6 +973,47 @@ impl<'a> Checker<'a> {
             _ => {
                 self.expr(e, None);
                 self.report(Diagnostic::new("V0103", span, "this expression can't be assigned to"));
+                None
+            }
+        }
+    }
+
+    /// `obj.name = ...` on a class instance: a field (not a getter or method), visible, and
+    /// `readonly` only inside the owner's constructor through `this`.
+    fn class_field_place(&mut self, ty: TyId, c: u32, obj: ExprId, name: Sym, name_span: Span) -> Option<Place> {
+        let n = self.name(name).to_string();
+        match self.class_member(ty, name) {
+            Some(super::class::ClassMemberRef::Field(f)) => {
+                self.check_visible(f.owner, f.vis, name, name_span);
+                if f.readonly {
+                    let in_owner_ctor = self.fcx.last().map(|x| x.ctor && x.class == Some(f.owner)).unwrap_or(false) && matches!(self.ast().expr(obj).kind, ExprKind::This);
+                    if !in_owner_ctor {
+                        self.report(
+                            Diagnostic::new("T0811", name_span, format!("`{n}` is `readonly`"))
+                                .note("why", "readonly fields are set once, in the constructor (or by their initializer)"),
+                        );
+                    }
+                }
+                Some(Place { ty: f.ty, local: None, root: None })
+            }
+            Some(super::class::ClassMemberRef::Getter(_)) => {
+                self.report(Diagnostic::new("U0019", name_span, format!("`{n}` is a getter; setters are not supported yet")));
+                None
+            }
+            Some(super::class::ClassMemberRef::Method(_)) => {
+                self.report(Diagnostic::new("V0105", name_span, format!("can't assign to method `{n}`")));
+                None
+            }
+            None => {
+                let cls = self.class_names[c as usize].clone();
+                let names = self.class_member_names(ty);
+                let mut d = Diagnostic::new("T0107", name_span, format!("class `{cls}` has no field `{n}`"));
+                let sug = similar(&n, names.iter().map(|s| s.as_str()));
+                if let Some(first) = sug.first() {
+                    d = d.note("did you mean", sug.join(", ")).fix(Applicability::Maybe, format!("use `{first}`"), name_span, first.to_string());
+                }
+                d = d.note("note", "classes have fixed fields: declare every field in the class body");
+                self.report(d);
                 None
             }
         }
@@ -900,7 +1129,7 @@ impl<'a> Checker<'a> {
                     }
                     None => {
                         let text = self.name(s).to_string();
-                        if builtins::is_builtin_ns(&text) {
+                        if self.is_ns(&text) {
                             if let Some(f) = self.facts_mut() {
                                 f.members.insert(e, MemberFact::MathConst);
                             }
@@ -910,6 +1139,18 @@ impl<'a> Checker<'a> {
                     _ => {}
                 }
             }
+        // `C.NAME`: a static readonly field.
+        if let ExprKind::Ident(s) = self.ast().expr(obj).kind
+            && self.lookup(s).is_none()
+            && let Some(Decl::Class(c)) = self.scopes[self.cur as usize].values.get(&s).map(|d| d.0)
+        {
+            return self.static_member(e, c, name, name_span);
+        }
+        if matches!(self.ast().expr(obj).kind, ExprKind::Super) {
+            let n = self.name(name).to_string();
+            self.report(Diagnostic::new("T0801", span, format!("`super.{n}` must be called; base fields are read through `this.{n}`")));
+            return ERROR;
+        }
         let t = self.expr(obj, None);
         if t == ERROR {
             return ERROR;
@@ -923,6 +1164,42 @@ impl<'a> Checker<'a> {
             }
             self.types.without_undefined(t)
         };
+        // `process.env.NAME`: an environment variable.
+        if let Ty::BuiltinNs(s) = *self.types.get(base)
+            && self.name(s) == "env"
+        {
+            if let Some(f) = self.facts_mut() {
+                f.members.insert(e, MemberFact::Env(name));
+            }
+            return self.types.optional(STR);
+        }
+        // Class members: visibility, and getters are calls.
+        let mut getter = false;
+        for m in self.flat_members(base) {
+            if self.class_of(m).is_some() {
+                match self.class_member(m, name) {
+                    Some(super::class::ClassMemberRef::Field(f)) => {
+                        self.check_visible(f.owner, f.vis, name, name_span);
+                    }
+                    Some(super::class::ClassMemberRef::Getter(g)) => {
+                        self.check_visible(g.owner, g.vis, name, name_span);
+                        getter = true;
+                    }
+                    Some(super::class::ClassMemberRef::Method(_)) => {
+                        let n = self.name(name).to_string();
+                        self.report(
+                            Diagnostic::new("T0203", name_span, format!("method `{n}` must be called: `{n}(...)`"))
+                                .note("instead", format!("to pass it as a function, wrap it: `(x) => obj.{n}(x)`")),
+                        );
+                        return ERROR;
+                    }
+                    None => {}
+                }
+            }
+        }
+        if getter {
+            self.invalidate_heap();
+        }
         let Some(ft) = self.member_of(base, name, name_span, span, obj) else { return ERROR };
         if !optional
             && let Some((target, _)) = self.target_of(obj)
@@ -934,6 +1211,36 @@ impl<'a> Checker<'a> {
             }
         }
         if optional { self.types.optional(ft) } else { ft }
+    }
+
+    /// `C.NAME` for a static readonly field of class `c`.
+    fn static_member(&mut self, e: ExprId, c: u32, name: Sym, name_span: Span) -> TyId {
+        self.resolve_class(c);
+        let info = self.classes[c as usize].clone();
+        if let Some(f) = info.static_fields.iter().find(|f| f.name == name) {
+            self.check_visible(f.owner, f.vis, name, name_span);
+            if let (Some(fct), Some(mi)) = (self.facts_mut(), f.member) {
+                fct.members.insert(e, MemberFact::StaticField(c, mi));
+            }
+            return f.ty;
+        }
+        let n = self.name(name).to_string();
+        let cls = self.class_names[c as usize].clone();
+        if info.statics.iter().any(|m| m.name == name) {
+            self.report(Diagnostic::new("T0203", name_span, format!("static method `{cls}.{n}` must be called")));
+            return ERROR;
+        }
+        let names: Vec<String> = info.static_fields.iter().map(|f| f.name).chain(info.statics.iter().map(|m| m.name)).map(|s| self.name(s).to_string()).collect();
+        let mut d = Diagnostic::new("T0107", name_span, format!("class `{cls}` has no static member `{n}`"));
+        let sug = similar(&n, names.iter().map(|s| s.as_str()));
+        if let Some(first) = sug.first() {
+            d = d.note("did you mean", sug.join(", ")).fix(Applicability::Maybe, format!("use `{first}`"), name_span, first.to_string());
+        }
+        if info.fields.iter().any(|f| f.name == name) || info.methods.iter().any(|m| m.name == name) {
+            d = d.note("note", format!("`{n}` is an instance member: use it on an instance (`new {cls}(...).{n}`, or `this.{n}` inside the class)"));
+        }
+        self.report(d);
+        ERROR
     }
 
     fn ns_value(&mut self, m: u32, name: Sym, name_span: Span) -> TyId {
@@ -1003,7 +1310,7 @@ impl<'a> Checker<'a> {
             return None;
         }
         let names = self.field_names(base);
-        let is_record = self.flat_members(base).iter().all(|&m| matches!(self.types.get(m), Ty::Record(_) | Ty::Interface(..)));
+        let is_record = self.flat_members(base).iter().all(|&m| matches!(self.types.get(m), Ty::Record(_) | Ty::Interface(..) | Ty::Class(..)));
         let what = if is_record { "field" } else { "member" };
         let mut d = Diagnostic::new("T0107", name_span, format!("`{shown}` has no {what} `{n}`"));
         let sug = similar(&n, names.iter().map(|s| s.as_str()));
@@ -1043,6 +1350,11 @@ impl<'a> Checker<'a> {
                 let b = self.gparam(p).bound?;
                 self.field_of(b, name)
             }
+            Ty::Class(..) => match self.class_member(ty, name)? {
+                super::class::ClassMemberRef::Field(f) => Some(f.ty),
+                super::class::ClassMemberRef::Getter(g) => Some(self.method_ret(&g)),
+                super::class::ClassMemberRef::Method(_) => None,
+            },
             _ => builtins::property(&self.types, ty, &n),
         }
     }
@@ -1057,6 +1369,7 @@ impl<'a> Checker<'a> {
                     let fs = self.iface_fields_inst(i, &args);
                     out.extend(fs.iter().map(|f| self.name(f.name).to_string()));
                 }
+                Ty::Class(..) => out.extend(self.class_member_names(m)),
                 _ => out.extend(builtins::property_names(self, m).into_iter().map(|s| s.to_string())),
             }
         }
@@ -1272,7 +1585,9 @@ impl<'a> Checker<'a> {
         let exp_ret = exp_fn.as_ref().map(|(_, r)| *r).filter(|&r| r != VOID && !self.types.mentions(r, &self.infer_free));
         let ret = declared_ret.or(exp_ret);
         let fcx = self.fcx.last_mut().unwrap();
-        fcx.frames.push(Frame { ret: declared_ret, returns: Vec::new(), loops: 0, switches: 0, name: None });
+        // Closures can't throw (yet), except a test's body: an uncaught error fails the test.
+        let can_throw = fcx.test_body && fcx.frames.is_empty();
+        fcx.frames.push(Frame::new(declared_ret, None, can_throw, None));
         fcx.scopes.push(Vec::new());
         for (p, fp) in f.params.iter().zip(&params) {
             let kind = if p.inout { LocalKind::Inout } else { LocalKind::Param };
@@ -1324,7 +1639,7 @@ impl<'a> Checker<'a> {
         self.types.func(params, body_ty)
     }
 
-    fn new_expr(&mut self, callee: ExprId, type_args: &[crate::ast::TypeId], args: &[Arg], exp: Option<TyId>, span: Span) -> TyId {
+    fn new_expr(&mut self, e: ExprId, callee: ExprId, type_args: &[crate::ast::TypeId], args: &[Arg], exp: Option<TyId>, span: Span) -> TyId {
         let ExprKind::Ident(s) = self.ast().expr(callee).kind else { return ERROR };
         let name = self.name(s).to_string();
         let tscope = self.tscope();
@@ -1377,12 +1692,37 @@ impl<'a> Checker<'a> {
                 self.report(Diagnostic::new("X0036", span, "`new Array(...)` is not supported").note("instead", "use an array literal: `const xs: T[] = []`"));
                 ERROR
             }
-            "Error" => {
-                self.report(Diagnostic::new("U0004", span, "`Error` values are not supported yet (planned for M3)"));
-                ERROR
-            }
             _ => {
-                self.report(Diagnostic::new("U0001", span, format!("`new {name}(...)`: classes are not supported yet (planned for M2)")).note("instead", "use a record type and a function that returns it"));
+                if let Some(Decl::Class(c)) = self.scopes[self.cur as usize].values.get(&s).map(|d| d.0) {
+                    self.rec_ident(callee, IdentFact::Class(c));
+                    self.resolve_class(c);
+                    let info = self.classes[c as usize].clone();
+                    if info.is_abstract {
+                        self.report(Diagnostic::new("T0804", span, format!("`{name}` is abstract, so it can't be instantiated")).note("instead", "create an instance of a concrete subclass"));
+                    }
+                    let names = info.ctor.param_names.iter().map(|&p| self.name(p).to_string()).collect();
+                    let throws = self.ctor_throws(c);
+                    let cs = CallSig { tparams: info.params.clone(), params: info.ctor.params.clone(), names, rest: None, ret: info.this_ty, throws };
+                    self.rec_call(e, Callee::New(c));
+                    self.pending_call = Some(e);
+                    let desc = format!("new {name}");
+                    let t = self.call_sig(&cs, &desc, type_args, args, exp, span);
+                    let _ = targs;
+                    return t;
+                }
+                let mut d = Diagnostic::new("N0001", self.ast().expr(callee).span, format!("unknown class `{name}`"));
+                let classes: Vec<String> = self.scopes[self.cur as usize].values.iter().filter(|(_, d)| matches!(d.0, Decl::Class(_))).map(|(s, _)| self.name(*s).to_string()).collect();
+                let sug = similar(&name, classes.iter().map(|s| s.as_str()));
+                if let Some(first) = sug.first() {
+                    d = d.note("did you mean", sug.join(", ")).fix(Applicability::Maybe, format!("use `{first}`"), self.ast().expr(callee).span, first.to_string());
+                }
+                if self.scopes[self.cur as usize].types.contains_key(&s) {
+                    d = d.note("note", format!("`{name}` is a type; records are created with object literals: `{{ ... }}`"));
+                }
+                self.report(d);
+                for a in args {
+                    self.expr(a.expr, None);
+                }
                 ERROR
             }
         }
@@ -1405,7 +1745,8 @@ impl<'a> Checker<'a> {
                             }
                             return ERROR;
                         };
-                        let cs = CallSig { tparams: sig.tparams, params: sig.params, names: sig.param_names.iter().map(|&p| self.name(p).to_string()).collect(), rest: None, ret: sig.ret };
+                        let (fixed, rest) = sig.call_params(&self.types);
+                        let cs = CallSig { tparams: sig.tparams, params: fixed, names: sig.param_names.iter().map(|&p| self.name(p).to_string()).collect(), rest, ret: sig.ret, throws: sig.throws };
                         self.rec_call(e, Callee::Fn(m, i));
                         self.pending_call = Some(e);
                         return self.call_sig(&cs, &text, type_args, args, exp, span);
@@ -1430,7 +1771,8 @@ impl<'a> Checker<'a> {
                                 let scope = &self.scopes[m as usize];
                                 if let Some(Decl::Fn(fm, fi)) = scope.values.get(&name).filter(|_| scope.exported_values.contains(&name)).map(|d| d.0) {
                                     let Some(sig) = self.fn_sig(fm, fi) else { return ERROR };
-                                    let cs = CallSig { tparams: sig.tparams, params: sig.params, names: sig.param_names.iter().map(|&p| self.name(p).to_string()).collect(), rest: None, ret: sig.ret };
+                                    let (fixed, rest) = sig.call_params(&self.types);
+                        let cs = CallSig { tparams: sig.tparams, params: fixed, names: sig.param_names.iter().map(|&p| self.name(p).to_string()).collect(), rest, ret: sig.ret, throws: sig.throws };
                                     let desc = format!("{}.{mtext}", self.name(s));
                                     self.rec_call(e, Callee::Fn(fm, fi));
                                     self.pending_call = Some(e);
@@ -1439,15 +1781,38 @@ impl<'a> Checker<'a> {
                             }
                             None => {
                                 let ns = self.name(s).to_string();
-                                if builtins::is_builtin_ns(&ns) {
+                                if self.is_ns(&ns) {
                                     self.rec_call(e, Callee::Builtin { ns: Some(s), name });
                                     self.pending_call = Some(e);
                                     return self.builtin_ns_call(&ns, &mtext, name_span, args, exp, span);
                                 }
                             }
+                            Some(Decl::Class(c)) => {
+                                self.resolve_class(c);
+                                let info = self.classes[c as usize].clone();
+                                let cls = self.class_names[c as usize].clone();
+                                let Some(mm) = info.statics.iter().find(|m| m.name == name).cloned() else {
+                                    self.static_member(obj, c, name, name_span);
+                                    for a in args {
+                                        self.expr(a.expr, None);
+                                    }
+                                    return ERROR;
+                                };
+                                self.check_visible(mm.owner, mm.vis, name, name_span);
+                                let ret = self.method_ret(&mm);
+                                let names = mm.param_names.iter().map(|&p| self.name(p).to_string()).collect();
+                                let throws = self.method_throws(&mm);
+                                let cs = CallSig { tparams: Vec::new(), params: mm.params.clone(), names, rest: None, ret, throws };
+                                self.rec_call(e, Callee::StaticMethod(c, mm.member));
+                                self.pending_call = Some(e);
+                                return self.call_sig(&cs, &format!("{cls}.{mtext}"), type_args, args, exp, span);
+                            }
                             _ => {}
                         }
                     }
+                if matches!(self.ast().expr(obj).kind, ExprKind::Super) {
+                    return self.super_method_call(e, name, name_span, type_args, args, exp, span);
+                }
                 let recv = self.expr(obj, None);
                 if recv == ERROR {
                     for a in args {
@@ -1464,10 +1829,45 @@ impl<'a> Checker<'a> {
                     }
                     self.types.without_undefined(recv)
                 };
+                // `process.stdout.write(s)` / `process.stderr.write(s)`.
+                if let Ty::BuiltinNs(s) = *self.types.get(base) {
+                    let ns = self.name(s).to_string();
+                    self.rec_call(e, Callee::Builtin { ns: Some(s), name });
+                    self.pending_call = Some(e);
+                    return self.builtin_ns_call(&ns, &mtext, name_span, args, exp, span);
+                }
                 if let Ty::Expect(subject) = *self.types.get(base) {
                     self.rec_call(e, Callee::Matcher(subject));
                     self.pending_call = Some(e);
                     return self.expect_matcher(subject, &mtext, name_span, args, span);
+                }
+                // Methods of class instances.
+                if self.class_of(base).is_some()
+                    && let Some(super::class::ClassMemberRef::Method(mm)) = self.class_member(base, name)
+                {
+                    self.check_visible(mm.owner, mm.vis, name, name_span);
+                    let ret = self.method_ret(&mm);
+                    let names = mm.param_names.iter().map(|&p| self.name(p).to_string()).collect();
+                    let throws = self.method_throws(&mm);
+                    let cs = CallSig { tparams: Vec::new(), params: mm.params.clone(), names, rest: None, ret, throws };
+                    self.rec_call(e, Callee::ClassMethod { recv: base, name, sup: false });
+                    self.pending_call = Some(e);
+                    let cls = self.show(base);
+                    let r = self.call_sig(&cs, &format!("{cls}.{mtext}"), type_args, args, exp, span);
+                    return if mopt || optional { self.types.optional(r) } else { r };
+                }
+                let fm = self.flat_members(base);
+                if fm.len() > 1 && fm.iter().any(|&m| matches!(self.class_member(m, name), Some(super::class::ClassMemberRef::Method(_)))) {
+                    let shown = self.show(base);
+                    self.report(
+                        Diagnostic::new("T0817", span, format!("can't call method `{mtext}` on `{shown}`"))
+                            .note("why", "each class in the union has its own method")
+                            .note("instead", "narrow first (`if (x instanceof C)`), or give the classes a common base class that declares the method"),
+                    );
+                    for a in args {
+                        self.expr(a.expr, None);
+                    }
+                    return ERROR;
                 }
                 // A record field holding a function.
                 let is_field = self.flat_members(base).iter().all(|&m| self.field_of(m, name).is_some());
@@ -1493,6 +1893,7 @@ impl<'a> Checker<'a> {
                 };
                 return if mopt || optional { self.types.optional(result) } else { result };
             }
+            ExprKind::Super => return self.super_ctor_call(e, args, span),
             _ => {}
         }
         let t = self.expr(callee, None);
@@ -1504,12 +1905,75 @@ impl<'a> Checker<'a> {
         if optional { self.types.optional(r) } else { r }
     }
 
+    /// `super(...)` in a derived class's constructor.
+    fn super_ctor_call(&mut self, e: ExprId, args: &[Arg], span: Span) -> TyId {
+        let (class, ctor) = self.fcx.last().map(|f| (f.class, f.ctor)).unwrap_or((None, false));
+        let base = class.and_then(|c| self.classes[c as usize].base);
+        let (Some(_), true, Some(base)) = (class, ctor, base) else {
+            self.report(Diagnostic::new("T0801", span, "`super(...)` is only valid in the constructor of a class that `extends` another"));
+            for a in args {
+                self.expr(a.expr, None);
+            }
+            return ERROR;
+        };
+        let (b, bargs) = self.class_of(base).unwrap();
+        let binfo = self.classes[b as usize].clone();
+        let map: HashMap<u32, TyId> = binfo.params.iter().copied().zip(bargs.iter().copied()).collect();
+        let params: Vec<FnParam> = binfo.ctor.params.iter().map(|p| FnParam { ty: self.types.subst(p.ty, &map), ..*p }).collect();
+        let names = binfo.ctor.param_names.iter().map(|&p| self.name(p).to_string()).collect();
+        let throws = self.ctor_throws(b);
+        let throws = self.types.subst(throws, &map);
+        let cs = CallSig { tparams: Vec::new(), params, names, rest: None, ret: VOID, throws };
+        self.rec_call(e, Callee::SuperCtor(base));
+        self.pending_call = Some(e);
+        self.call_sig(&cs, "super", &[], args, None, span)
+    }
+
+    /// `super.name(...)`: the base class's implementation.
+    #[allow(clippy::too_many_arguments)]
+    fn super_method_call(&mut self, e: ExprId, name: Sym, name_span: Span, type_args: &[crate::ast::TypeId], args: &[Arg], exp: Option<TyId>, span: Span) -> TyId {
+        let class = self.fcx.last().and_then(|f| f.class);
+        let base = class.and_then(|c| self.classes[c as usize].base);
+        let has_this = self.lookup(super::THIS_SYM).is_some();
+        let (Some(base), true) = (base, has_this) else {
+            self.report(Diagnostic::new("T0801", span, "`super.method(...)` is only valid in methods of a class that `extends` another"));
+            for a in args {
+                self.expr(a.expr, None);
+            }
+            return ERROR;
+        };
+        let mtext = self.name(name).to_string();
+        match self.class_member(base, name) {
+            Some(super::class::ClassMemberRef::Method(mm)) => {
+                if mm.is_abstract {
+                    self.report(Diagnostic::new("T0806", name_span, format!("`super.{mtext}` is abstract in the base class")));
+                }
+                self.check_visible(mm.owner, mm.vis, name, name_span);
+                let ret = self.method_ret(&mm);
+                let names = mm.param_names.iter().map(|&p| self.name(p).to_string()).collect();
+                let throws = self.method_throws(&mm);
+                let cs = CallSig { tparams: Vec::new(), params: mm.params.clone(), names, rest: None, ret, throws };
+                self.rec_call(e, Callee::ClassMethod { recv: base, name, sup: true });
+                self.pending_call = Some(e);
+                self.call_sig(&cs, &format!("super.{mtext}"), type_args, args, exp, span)
+            }
+            _ => {
+                let shown = self.show(base);
+                self.report(Diagnostic::new("T0107", name_span, format!("base class `{shown}` has no method `{mtext}`")));
+                for a in args {
+                    self.expr(a.expr, None);
+                }
+                ERROR
+            }
+        }
+    }
+
     fn call_value(&mut self, t: TyId, desc: &str, args: &[Arg], exp: Option<TyId>, span: Span) -> TyId {
         match *self.types.get(t) {
             Ty::Func(params, ret) => {
                 let params = self.types.params(params).to_vec();
                 let names = (0..params.len()).map(|i| format!("arg{i}")).collect();
-                let cs = CallSig { tparams: Vec::new(), params, names, rest: None, ret };
+                let cs = CallSig { tparams: Vec::new(), params, names, rest: None, ret, throws: NEVER };
                 self.call_sig(&cs, desc, &[], args, exp, span)
             }
             Ty::Error => {
@@ -1576,6 +2040,17 @@ impl<'a> Checker<'a> {
                 let t = self.resolve_type(ta, &tscope);
                 map.insert(p, t);
             }
+        }
+        // The expected type can fix type parameters the arguments don't mention (`const s: Stack<int> = new Stack()`).
+        if type_args.is_empty()
+            && !cs.tparams.is_empty()
+            && let Some(x) = exp
+            && x != ERROR
+        {
+            let x = self.types.without_undefined(x);
+            let free = cs.tparams.clone();
+            let ret = self.types.without_undefined(cs.ret);
+            self.unify(ret, x, &free, &mut map);
         }
         let saved_free = std::mem::take(&mut self.infer_free);
         self.infer_free = cs.tparams.iter().copied().filter(|p| !map.contains_key(p)).collect();
@@ -1665,6 +2140,10 @@ impl<'a> Checker<'a> {
             return ERROR;
         }
         let ret = self.types.subst(cs.ret, &map);
+        if cs.throws != NEVER && cs.throws != ERROR {
+            let thrown = if cs.throws == UNKNOWN { self.error_class() } else { self.types.subst(cs.throws, &map) };
+            self.on_throw(thrown, span, Some(desc), call_expr);
+        }
         if let Some(ce) = call_expr
             && self.facts.is_some()
         {
@@ -1742,6 +2221,16 @@ impl<'a> Checker<'a> {
                     self.unify(pattern_rest[0], actual_rest, free, map);
                 }
             }
+            Ty::Class(pd, pargs) => {
+                if let Some(up) = self.upcast_to(actual, pd)
+                    && let Ty::Class(_, aargs) = *self.types.get(up)
+                {
+                    let (pargs, aargs) = (self.types.tys(pargs).to_vec(), self.types.tys(aargs).to_vec());
+                    for (p, a) in pargs.iter().zip(&aargs) {
+                        self.unify(*p, *a, free, map);
+                    }
+                }
+            }
             Ty::Rec(pd, pargs) | Ty::Interface(pd, pargs) => {
                 if let Ty::Rec(ad, aargs) | Ty::Interface(ad, aargs) = *self.types.get(actual)
                     && pd == ad {
@@ -1795,7 +2284,12 @@ impl<'a> Checker<'a> {
         for n in ns {
             match n {
                 Narrowing::Local(l, t) => self.narrow(*l, *t),
-                Narrowing::Path(l, p, t) => self.narrow_path(*l, p.clone(), Some(*t)),
+                Narrowing::Path(l, p, t, heap) => {
+                    self.narrow_path(*l, p.clone(), Some(*t));
+                    if *heap {
+                        self.fcx().heap_paths.push((*l, p.clone()));
+                    }
+                }
             }
         }
     }
@@ -1875,6 +2369,35 @@ impl<'a> Checker<'a> {
                     _ => Vec::new(),
                 }
             }
+            ExprKind::Binary(BinOp::Instanceof, l, r) => {
+                let ExprKind::Ident(s) = ast.expr(*r).kind else { return Vec::new() };
+                let Some(Decl::Class(c)) = self.scopes[self.cur as usize].values.get(&s).map(|d| d.0) else { return Vec::new() };
+                if self.lookup(s).is_some() {
+                    return Vec::new();
+                }
+                let Some((target, ty)) = self.target_of(*l) else { return Vec::new() };
+                let mut keep = Vec::new();
+                for m in self.flat_members(ty) {
+                    let Some((mc, _)) = self.class_of(m) else {
+                        if !positive {
+                            keep.push(m);
+                        }
+                        continue;
+                    };
+                    let is_c = self.class_descends(mc, c);
+                    if positive {
+                        if is_c {
+                            keep.push(m);
+                        } else if self.class_descends(c, mc) {
+                            let d = self.downcast_ty(m, c);
+                            keep.push(d);
+                        }
+                    } else if !is_c {
+                        keep.push(m);
+                    }
+                }
+                vec![target.with(self.types.union(&keep))]
+            }
             ExprKind::Ident(_) | ExprKind::Member { optional: false, .. } => {
                 let Some((target, ty)) = self.target_of(e) else { return Vec::new() };
                 if !self.types.has_undefined(ty) {
@@ -1890,16 +2413,26 @@ impl<'a> Checker<'a> {
     /// A narrowable reference: a local, or a field path of a local (`t.left.value`), with its current type.
     fn target_of(&mut self, e: ExprId) -> Option<(Target, TyId)> {
         match &self.ast().expr(e).kind {
-            ExprKind::Ident(s) => self.lookup(*s).map(|(id, ty)| (Target { local: id, path: Vec::new() }, ty)),
+            ExprKind::Ident(s) => self.lookup(*s).map(|(id, ty)| (Target { local: id, path: Vec::new(), heap: false }, ty)),
+            ExprKind::This => self.lookup(super::THIS_SYM).map(|(id, ty)| (Target { local: id, path: Vec::new(), heap: false }, ty)),
             ExprKind::Paren(x) => self.target_of(*x),
             ExprKind::Member { obj, name, optional: false, .. } => {
                 let (mut target, base) = self.target_of(*obj)?;
                 target.path.push(*name);
+                let base = self.types.without_undefined(base);
+                let members = self.flat_members(base);
+                // Through a class instance: other references can change it (calls forget it); getters aren't narrowable.
+                for &m in &members {
+                    if self.class_of(m).is_some() {
+                        target.heap = true;
+                        if !matches!(self.class_member(m, *name), Some(super::class::ClassMemberRef::Field(_))) {
+                            return None;
+                        }
+                    }
+                }
                 if let Some(t) = self.lookup_path(target.local, &target.path) {
                     return Some((target, t));
                 }
-                let base = self.types.without_undefined(base);
-                let members = self.flat_members(base);
                 let mut tys = Vec::new();
                 for m in members {
                     tys.push(self.field_of(m, *name)?);
@@ -1945,17 +2478,19 @@ impl<'a> Checker<'a> {
 pub(super) struct Target {
     local: LocalId,
     path: Vec<Sym>,
+    /// The path goes through a class instance.
+    heap: bool,
 }
 
 impl Target {
     fn with(self, ty: TyId) -> Narrowing {
-        if self.path.is_empty() { Narrowing::Local(self.local, ty) } else { Narrowing::Path(self.local, self.path, ty) }
+        if self.path.is_empty() { Narrowing::Local(self.local, ty) } else { Narrowing::Path(self.local, self.path, ty, self.heap) }
     }
 }
 
 pub(super) enum Narrowing {
     Local(LocalId, TyId),
-    Path(LocalId, Vec<Sym>, TyId),
+    Path(LocalId, Vec<Sym>, TyId, bool),
 }
 
 fn typeof_name(types: &Types, t: TyId) -> Option<&'static str> {

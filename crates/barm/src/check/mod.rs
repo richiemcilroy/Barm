@@ -1,11 +1,17 @@
 //! Name resolution and type checking.
 
 mod builtins;
+pub(crate) mod class;
 mod expr;
 pub mod facts;
 mod stmt;
 
 pub use facts::{CallFact, Callee, IdentFact, MemberFact, ModuleFacts};
+
+/// `__native.name`'s parameter types and result (for code generation).
+pub fn native_sig_pub(types: &mut Types, name: &str) -> Option<(Vec<TyId>, TyId)> {
+    builtins::native_sig(types, name)
+}
 
 use crate::ast::{self, Ast, ExprId, ItemKind, StmtId, TypeExprKind};
 use crate::diag::{similar, Applicability, Diagnostic};
@@ -24,6 +30,10 @@ pub struct Module {
     pub ast: Ast,
     /// Import item index → imported module index (for successfully resolved imports).
     pub imports: HashMap<u32, u32>,
+    /// The built-in prelude (`Error` and friends): its exports are visible in every module.
+    pub builtin: bool,
+    /// Part of the standard library (the prelude, `node:fs`, ...): may use `__native`.
+    pub std: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -33,6 +43,7 @@ pub(crate) enum Decl {
     Alias(u32),
     Iface(u32),
     Ns(u32),
+    Class(u32),
 }
 
 #[derive(Default, Clone)]
@@ -74,6 +85,25 @@ pub(crate) struct Sig {
     pub(crate) params: Vec<FnParam>,
     pub(crate) param_names: Vec<Sym>,
     pub(crate) ret: TyId,
+    /// The errors it can throw (`NEVER`: none; `UNKNOWN` while being inferred).
+    pub(crate) throws: TyId,
+    /// The last parameter is `...xs: T[]` (callers pass the elements as separate arguments).
+    pub(crate) rest: bool,
+}
+
+impl Sig {
+    /// Call-site view: fixed parameters and, for a rest parameter, its element type.
+    pub(crate) fn call_params(&self, types: &Types) -> (Vec<FnParam>, Option<TyId>) {
+        if !self.rest {
+            return (self.params.clone(), None);
+        }
+        let n = self.params.len() - 1;
+        let elem = match types.get(self.params[n].ty) {
+            Ty::Array(e) => *e,
+            _ => ERROR,
+        };
+        (self.params[..n].to_vec(), Some(elem))
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -106,6 +136,22 @@ struct Frame {
     loops: u32,
     switches: u32,
     name: Option<Sym>,
+    /// Functions and methods can throw; closures can't (yet).
+    can_throw: bool,
+    /// The declared `throws` type (`None`: inferred from `thrown`).
+    throws_decl: Option<TyId>,
+    /// Errors that leave the function (thrown or passed on with `try`).
+    thrown: Vec<TyId>,
+    /// Enclosing `try { }` blocks: the errors each one catches.
+    try_frames: Vec<Vec<TyId>>,
+    /// Inside the operand of a `try` expression.
+    try_expr: u32,
+}
+
+impl Frame {
+    fn new(ret: Option<TyId>, name: Option<Sym>, can_throw: bool, throws_decl: Option<TyId>) -> Frame {
+        Frame { ret, returns: Vec::new(), loops: 0, switches: 0, name, can_throw, throws_decl, thrown: Vec::new(), try_frames: Vec::new(), try_expr: 0 }
+    }
 }
 
 #[derive(Default)]
@@ -127,10 +173,28 @@ struct FnCtx {
     aliases: Vec<(LocalId, LocalId, u32)>,
     mutations: Vec<(LocalId, Span)>,
     reads: Vec<(LocalId, u32)>,
+    /// Names of locals assigned or changed inside a closure: never narrowed (the closure may run
+    /// between the check and the use).
+    closure_mutated: HashSet<Sym>,
+    /// Active narrowings of paths that go through a class instance (`this.left`): any call may
+    /// change them through another reference, so calls forget them.
+    heap_paths: Vec<(LocalId, Vec<Sym>)>,
+    /// The class whose member is being checked (for visibility, `super` and constructors).
+    class: Option<u32>,
+    /// Declaration key of `this` (for code generation).
+    this_key: Option<u32>,
+    /// Checking a constructor (or field initializers): `readonly` fields can be assigned.
+    ctor: bool,
+    /// Expressions whose value is a class instance (mutations through them change the heap object).
+    class_valued: HashSet<ExprId>,
+    /// A `test(...)` body: its top-level closure may throw (an uncaught error fails the test).
+    test_body: bool,
 }
 
 /// Marks a scope entry that refers to `FnCtx::path_table`.
 pub(crate) const PATH_SYM: Sym = Sym(u32::MAX);
+/// The name `this` is declared under inside class methods.
+pub(crate) const THIS_SYM: Sym = Sym(u32::MAX - 1);
 
 #[derive(Clone, Copy)]
 struct Syms {
@@ -158,6 +222,16 @@ pub struct Checker<'a> {
     alias_names: Arc<Vec<String>>,
     ifaces: Arc<Vec<IfaceInfo>>,
     iface_names: Arc<Vec<String>>,
+    pub(crate) classes: Arc<Vec<class::ClassInfo>>,
+    pub(crate) class_names: Arc<Vec<String>>,
+    /// Class member bodies checked in phase A (read-only in phase B) and by this checker.
+    checked_members_base: Arc<HashSet<(u32, u32)>>,
+    checked_members: HashSet<(u32, u32)>,
+    class_resolving: HashSet<u32>,
+    /// Overrides whose (inferred) return types are compared after their class is resolved.
+    pending_overrides: Vec<(class::CMethod, class::CMethod)>,
+    /// Inferred `throws` of method bodies being checked, keyed by (class, member).
+    inferred_throws: HashMap<(u32, u32), TyId>,
     /// Generic parameters: frozen phase-A base, then this checker's own (ids continue after the base).
     gparams_base: Arc<Vec<GParam>>,
     gparams: Vec<GParam>,
@@ -200,6 +274,13 @@ fn new_checker<'a>(modules: &'a [Module], interner: &'a mut Interner, sm: &'a So
         alias_names: Arc::default(),
         ifaces: Arc::default(),
         iface_names: Arc::default(),
+        classes: Arc::default(),
+        class_names: Arc::default(),
+        checked_members_base: Arc::default(),
+        checked_members: HashSet::default(),
+        class_resolving: HashSet::default(),
+        pending_overrides: Vec::new(),
+        inferred_throws: HashMap::default(),
         gparams_base: Arc::default(),
         gparams: Vec::new(),
         param_names_base: Arc::default(),
@@ -233,6 +314,7 @@ pub fn check_for_build<'a>(modules: &'a [Module], interner: &'a mut Interner, sm
         c.cur = m;
         c.check_interface(m);
     }
+    c.check_class_cycles();
     for m in 0..modules.len() as u32 {
         c.cur = m;
         c.check_bodies(m);
@@ -255,10 +337,12 @@ pub fn check_program(modules: &[Module], interner: &mut Interner, sm: &SourceMap
         c.cur = m;
         c.check_interface(m);
     }
+    c.check_class_cycles();
     let mut out = std::mem::take(&mut c.done);
     out.extend(std::mem::take(&mut c.diags));
     // Freeze phase-A results.
     c.checked_bodies = Arc::new(std::mem::take(&mut c.checked_local));
+    c.checked_members_base = Arc::new(std::mem::take(&mut c.checked_members));
     c.gparams_base = Arc::new(std::mem::take(&mut c.gparams));
     c.param_names_base = Arc::new(std::mem::take(&mut c.param_names));
     let base = Arc::new(std::mem::take(&mut c.types));
@@ -316,7 +400,11 @@ impl<'a> Checker<'a> {
     }
 
     pub(crate) fn name(&self, s: Sym) -> &str {
-        self.interner.get(s)
+        match s {
+            THIS_SYM => "this",
+            PATH_SYM => "<path>",
+            _ => self.interner.get(s),
+        }
     }
 
     /// A phase-B checker sharing this checker's frozen tables.
@@ -333,6 +421,13 @@ impl<'a> Checker<'a> {
             alias_names: self.alias_names.clone(),
             ifaces: self.ifaces.clone(),
             iface_names: self.iface_names.clone(),
+            classes: self.classes.clone(),
+            class_names: self.class_names.clone(),
+            checked_members_base: self.checked_members_base.clone(),
+            checked_members: HashSet::default(),
+            class_resolving: HashSet::default(),
+            pending_overrides: Vec::new(),
+            inferred_throws: HashMap::default(),
             gparams_base: self.gparams_base.clone(),
             gparams: Vec::new(),
             param_names_base: self.param_names_base.clone(),
@@ -361,6 +456,7 @@ impl<'a> Checker<'a> {
         self.param_names.clear();
         self.exhaustive.clear();
         self.checked_local.clear();
+        self.checked_members.clear();
     }
 
     #[inline]
@@ -407,6 +503,7 @@ impl<'a> Checker<'a> {
             param_names: (&self.param_names_base, &self.param_names),
             rec_names: &self.alias_names,
             iface_names: &self.iface_names,
+            class_names: &self.class_names,
             module_names: &self.module_names,
         }
         .show(ty)
@@ -457,6 +554,44 @@ impl<'a> Checker<'a> {
                         Arc::make_mut(&mut self.iface_names).push(self.interner.get(*name).to_string());
                         (*name, *name_span, Decl::Iface(self.ifaces.len() as u32 - 1), true)
                     }
+                    ItemKind::Class(cd) => {
+                        Arc::make_mut(&mut self.classes).push(class::ClassInfo {
+                            module: mi,
+                            item: ii,
+                            params: Vec::new(),
+                            this_ty: ERROR,
+                            base: None,
+                            fields: Vec::new(),
+                            methods: Vec::new(),
+                            statics: Vec::new(),
+                            static_fields: Vec::new(),
+                            ctor: class::CCtor { member: None, throws: Some(NEVER), params: Vec::new(), param_names: Vec::new() },
+                            is_abstract: cd.is_abstract,
+                            cyclic: cd.cyclic,
+                            resolved: false,
+                        });
+                        Arc::make_mut(&mut self.class_names).push(self.interner.get(cd.name).to_string());
+                        let decl = Decl::Class(self.classes.len() as u32 - 1);
+                        // A class is both a type and a value (`new C()`, `C.staticMember`).
+                        if builtins::is_builtin_type(self.interner.get(cd.name)) {
+                            let n = self.interner.get(cd.name).to_string();
+                            self.done.push(Diagnostic::new("N0005", cd.name_span, format!("`{n}` is a built-in type and can't be redeclared")));
+                            continue;
+                        }
+                        if let Some((_, prev)) = scope.types.get(&cd.name).or_else(|| scope.values.get(&cd.name)) {
+                            let (line, _) = self.sm.get(prev.file).line_col(prev.start);
+                            let n = self.interner.get(cd.name).to_string();
+                            self.done.push(Diagnostic::new("N0003", cd.name_span, format!("`{n}` is already declared in this module")).note("previous", format!("line {line}")));
+                            continue;
+                        }
+                        scope.values.insert(cd.name, (decl, cd.name_span));
+                        scope.types.insert(cd.name, (decl, cd.name_span));
+                        if item.exported {
+                            scope.exported_values.insert(cd.name);
+                            scope.exported_types.insert(cd.name);
+                        }
+                        continue;
+                    }
                     _ => continue,
                 };
                 if is_type && builtins::is_builtin_type(self.interner.get(name)) {
@@ -481,6 +616,22 @@ impl<'a> Checker<'a> {
                 }
             }
             Arc::make_mut(&mut self.scopes).push(scope);
+        }
+        // The prelude's exports are in scope everywhere, unless a module declares the name.
+        if let Some(b) = modules.iter().position(|m| m.builtin) {
+            let bs = self.scopes[b].clone();
+            for (mi, module) in modules.iter().enumerate() {
+                if module.builtin {
+                    continue;
+                }
+                let scope = &mut Arc::make_mut(&mut self.scopes)[mi];
+                for (&name, &(decl, span)) in bs.values.iter().filter(|(n, _)| bs.exported_values.contains(n)) {
+                    scope.values.entry(name).or_insert((decl, span));
+                }
+                for (&name, &(decl, span)) in bs.types.iter().filter(|(n, _)| bs.exported_types.contains(n)) {
+                    scope.types.entry(name).or_insert((decl, span));
+                }
+            }
         }
     }
 
@@ -628,6 +779,14 @@ impl<'a> Checker<'a> {
                     }
                 }
                 ItemKind::Import(_) => {}
+                ItemKind::Class(cd) => {
+                    if let Some(Decl::Class(c)) = self.scopes[m as usize].types.get(&cd.name).map(|d| d.0)
+                        && self.classes[c as usize].item == ii
+                        && self.classes[c as usize].module == m
+                    {
+                        self.check_class_interface(c);
+                    }
+                }
             }
         }
     }
@@ -639,6 +798,14 @@ impl<'a> Checker<'a> {
             match &item.kind {
                 ItemKind::Function(_) => self.check_fn_body(m, ii as u32),
                 ItemKind::Test { body, .. } => self.check_test(*body),
+                ItemKind::Class(cd) => {
+                    if let Some(Decl::Class(c)) = self.scopes[m as usize].types.get(&cd.name).map(|d| d.0)
+                        && self.classes[c as usize].item == ii as u32
+                        && self.classes[c as usize].module == m
+                    {
+                        self.check_class_bodies(c);
+                    }
+                }
                 _ => {}
             }
         }
@@ -646,7 +813,8 @@ impl<'a> Checker<'a> {
 
     fn check_test(&mut self, body: ExprId) {
         let expected = self.types.func(Vec::new(), VOID);
-        self.fcx.push(FnCtx::default());
+        let closure_mutated = stmt::closure_mutated_expr(self.ast(), body);
+        self.fcx.push(FnCtx { closure_mutated, test_body: true, ..Default::default() });
         self.fcx.last_mut().unwrap().scopes.push(Vec::new());
         let t = self.expr(body, Some(expected));
         self.check_shared_copies();
@@ -749,7 +917,22 @@ impl<'a> Checker<'a> {
                 }
                 let mut params = Vec::new();
                 let mut param_names = Vec::new();
-                for p in &f.params {
+                for (pi, p) in f.params.iter().enumerate() {
+                    if p.rest {
+                        if pi + 1 != f.params.len() {
+                            c.report(Diagnostic::new("P0001", p.span, "a rest parameter `...xs` must be the last parameter"));
+                        }
+                        if p.optional || p.inout {
+                            c.report(Diagnostic::new("P0001", p.span, "a rest parameter can't be optional or `inout`"));
+                        }
+                        if let Some(t) = p.ty
+                            && !matches!(c.ast().ty(t).kind, TypeExprKind::Array(_))
+                            && !matches!(&c.ast().ty(t).kind, TypeExprKind::Named { name, .. } if c.name(*name) == "Array")
+                        {
+                            let s = c.ast().ty(t).span;
+                            c.report(Diagnostic::new("T0001", s, "a rest parameter has an array type: `...xs: T[]`"));
+                        }
+                    }
                     let ty = match p.ty {
                         Some(t) => c.resolve_type(t, &tscope),
                         None => {
@@ -766,18 +949,42 @@ impl<'a> Checker<'a> {
                     param_names.push(p.name);
                 }
                 let ret = f.ret.map(|t| c.resolve_type(t, &tscope));
-                (tparams, params, param_names, ret, tscope)
+                let throws = f.throws.map(|t| c.resolve_type(t, &tscope));
+                if let Some(t) = throws {
+                    c.check_throws_type(t, f.throws.map(|te| c.ast().ty(te).span).unwrap());
+                }
+                (tparams, params, param_names, ret, throws, tscope)
             })
         });
-        let (tparams, params, param_names, ret, tscope) = sig;
+        let (tparams, params, param_names, ret, declared_throws, tscope) = sig;
+        let body_throws = may_throw(&self.modules[m as usize].ast, f.body);
+        let mut throws = declared_throws.unwrap_or(if body_throws { UNKNOWN } else { NEVER });
         let ret = match ret {
-            Some(r) => r,
+            Some(r) if throws != UNKNOWN => r,
             // No `return <value>` anywhere: `void`, and the body can wait for phase B.
-            None if !returns_value(&self.modules[m as usize].ast, f.body) => VOID,
-            None => {
-                // Infer from the body.
-                let partial = Sig { tparams: tparams.clone(), params: params.clone(), param_names: param_names.clone(), ret: ERROR };
-                let inferred = self.check_body_of(m, ii, &partial, &tscope, None);
+            None if !returns_value(&self.modules[m as usize].ast, f.body) && throws != UNKNOWN => VOID,
+            declared => {
+                // Infer from the body (the return type, the errors, or both).
+                let partial = Sig { tparams: tparams.clone(), params: params.clone(), param_names: param_names.clone(), ret: declared.unwrap_or(ERROR), throws, rest: false };
+                let (inferred, errs) = self.check_body_of(m, ii, &partial, &tscope, declared.or(if returns_value(&self.modules[m as usize].ast, f.body) { None } else { Some(VOID) }));
+                if throws == UNKNOWN {
+                    throws = errs;
+                    if exported && errs != NEVER && errs != ERROR {
+                        let shown = self.show(errs);
+                        let n = self.name(f.name).to_string();
+                        let body_span = self.modules[m as usize].ast.stmt(f.body).span;
+                        let at = Span::new(body_span.file, body_span.start, body_span.start);
+                        self.done.push(
+                            Diagnostic::new("T0830", f.name_span, format!("exported function `{n}` can throw `{shown}` but doesn't declare it"))
+                                .note("why", "exported signatures are the module's interface; callers need to know what can go wrong")
+                                .fix(Applicability::Safe, format!("declare `throws {shown}`"), at, format!("throws {shown} ")),
+                        );
+                    }
+                }
+                if let Some(r) = declared {
+                    r
+                } else {
+                    let inferred = if returns_value(&self.modules[m as usize].ast, f.body) { inferred } else { VOID };
                 if exported && inferred != VOID {
                     let body_span = self.modules[m as usize].ast.stmt(f.body).span;
                     let at = self.before_body(body_span);
@@ -790,9 +997,11 @@ impl<'a> Checker<'a> {
                     );
                 }
                 inferred
+                }
             }
         };
-        let sig = Sig { tparams, params, param_names, ret };
+        let rest = f.params.last().map(|p| p.rest).unwrap_or(false);
+        let sig = Sig { tparams, params, param_names, ret, throws, rest };
         self.sig_in_progress.remove(&(m, ii));
         Arc::make_mut(&mut self.sigs).insert((m, ii), sig.clone());
         Some(sig)
@@ -818,18 +1027,57 @@ impl<'a> Checker<'a> {
         self.check_body_of(m, ii, &sig, &tscope, Some(sig.ret));
     }
 
+    /// A class from the built-in prelude (`Error`, `SyntaxError`, ...), for code generation.
+    pub(crate) fn builtin_error_class(&mut self, name: &str) -> TyId {
+        self.builtin_class(name)
+    }
+
+    /// The built-in `Error` class type.
+    pub(crate) fn error_class(&mut self) -> TyId {
+        let b = self.modules.iter().position(|m| m.builtin);
+        let sym = self.interner.lookup("Error");
+        match (b, sym) {
+            (Some(b), Some(sym)) => match self.scopes[b].types.get(&sym).map(|d| d.0) {
+                Some(Decl::Class(c)) => {
+                    self.resolve_class(c);
+                    self.classes[c as usize].this_ty
+                }
+                _ => ERROR,
+            },
+            _ => ERROR,
+        }
+    }
+
     /// Checks a function body; returns the declared or inferred return type.
-    fn check_body_of(&mut self, m: u32, ii: u32, sig: &Sig, tscope: &[(Sym, TyId)], ret: Option<TyId>) -> TyId {
+    fn check_body_of(&mut self, m: u32, ii: u32, sig: &Sig, tscope: &[(Sym, TyId)], ret: Option<TyId>) -> (TyId, TyId) {
         self.checked_local.insert((m, ii));
-        let ItemKind::Function(f) = &self.modules[m as usize].ast.items[ii as usize].kind else { return ERROR };
+        let ItemKind::Function(f) = &self.modules[m as usize].ast.items[ii as usize].kind else { return (ERROR, NEVER) };
+        self.check_decl_body(m, f, sig, tscope, ret, None, None)
+    }
+
+    /// Checks a function (or method) body; `this` for methods, `class` for member visibility.
+    #[allow(clippy::too_many_arguments)]
+    /// Returns the (declared or inferred) return type and the errors the body lets out.
+    pub(crate) fn check_decl_body(&mut self, m: u32, f: &'a ast::FnDecl, sig: &Sig, tscope: &[(Sym, TyId)], ret: Option<TyId>, this: Option<class::ThisInfo>, class: Option<u32>) -> (TyId, TyId) {
         let mut promoted = HashSet::default();
         let mut result = ERROR;
+        let mut thrown = NEVER;
         let saved = std::mem::take(&mut self.diags);
         for _round in 0..4 {
             self.diags.clear();
             let mut fcx = FnCtx { tscope: tscope.to_vec(), promoted: promoted.clone(), ..Default::default() };
+            fcx.closure_mutated = stmt::closure_mutated_stmt(&self.modules[m as usize].ast, f.body);
             fcx.scopes.push(Vec::new());
-            fcx.frames.push(Frame { ret, returns: Vec::new(), loops: 0, switches: 0, name: Some(f.name) });
+            // Without a `throws` clause the body's own `try`/`throw` decide (T0831 covers unmarked calls).
+            let decl = if sig.throws == UNKNOWN || (f.throws.is_none() && sig.throws == NEVER) { None } else { Some(sig.throws) };
+            fcx.frames.push(Frame::new(ret, Some(f.name), true, decl));
+            fcx.class = class;
+            if let Some(t) = &this {
+                fcx.locals.push(Local { name: THIS_SYM, ty: t.ty, kind: LocalKind::Param, span: f.name_span, kw_span: None, promotable: false, frame: 0 });
+                fcx.scopes[0].push((THIS_SYM, fcx.locals.len() - 1, None));
+                fcx.this_key = Some(f.name_span.start);
+                fcx.ctor = t.ctor;
+            }
             for (p, fp) in f.params.iter().zip(&sig.params) {
                 let kind = if p.inout { LocalKind::Inout } else { LocalKind::Param };
                 fcx.locals.push(Local { name: p.name, ty: fp.ty, kind, span: p.span, kw_span: None, promotable: false, frame: 0 });
@@ -842,6 +1090,8 @@ impl<'a> Checker<'a> {
                 let body = f.body;
                 let fcx = c.fcx.last_mut().unwrap();
                 let returns = std::mem::take(&mut fcx.frames[0].returns);
+                let errs = std::mem::take(&mut fcx.frames[0].thrown);
+                thrown = c.types.union(&errs);
                 match ret {
                     Some(r) => {
                         if r != VOID && r != ERROR && !c.always_returns(body) && !c.types.has_undefined(r) && !c.fcx.last().unwrap().reported_nonexhaustive {
@@ -876,7 +1126,7 @@ impl<'a> Checker<'a> {
         }
         let produced = std::mem::replace(&mut self.diags, saved);
         self.done.extend(produced);
-        result
+        (result, thrown)
     }
 
     // ---------------------------------------------------------------- types
@@ -1178,6 +1428,14 @@ impl<'a> Checker<'a> {
                 }
                 inst
             }
+            Some(Decl::Class(c)) => {
+                let arity = self.class_decl(c).tparams.len();
+                if arity != targs.len() {
+                    self.report(Diagnostic::new("T0010", span, format!("`{text}` takes {arity} type argument{}, found {}", if arity == 1 { "" } else { "s" }, targs.len())));
+                    return ERROR;
+                }
+                self.types.class(c, &targs)
+            }
             Some(Decl::Iface(i)) => {
                 self.iface_fields(i);
                 let params = self.ifaces[i as usize].params.len();
@@ -1261,10 +1519,9 @@ impl<'a> Checker<'a> {
                 self.report(Diagnostic::new("N0002", name_span, format!("unknown type `{text}`")).fix(Applicability::Safe, format!("use `{lower}`"), name_span, lower));
                 Some(ERROR)
             }
-            "bigint" | "symbol" | "Function" | "Promise" | "Date" | "RegExp" | "Error" => {
+            "bigint" | "symbol" | "Function" | "Promise" | "Date" | "RegExp" => {
                 let msg = match text {
                     "Promise" => "`Promise` is not supported yet (async is planned for M6)".to_string(),
-                    "Error" => "`Error` is not supported yet (errors are planned for M3)".to_string(),
                     "Function" => "`Function` is not supported; write the function type: `(x: T) => R`".to_string(),
                     _ => format!("`{text}` is not supported"),
                 };
@@ -1345,6 +1602,7 @@ impl<'a> Checker<'a> {
                 }
                 rb == VOID || self.assignable_in(ra, rb, true, assuming)
             }
+            (Ty::Class(..), Ty::Class(..)) => self.class_assignable(src, dst),
             (_, Ty::Interface(i, args)) => {
                 let args = self.types.tys(args).to_vec();
                 let fields = self.iface_fields_inst(i, &args);
@@ -1365,6 +1623,7 @@ impl<'a> Checker<'a> {
                 let args = self.types.tys(args).to_vec();
                 self.iface_fields_inst(i, &args)
             }
+            Ty::Class(..) => self.class_as_fields(src),
             _ => return false,
         };
         fields.iter().all(|f| match src_fields.iter().find(|sf| sf.name == f.name) {
@@ -1431,6 +1690,12 @@ impl<'a> Checker<'a> {
                     .fix(Applicability::Placeholder, "provide a default: `?? <default>`", span.empty_at_end(), " ?? <default>")
                     .fix(Applicability::Maybe, "assert it is defined (traps if not): `!`", span.empty_at_end(), "!");
             }
+        } else if let (Ty::Record(_), Some((c, _))) = {
+            let e = self.types.without_undefined(expected);
+            (*self.types.get(found), self.class_of(e))
+        } {
+            let cls = self.class_names[c as usize].clone();
+            d = d.note("why", format!("`{cls}` is a class: instances are created with `new {cls}(...)`, not object literals"));
         } else if let (Ty::Record(ff), Ty::Record(ef)) = {
             let unfolded = self.unfold(expected);
             (*self.types.get(found), *self.types.get(unfolded))
@@ -1531,12 +1796,18 @@ impl<'a> Checker<'a> {
     fn narrow(&mut self, local: LocalId, ty: TyId) {
         let fcx = self.fcx.last_mut().unwrap();
         let name = fcx.locals[local].name;
+        if fcx.closure_mutated.contains(&name) && ty != fcx.locals[local].ty {
+            return;
+        }
         fcx.scopes.last_mut().unwrap().push((name, local, Some(ty)));
     }
 
     /// Narrows (or with `None`, forgets narrowings under) a field path of a local.
     fn narrow_path(&mut self, local: LocalId, path: Vec<Sym>, ty: Option<TyId>) {
         let fcx = self.fcx.last_mut().unwrap();
+        if ty.is_some() && fcx.closure_mutated.contains(&fcx.locals[local].name) {
+            return;
+        }
         fcx.path_table.push((local, path, ty));
         let idx = fcx.path_table.len() - 1;
         fcx.scopes.last_mut().unwrap().push((PATH_SYM, idx, None));
@@ -1568,6 +1839,20 @@ impl<'a> Checker<'a> {
         None
     }
 
+    fn this_expr(&mut self, e: ExprId, span: Span) -> TyId {
+        match self.lookup(THIS_SYM) {
+            Some((id, ty)) => {
+                let key = self.local(id).span.start;
+                self.rec_ident(e, IdentFact::Local(key));
+                ty
+            }
+            None => {
+                self.report(Diagnostic::new("T0802", span, "`this` is only available inside class methods and constructors"));
+                ERROR
+            }
+        }
+    }
+
     fn local(&self, id: LocalId) -> &Local {
         &self.fcx.last().unwrap().locals[id]
     }
@@ -1589,6 +1874,46 @@ fn collect_type_refs(ast: &Ast, te: ast::TypeId, out: &mut Vec<(Option<Sym>, Sym
             collect_type_refs(ast, *r, out);
         }
         _ => {}
+    }
+}
+
+/// Can this function body throw or pass an error on (a `throw` statement or a `try` expression
+/// outside nested arrow functions)? Syntactic: decides whether `throws` needs inferring.
+pub(crate) fn may_throw(ast: &Ast, s: StmtId) -> bool {
+    use crate::ast::{ExprKind, StmtKind};
+    fn expr(ast: &Ast, e: ExprId) -> bool {
+        match &ast.expr(e).kind {
+            ExprKind::Try(_) => true,
+            ExprKind::Arrow(_) => false,
+            ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::As(x, _) => expr(ast, *x),
+            ExprKind::Binary(_, l, r) | ExprKind::Assign(_, l, r) => expr(ast, *l) || expr(ast, *r),
+            ExprKind::Update { target, .. } => expr(ast, *target),
+            ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args, .. } => expr(ast, *callee) || args.iter().any(|a| expr(ast, a.expr)),
+            ExprKind::Member { obj, .. } => expr(ast, *obj),
+            ExprKind::Index { obj, index, .. } => expr(ast, *obj) || expr(ast, *index),
+            ExprKind::Cond(a, b, c) => expr(ast, *a) || expr(ast, *b) || expr(ast, *c),
+            ExprKind::Array(xs) | ExprKind::Template(_, xs) => xs.iter().any(|&x| expr(ast, x)),
+            ExprKind::Object(fs) => fs.iter().any(|f| expr(ast, f.value)),
+            _ => false,
+        }
+    }
+    match &ast.stmt(s).kind {
+        StmtKind::Throw(_) => true,
+        StmtKind::Expr(e) | StmtKind::Return(Some(e)) => expr(ast, *e),
+        StmtKind::Let { init: Some(e), .. } => expr(ast, *e),
+        StmtKind::Block(ss) => ss.iter().any(|&x| may_throw(ast, x)),
+        StmtKind::If(c, t, e) => expr(ast, *c) || may_throw(ast, *t) || e.map(|e| may_throw(ast, e)).unwrap_or(false),
+        StmtKind::While(c, b) | StmtKind::DoWhile(b, c) => expr(ast, *c) || may_throw(ast, *b),
+        StmtKind::For { init, cond, step, body } => {
+            init.map(|i| may_throw(ast, i)).unwrap_or(false) || [cond, step].into_iter().flatten().any(|&e| expr(ast, e)) || may_throw(ast, *body)
+        }
+        StmtKind::ForOf { iter, body, .. } => expr(ast, *iter) || may_throw(ast, *body),
+        StmtKind::Switch(d, cases) => expr(ast, *d) || cases.iter().any(|c| c.body.iter().any(|&x| may_throw(ast, x))),
+        // A `catch` handles the block's errors, but the catch/finally bodies can throw again.
+        StmtKind::Try { catch, finally, body } => {
+            catch.as_ref().map(|c| may_throw(ast, c.body)).unwrap_or(false) || finally.map(|f| may_throw(ast, f)).unwrap_or(false) || (catch.is_none() && may_throw(ast, *body))
+        }
+        _ => false,
     }
 }
 
