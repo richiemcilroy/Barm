@@ -13,9 +13,10 @@ error[T0830] errors.barm:21:17: exported function `leaky` can throw `Refused` bu
   why: exported signatures are the module's interface; callers need to know what can go wrong
   fix[safe]: declare `throws Refused`
 
-error[T0832] errors.barm:29:28: `connect` can throw `Timeout`, but a closure can't pass errors on
+error[T0832] errors.barm:29:28: `connect` can throw `Timeout`, but this closure's type doesn't let it pass errors on
    29 |   return xs.map((h) => try connect(h))
   instead: catch it inside the closure: `try { ... } catch (e) { ... }`
+  or: let the function type throw: `(...) => T throws Timeout`
 
 error[T0834] errors.barm:33:9: can only throw `Error` objects, found `"just a string"`
    33 |   throw "just a string"

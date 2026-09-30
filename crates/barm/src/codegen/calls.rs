@@ -93,7 +93,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 } else {
                     fv
                 };
-                let Ty::Func(ps, ret) = self.tget(fty) else {
+                let Ty::Func(ps, ret, _) = self.tget(fty) else {
                     self.unsupported(span, "calling this value");
                     return Val::plain("0", ty);
                 };
@@ -145,7 +145,12 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             Callee::StaticMethod(c, mi) => {
                 let argv = self.args(args, &params, None);
-                let cname = self.static_method_instance(c, mi);
+                let mut subst = FxMap::default();
+                for (p, t) in &fact.targs {
+                    let t = self.inst(*t);
+                    subst.insert(*p, t);
+                }
+                let cname = self.static_method_instance(c, mi, subst);
                 let ret = self.inst(fact.ret);
                 self.finish_call(&format!("{cname}({})", argv.join(", ")), ret, ty)
             }
@@ -275,7 +280,7 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     pub(crate) fn prepare_callback(&mut self, arg: ExprId) -> Callback {
         let fty = self.ty(arg);
-        let Ty::Func(ps, ret) = self.tget(fty) else {
+        let Ty::Func(ps, ret, _) = self.tget(fty) else {
             return Callback { direct: None, value: "((bm_fn){NULL, NULL})".into(), params: Vec::new(), ret: VOID };
         };
         let params = self.c.types.params(ps).to_vec();
@@ -1172,6 +1177,38 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.bump(-1);
                 self.line("}");
                 self.tmp(STR, &format!("bm_str_from_sb(&{sbv})"), true)
+            }
+            (None, "Number") if !{
+                let at = self.ty(args[0].expr);
+                self.c.types.is_string(at)
+            } => {
+                // A number, or `number | string`: numbers convert, strings parse.
+                let v = self.expr(args[0].expr);
+                let (ok, out) = (self.fresh("ok"), self.fresh("n"));
+                self.line(format!("double {out} = 0; bool {ok} = true;"));
+                match self.tget(v.ty) {
+                    Ty::Union(ms) => {
+                        let ms = self.c.types.tys(ms).to_vec();
+                        let tag = self.u_tag(&v.code, v.ty);
+                        self.open(&format!("switch ({tag}) {{"));
+                        for (i, &mt) in ms.iter().enumerate() {
+                            let payload = self.u_payload(&v.code, v.ty, i);
+                            if self.c.types.is_string(mt) {
+                                let s = self.coerce(Val::plain(payload, mt), STR);
+                                self.line(format!("case {i}: {ok} = bm_parse_float({}, &{out}); break;", s.code));
+                            } else {
+                                let n = self.coerce(Val::plain(payload, mt), F64);
+                                self.line(format!("case {i}: {out} = {}; break;", n.code));
+                            }
+                        }
+                        self.close("}");
+                    }
+                    _ => {
+                        let n = self.coerce(v, F64);
+                        self.line(format!("{out} = {};", n.code));
+                    }
+                }
+                self.optional_from(&ok, Val::plain(out, F64), ty)
             }
             (None, "Number" | "parseFloat" | "parseInt") => {
                 let v = self.expr(args[0].expr);

@@ -2667,11 +2667,35 @@ bm_str bm_jp_error(bm_jp *p) {
 
 typedef struct bm_http_conn {
     int fd;
+    struct bm_http_server *srv;
+    struct bm_http_conn *prev, *next;
     char *in; size_t in_len, in_cap;
     char *out; size_t out_len, out_cap, out_off;
     bool close_after, want_write, want_read, stalled, continued;
+    /* in/out currently point at the loop's shared buffers (see bm_http_attach) */
+    bool in_shared, out_shared;
 } bm_http_conn;
 
+/* One read buffer and one write buffer per event loop: a connection borrows them while it is
+ * handled, and keeps heap buffers only for leftovers (a partial request, or output the socket
+ * didn't take). An idle keep-alive connection holds no buffers. */
+#define BM_HTTP_RBUF (64 * 1024)
+static char *bm_http_rbuf;
+static char *bm_http_wbuf;
+static size_t bm_http_wbuf_cap;
+
+typedef struct bm_http_server {
+    int fd;              /* -1 once stopped */
+    bm_int port;
+    bm_fn handler;
+} bm_http_server;
+
+#define BM_HTTP_MAX_SERVERS 64
+static bm_http_server bm_http_servers[BM_HTTP_MAX_SERVERS];
+static int bm_http_nservers, bm_http_active;
+static bm_int bm_http_want_workers = 1;
+static int bm_http_q = -1;               /* the running loop's kqueue/epoll */
+static bm_http_conn *bm_http_conns;      /* open connections (for stop) */
 static bm_http_conn *bm_http_cur;       /* the connection whose request is being handled */
 static bool bm_http_keep;               /* the current request allows keep-alive */
 static bool bm_http_head;               /* the current request is HEAD: send headers only */
@@ -2702,6 +2726,7 @@ static void bm_http_out(bm_http_conn *c, const char *s, size_t n) {
         while (cap - c->out_len < n) cap *= 2;
         c->out = bm_realloc(c->out, cap);
         c->out_cap = cap;
+        if (c->out_shared) { bm_http_wbuf = c->out; bm_http_wbuf_cap = cap; }
     }
     memcpy(c->out + c->out_len, s, n);
     c->out_len += n;
@@ -2739,7 +2764,7 @@ static bool bm_has_header(bm_str block, const char *name) {
     return false;
 }
 
-void bm_native_httpRespond(bm_int status, bm_str headers, bm_str body) {
+void bm_native_httpRespond(bm_int status, bm_str headers, bm_str body, bool typed) {
     bm_http_conn *c = bm_http_cur;
     if (!c) return;
     char line[160], *p = line;
@@ -2770,7 +2795,7 @@ void bm_native_httpRespond(bm_int status, bm_str headers, bm_str body) {
         *p++ = '\n';
     }
     bm_http_out(c, line, (size_t)(p - line));
-    if (!bodiless && !bm_has_header(headers, "content-type")) {
+    if (!bodiless && typed && !bm_has_header(headers, "content-type")) {
         static const char ct[] = "content-type: text/plain;charset=utf-8\r\n";
         bm_http_out(c, ct, sizeof ct - 1);
     }
@@ -2840,6 +2865,28 @@ bm_str bm_native_headerAppend(bm_str block, bm_str name, bm_str value) {
     return bm_str_from_sb(&sb);
 }
 
+BM_STR_LIT(bm_lit_host, "host");
+
+/* A request's full URL: "http://" + Host header (or localhost) + target. */
+bm_str bm_native_requestUrl(bm_str headers, bm_str target) {
+    bm_int at = bm_native_headerIndex(headers, (bm_str){(bm_strbuf *)&bm_lit_host});
+    const char *host = "localhost";
+    size_t hl = 9;
+    if (at >= 0) {
+        const char *base = headers.p->data, *e = base + at, *end = base + headers.p->len;
+        while (e < end && *e != '\r' && *e != '\n') e++;
+        while (e > base + at && (e[-1] == ' ' || e[-1] == '\t')) e--;
+        host = base + at;
+        hl = (size_t)(e - host);
+    }
+    bm_sb sb = {0};
+    bm_sb_grow(&sb, 7 + hl + (size_t)target.p->len + 1);
+    bm_sb_push(&sb, "http://", 7);
+    bm_sb_push(&sb, host, hl);
+    bm_sb_push(&sb, target.p->data, (size_t)target.p->len);
+    return bm_str_from_sb(&sb);
+}
+
 BM_STR_LIT(bm_lit_get, "GET");
 BM_STR_LIT(bm_lit_post, "POST");
 
@@ -2901,7 +2948,8 @@ static long long bm_http_dechunk(const char *p, const char *end, bm_sb *out) {
 
 /* Handles every complete request in c->in (stopping early when the output backs up, which
  * sets c->stalled); returns false if the connection must close at once. */
-static bool bm_http_process(bm_http_conn *c, bm_fn h) {
+static bool bm_http_process(bm_http_conn *c) {
+    bm_fn h = c->srv->handler;
     size_t pos = 0;
     c->stalled = false;
     while (pos < c->in_len && !c->close_after) {
@@ -2994,7 +3042,7 @@ static bool bm_http_process(bm_http_conn *c, bm_fn h) {
         bm_http_keep = keep;
         bm_http_head = mlen == 4 && memcmp(start, "HEAD", 4) == 0;
         ((void (*)(void *, bm_str, bm_str, bm_str, bm_str))h.fn)(h.env, method, target, hdrs, body);
-        if (bm_http_cur) bm_native_httpRespond(500, BM_EMPTY_STR, BM_EMPTY_STR); /* no response */
+        if (bm_http_cur) bm_native_httpRespond(500, BM_EMPTY_STR, BM_EMPTY_STR, false); /* no response */
         bm_str_release(method);
         bm_str_release(target);
         bm_str_release(hdrs);
@@ -3027,73 +3075,158 @@ static bm_http_conn bm_http_dead;   /* stands in for connections closed earlier 
 
 static void bm_http_close(bm_http_conn *c) {
     bm_http_load_add(-1);
+    if (c->prev) c->prev->next = c->next; else bm_http_conns = c->next;
+    if (c->next) c->next->prev = c->prev;
     close(c->fd);
-    bm_free(c->in);
-    bm_free(c->out);
+    if (!c->in_shared) bm_free(c->in);
+    if (!c->out_shared) bm_free(c->out);
     bm_free(c);
 }
 
-static void bm_http_loop(int lfd, bm_fn h) {
+/* Lends the shared buffers to c (when it has no leftovers of its own). */
+static void bm_http_attach(bm_http_conn *c) {
+    if (c->in_len == 0 && !c->in_shared) {
+        bm_free(c->in);
+        if (!bm_http_rbuf) bm_http_rbuf = bm_alloc(BM_HTTP_RBUF);
+        c->in = bm_http_rbuf;
+        c->in_cap = BM_HTTP_RBUF;
+        c->in_shared = true;
+    }
+    if (c->out_len == 0 && !c->out_shared) {
+        bm_free(c->out);
+        if (!bm_http_wbuf) { bm_http_wbuf_cap = 64 * 1024; bm_http_wbuf = bm_alloc(bm_http_wbuf_cap); }
+        c->out = bm_http_wbuf;
+        c->out_cap = bm_http_wbuf_cap;
+        c->out_off = 0;
+        c->out_shared = true;
+    }
+}
+
+/* Gives the shared buffers back, copying any leftovers to c's own (exact-size) buffers. */
+static void bm_http_detach(bm_http_conn *c) {
+    if (c->in_shared) {
+        c->in_shared = false;
+        if (c->in_len) {
+            size_t cap = c->in_len < 4096 ? 4096 : c->in_len * 2;
+            char *p = bm_alloc(cap);
+            memcpy(p, c->in, c->in_len);
+            c->in = p;
+            c->in_cap = cap;
+        } else {
+            c->in = NULL;
+            c->in_cap = 0;
+        }
+    }
+    if (c->out_shared) {
+        c->out_shared = false;
+        size_t left = c->out_len - c->out_off;
+        if (left) {
+            char *p = bm_alloc(left);
+            memcpy(p, c->out + c->out_off, left);
+            c->out = p;
+            c->out_cap = c->out_len = left;
+        } else {
+            c->out = NULL;
+            c->out_cap = c->out_len = 0;
+        }
+        c->out_off = 0;
+        /* a huge response grew the shared buffer: don't keep it */
+        if (bm_http_wbuf_cap > (size_t)1 << 20) {
+            bm_free(bm_http_wbuf);
+            bm_http_wbuf = NULL;
+            bm_http_wbuf_cap = 0;
+        }
+    }
+    if (c->in && c->in_len == 0) { bm_free(c->in); c->in = NULL; c->in_cap = 0; }
+    if (c->out && c->out_len == 0) { bm_free(c->out); c->out = NULL; c->out_cap = 0; c->out_off = 0; }
+}
+
+/* ---- servers: registered by listen (at any time), served by bm_http_run after the program */
+
+
+static bool bm_http_is_server(void *p) {
+    return (char *)p >= (char *)bm_http_servers && (char *)p < (char *)(bm_http_servers + BM_HTTP_MAX_SERVERS);
+}
+
+static void bm_http_watch_listener(bm_http_server *sv) {
 #ifdef BM_KQUEUE
-    int q = kqueue();
     struct kevent ev;
-    EV_SET(&ev, lfd, EVFILT_READ, EV_ADD, 0, 0, NULL);
-    kevent(q, &ev, 1, NULL, 0, NULL);
+    EV_SET(&ev, sv->fd, EVFILT_READ, EV_ADD, 0, 0, sv);
+    kevent(bm_http_q, &ev, 1, NULL, 0, NULL);
+#else
+    struct epoll_event ev = { .events = EPOLLIN, .data.ptr = sv };
+    epoll_ctl(bm_http_q, EPOLL_CTL_ADD, sv->fd, &ev);
+#endif
+}
+
+static void bm_http_accept(bm_http_server *sv) {
+    while (sv->fd >= 0 && bm_http_may_accept()) {
+        int fd = accept(sv->fd, NULL, NULL);
+        if (fd < 0) break;
+        bm_http_load_add(1);
+        fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+        int one = 1;
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+        bm_http_conn *nc = bm_alloc(sizeof *nc);
+        memset(nc, 0, sizeof *nc);
+        nc->fd = fd;
+        nc->srv = sv;
+        nc->want_read = true;
+        nc->next = bm_http_conns;
+        if (bm_http_conns) bm_http_conns->prev = nc;
+        bm_http_conns = nc;
+#ifdef BM_KQUEUE
+        struct kevent cev;
+        EV_SET(&cev, fd, EVFILT_READ, EV_ADD, 0, 0, nc);
+        kevent(bm_http_q, &cev, 1, NULL, 0, NULL);
+#else
+        struct epoll_event cev = { .events = EPOLLIN | EPOLLRDHUP, .data.ptr = nc };
+        epoll_ctl(bm_http_q, EPOLL_CTL_ADD, fd, &cev);
+#endif
+    }
+}
+
+/* Runs the event loop until every server has stopped and its connections have closed. */
+static void bm_http_loop(void) {
+#ifdef BM_KQUEUE
+    bm_http_q = kqueue();
     struct kevent events[256];
 #else
-    int q = epoll_create1(0);
-    struct epoll_event ev = { .events = EPOLLIN, .data.ptr = NULL };
-    epoll_ctl(q, EPOLL_CTL_ADD, lfd, &ev);
+    bm_http_q = epoll_create1(0);
     struct epoll_event events[256];
 #endif
+    for (int i = 0; i < bm_http_nservers; i++)
+        if (bm_http_servers[i].fd >= 0) bm_http_watch_listener(&bm_http_servers[i]);
 #ifdef BM_KQUEUE
     if (bm_http_parent) { /* a worker exits with its supervisor (Linux uses PR_SET_PDEATHSIG) */
+        struct kevent ev;
         EV_SET(&ev, bm_http_parent, EVFILT_PROC, EV_ADD, NOTE_EXIT, 0, &bm_http_dead);
-        if (kevent(q, &ev, 1, NULL, 0, NULL) != 0) _exit(0);
+        if (kevent(bm_http_q, &ev, 1, NULL, 0, NULL) != 0) _exit(0);
     }
 #endif
-    for (;;) {
+    while (bm_http_active > 0 || bm_http_conns) {
         if (bm_out_len) bm_out_flush(); /* handler logs reach pipes and files promptly */
 #ifdef BM_KQUEUE
-        int n = kevent(q, NULL, 0, events, 256, NULL);
+        int n = kevent(bm_http_q, NULL, 0, events, 256, NULL);
 #else
-        int n = epoll_wait(q, events, 256, -1);
+        int n = epoll_wait(bm_http_q, events, 256, -1);
 #endif
         if (n < 0) { if (errno == EINTR) continue; break; }
         bm_http_refresh_date();
         for (int i = 0; i < n; i++) {
 #ifdef BM_KQUEUE
-            bm_http_conn *c = events[i].udata;
+            void *tag = events[i].udata;
             bool readable = events[i].filter == EVFILT_READ, broken = (events[i].flags & EV_ERROR) != 0;
-            bool eof = false;
 #else
-            bm_http_conn *c = events[i].data.ptr;
+            void *tag = events[i].data.ptr;
             bool readable = events[i].events & (EPOLLIN | EPOLLRDHUP), broken = events[i].events & (EPOLLHUP | EPOLLERR);
+#endif
             bool eof = false;
-#endif
-            if (!c) {
-                while (bm_http_may_accept()) {
-                    int fd = accept(lfd, NULL, NULL);
-                    if (fd < 0) break;
-                    bm_http_load_add(1);
-                    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
-                    int one = 1;
-                    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-                    bm_http_conn *nc = bm_alloc(sizeof *nc);
-                    memset(nc, 0, sizeof *nc);
-                    nc->fd = fd;
-                    nc->want_read = true;
-#ifdef BM_KQUEUE
-                    struct kevent cev;
-                    EV_SET(&cev, fd, EVFILT_READ, EV_ADD, 0, 0, nc);
-                    kevent(q, &cev, 1, NULL, 0, NULL);
-#else
-                    struct epoll_event cev = { .events = EPOLLIN | EPOLLRDHUP, .data.ptr = nc };
-                    epoll_ctl(q, EPOLL_CTL_ADD, fd, &cev);
-#endif
-                }
+            if (bm_http_is_server(tag)) {
+                bm_http_accept(tag);
                 continue;
             }
+            bm_http_conn *c = tag;
             if (c == &bm_http_dead) {
 #ifdef BM_KQUEUE
                 if (events[i].filter == EVFILT_PROC) _exit(0);
@@ -3101,11 +3234,20 @@ static void bm_http_loop(int lfd, bm_fn h) {
                 continue;
             }
             bool ok = !broken;
+            bm_http_attach(c);
             if (readable && c->want_read) {
                 for (;;) {
                     if (c->in_cap - c->in_len < 4096) {
-                        c->in_cap = c->in_cap ? c->in_cap * 2 : 8192;
-                        c->in = bm_realloc(c->in, c->in_cap);
+                        size_t cap = c->in_cap ? c->in_cap * 2 : 8192;
+                        if (c->in_shared) { /* more than the shared buffer holds: move to its own */
+                            char *p = bm_alloc(cap);
+                            memcpy(p, c->in, c->in_len);
+                            c->in = p;
+                            c->in_shared = false;
+                        } else {
+                            c->in = bm_realloc(c->in, cap);
+                        }
+                        c->in_cap = cap;
                     }
                     size_t room = c->in_cap - c->in_len;
                     ssize_t r = read(c->fd, c->in + c->in_len, room);
@@ -3121,12 +3263,15 @@ static void bm_http_loop(int lfd, bm_fn h) {
             }
             /* handle, write, and handle again while flushing unblocks pipelined requests */
             while (ok) {
-                if (c->in_len && !c->close_after) ok = bm_http_process(c, h);
+                if (c->in_len && !c->close_after) ok = bm_http_process(c);
                 if (ok && c->out_len) ok = bm_http_flush(c);
                 if (!(ok && c->stalled && c->out_len == 0)) break;
             }
+            /* a stopped server finishes the request in hand, then closes its connections */
+            if (c->srv->fd < 0 && c->in_len == 0) c->close_after = true;
             if (ok && c->out_len == 0 && (c->close_after || eof)) ok = false;
             if (!ok) {
+                bm_http_detach(c);
                 bm_http_close(c);
 #ifdef BM_KQUEUE
                 for (int j = i + 1; j < n; j++)
@@ -3134,6 +3279,7 @@ static void bm_http_loop(int lfd, bm_fn h) {
 #endif
                 continue;
             }
+            bm_http_detach(c);
             /* interest: write while output is pending; read unless output is backed up */
             bool want_write = c->out_len > 0, want_read = !(c->stalled || eof || (c->close_after && c->out_len));
 #ifdef BM_KQUEUE
@@ -3141,17 +3287,19 @@ static void bm_http_loop(int lfd, bm_fn h) {
             int nm = 0;
             if (want_write != c->want_write) EV_SET(&mods[nm++], c->fd, EVFILT_WRITE, want_write ? EV_ADD : EV_DELETE, 0, 0, c);
             if (want_read != c->want_read) EV_SET(&mods[nm++], c->fd, EVFILT_READ, want_read ? EV_ENABLE : EV_DISABLE, 0, 0, c);
-            if (nm) kevent(q, mods, nm, NULL, 0, NULL);
+            if (nm) kevent(bm_http_q, mods, nm, NULL, 0, NULL);
 #else
             if (want_write != c->want_write || want_read != c->want_read) {
                 struct epoll_event wev = { .events = (want_read ? EPOLLIN | EPOLLRDHUP : 0) | (want_write ? EPOLLOUT : 0), .data.ptr = c };
-                epoll_ctl(q, EPOLL_CTL_MOD, c->fd, &wev);
+                epoll_ctl(bm_http_q, EPOLL_CTL_MOD, c->fd, &wev);
             }
 #endif
             c->want_write = want_write;
             c->want_read = want_read;
         }
     }
+    close(bm_http_q);
+    bm_http_q = -1;
 }
 
 /* ---- workers: the parent supervises; each child runs the event loop */
@@ -3171,7 +3319,7 @@ static void bm_http_on_stop(int sig) {
             if (kids[w] > 0) kill(kids[w], SIGTERM);
 }
 
-static pid_t bm_http_spawn(int lfd, bm_int w, bm_fn handler) {
+static pid_t bm_http_spawn(bm_int w) {
     pid_t pid = fork();
     if (pid != 0) return pid;
     /* child */
@@ -3183,14 +3331,15 @@ static pid_t bm_http_spawn(int lfd, bm_int w, bm_fn handler) {
 #endif
     if (getppid() != bm_http_parent) _exit(0); /* the supervisor died before prctl */
     bm_http_refresh_date();
-    bm_http_loop(lfd, handler);
-    _exit(1);
+    bm_http_loop();
+    bm_out_flush();
+    _exit(0);
 }
 
 /* Forks `workers` children and keeps them running: a worker that dies (a trap in a handler)
  * is replaced, after a second's pause if it died within a second of starting. SIGTERM and
  * SIGINT stop the workers and then the supervisor. */
-static void bm_http_supervise(int lfd, bm_int workers, bm_fn handler) {
+static void bm_http_supervise(bm_int workers) {
     bm_http_parent = getpid();
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
@@ -3204,10 +3353,11 @@ static void bm_http_supervise(int lfd, bm_int workers, bm_fn handler) {
     bm_http_nkids = workers;
     bm_http_kids = kids;
     for (bm_int w = 0; w < workers; w++) {
-        kids[w] = bm_http_spawn(lfd, w, handler);
+        kids[w] = bm_http_spawn(w);
         born[w] = time(NULL);
     }
-    while (!bm_http_stop_sig) {
+    bm_int alive = workers;
+    while (!bm_http_stop_sig && alive > 0) {
         int st;
         pid_t pid = waitpid(-1, &st, 0);
         if (pid < 0) {
@@ -3217,12 +3367,26 @@ static void bm_http_supervise(int lfd, bm_int workers, bm_fn handler) {
         for (bm_int w = 0; w < workers; w++) {
             if (kids[w] != pid) continue;
             if (bm_http_stop_sig) break;
+            /* a worker whose servers all stopped exits cleanly; one that crashed is replaced */
+            if (WIFEXITED(st) && WEXITSTATUS(st) == 0) {
+                kids[w] = 0;
+                alive--;
+                break;
+            }
+            /* Killed by a stop signal (the process group was signalled, and this thread saw the
+             * worker exit before the handler ran): that's a stop, not a crash. */
+            if (WIFSIGNALED(st) && (WTERMSIG(st) == SIGTERM || WTERMSIG(st) == SIGINT || WTERMSIG(st) == SIGKILL)) {
+                kids[w] = 0;
+                bm_http_stop_sig = WTERMSIG(st) == SIGKILL ? SIGTERM : WTERMSIG(st);
+                break;
+            }
             if (time(NULL) - born[w] < 1) sleep(1); /* crash loop: don't spin */
             if (bm_http_loads) atomic_store(&bm_http_loads[w], 0);
-            kids[w] = bm_http_spawn(lfd, w, handler);
+            kids[w] = bm_http_spawn(w);
             born[w] = time(NULL);
         }
     }
+    if (!bm_http_stop_sig) return; /* every worker finished */
     int sig = bm_http_stop_sig ? bm_http_stop_sig : SIGTERM;
     for (bm_int w = 0; w < workers; w++) if (kids[w] > 0) kill(kids[w], SIGTERM);
     while (waitpid(-1, NULL, 0) > 0 || errno == EINTR) {}
@@ -3232,10 +3396,25 @@ static void bm_http_supervise(int lfd, bm_int workers, bm_fn handler) {
     _exit(128 + sig);
 }
 
-void bm_native_httpServe(bm_int port, bm_str host, bm_int workers, bm_fn handler) {
+void bm_http_run(void) {
+    if (bm_http_active == 0) return;
+    bm_out_flush();
+    bm_int workers = bm_http_want_workers;
+    if (workers <= 1) {
+        bm_http_refresh_date();
+        bm_http_loop();
+        return;
+    }
+    void *m = mmap(NULL, (size_t)workers * sizeof(int64_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
+    if (m != MAP_FAILED) { bm_http_loads = m; bm_http_nworkers = workers; }
+    bm_http_supervise(workers);
+}
+
+bm_int bm_native_httpListen(bm_int port, bm_str host, bm_fn handler) {
     signal(SIGPIPE, SIG_IGN);
+    if (bm_http_nservers == BM_HTTP_MAX_SERVERS) { bm_sb_push_cstr(&bm_native_err, "too many servers"); return -1; }
     int lfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (lfd < 0) { bm_native_fail(errno, "socket", host); return; }
+    if (lfd < 0) { bm_native_fail(errno, "socket", host); return -1; }
     int one = 1;
     setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
     struct sockaddr_in addr;
@@ -3244,24 +3423,411 @@ void bm_native_httpServe(bm_int port, bm_str host, bm_int workers, bm_fn handler
     addr.sin_port = htons((uint16_t)port);
     const char *h = host.p->len ? host.p->data : "0.0.0.0";
     if (strcmp(h, "localhost") == 0) h = "127.0.0.1";
-    if (inet_pton(AF_INET, h, &addr.sin_addr) != 1) { bm_native_fail(EINVAL, "listen", host); close(lfd); return; }
+    if (inet_pton(AF_INET, h, &addr.sin_addr) != 1) { bm_native_fail(EINVAL, "listen", host); close(lfd); return -1; }
     if (bind(lfd, (struct sockaddr *)&addr, sizeof addr) != 0) {
-        bm_sb_push_cstr(&bm_native_err, errno == EADDRINUSE ? "EADDRINUSE: address already in use " : "listen failed ");
-        bm_sb_push_cstr(&bm_native_err, h);
-        bm_sb_push_char(&bm_native_err, ':');
+        bm_sb_push_cstr(&bm_native_err, errno == EADDRINUSE ? "Failed to start server. Is port " : "Failed to start server on port ");
         bm_sb_push_int(&bm_native_err, port);
+        bm_sb_push_cstr(&bm_native_err, errno == EADDRINUSE ? " in use?" : "");
         close(lfd);
-        return;
+        return -1;
     }
-    if (listen(lfd, 4096) != 0) { bm_native_fail(errno, "listen", host); close(lfd); return; }
+    if (listen(lfd, 4096) != 0) { bm_native_fail(errno, "listen", host); close(lfd); return -1; }
     fcntl(lfd, F_SETFL, fcntl(lfd, F_GETFL) | O_NONBLOCK);
-    bm_out_flush();
-    if (workers <= 1) {
-        bm_http_refresh_date();
-        bm_http_loop(lfd, handler);
-        return;
+    socklen_t len = sizeof addr;
+    getsockname(lfd, (struct sockaddr *)&addr, &len);
+    int id = bm_http_nservers++;
+    bm_env_retain(handler.env); /* kept for the life of the program */
+    bm_http_servers[id] = (bm_http_server){ .fd = lfd, .port = ntohs(addr.sin_port), .handler = handler };
+    bm_http_active++;
+    if (bm_http_q >= 0) bm_http_watch_listener(&bm_http_servers[id]); /* started from a handler */
+    return id;
+}
+
+bm_int bm_native_httpPort(bm_int id) { return id >= 0 && id < bm_http_nservers ? bm_http_servers[id].port : 0; }
+
+/* Stops accepting; open connections finish the request in hand and close. */
+void bm_native_httpStop(bm_int id, bool force) {
+    if (id < 0 || id >= bm_http_nservers || bm_http_servers[id].fd < 0) return;
+    close(bm_http_servers[id].fd);
+    bm_http_servers[id].fd = -1;
+    bm_http_active--;
+    for (bm_http_conn *c = bm_http_conns, *next; c; c = next) {
+        next = c->next;
+        if (c->srv != &bm_http_servers[id]) continue;
+        if (force || (c->in_len == 0 && c->out_len == 0 && c != bm_http_cur)) {
+            if (c == bm_http_cur) { c->close_after = true; continue; }
+            bm_http_close(c);
+        } else {
+            c->close_after = true;
+        }
     }
-    void *m = mmap(NULL, (size_t)workers * sizeof(int64_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
-    if (m != MAP_FAILED) { bm_http_loads = m; bm_http_nworkers = workers; }
-    bm_http_supervise(lfd, workers, handler);
+}
+
+void bm_native_httpWorkers(bm_int n) {
+    if (n > bm_http_want_workers) bm_http_want_workers = n > 1024 ? 1024 : n;
+}
+
+/* ================================================================== URLs */
+
+static bool bm_url_special(const char *scheme, size_t n) {
+    return (n == 4 && memcmp(scheme, "http", 4) == 0) || (n == 5 && memcmp(scheme, "https", 5) == 0) || (n == 2 && memcmp(scheme, "ws", 2) == 0) ||
+           (n == 3 && memcmp(scheme, "wss", 3) == 0) || (n == 3 && memcmp(scheme, "ftp", 3) == 0) || (n == 4 && memcmp(scheme, "file", 4) == 0);
+}
+
+static const char *bm_url_default_port(const char *scheme, size_t n) {
+    if (n == 4 && memcmp(scheme, "http", 4) == 0) return "80";
+    if (n == 5 && memcmp(scheme, "https", 5) == 0) return "443";
+    if (n == 2 && memcmp(scheme, "ws", 2) == 0) return "80";
+    if (n == 3 && memcmp(scheme, "wss", 3) == 0) return "443";
+    if (n == 3 && memcmp(scheme, "ftp", 3) == 0) return "21";
+    return NULL;
+}
+
+/* Length of a scheme at the start of s (letters, then letters/digits/+-.), then ':'; 0 if none. */
+static size_t bm_url_scheme_len(const char *s, size_t n) {
+    if (n == 0 || !((s[0] | 32) >= 'a' && (s[0] | 32) <= 'z')) return 0;
+    for (size_t i = 1; i < n; i++) {
+        char c = s[i];
+        if (c == ':') return i;
+        if (!(((c | 32) >= 'a' && (c | 32) <= 'z') || (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.')) return 0;
+    }
+    return 0;
+}
+
+/* Appends `s` percent-encoding bytes a URL can't hold as-is in this part. */
+static void bm_url_push_encoded(bm_sb *sb, const char *s, size_t n, bool query) {
+    static const char hex[] = "0123456789ABCDEF";
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        bool enc = c <= 0x20 || c >= 0x7f || c == '"' || c == '<' || c == '>' || (!query && (c == '`' || c == '{' || c == '}')) || (query && c == '\'');
+        if (enc) {
+            char e[3] = { '%', hex[c >> 4], hex[c & 15] };
+            bm_sb_push(sb, e, 3);
+        } else {
+            bm_sb_push_char(sb, (char)c);
+        }
+    }
+}
+
+/* Removes "." and ".." segments from an absolute path (in place in sb). */
+static void bm_url_normalize_path(bm_sb *out, const char *p, size_t n) {
+    /* segments stack as offsets into out */
+    size_t starts[256];
+    int depth = 0;
+    out->len = 0;
+    size_t i = 0;
+    if (n == 0 || p[0] != '/') { bm_sb_push_char(out, '/'); }
+    while (i < n) {
+        if (p[i] == '/') i++;
+        size_t j = i;
+        while (j < n && p[j] != '/') j++;
+        size_t len = j - i;
+        bool last = j >= n;
+        bool dot = (len == 1 && p[i] == '.') || (len == 3 && (memcmp(p + i, "%2e", 3) == 0 || memcmp(p + i, "%2E", 3) == 0));
+        bool dotdot = (len == 2 && p[i] == '.' && p[i + 1] == '.');
+        if (dotdot) {
+            if (depth > 0) out->len = starts[--depth];
+            if (last) bm_sb_push_char(out, '/');
+        } else if (dot) {
+            if (last) bm_sb_push_char(out, '/');
+        } else {
+            if (depth < 256) starts[depth++] = (size_t)out->len;
+            bm_sb_push_char(out, '/');
+            bm_url_push_encoded(out, p + i, len, false);
+        }
+        i = j;
+        if (i < n && p[i] == '/' && i + 1 == n) { /* trailing slash */
+            bm_sb_push_char(out, '/');
+            break;
+        }
+    }
+    if (out->len == 0) bm_sb_push_char(out, '/');
+}
+
+typedef struct bm_url_parts {
+    bm_sb proto, host, port, path, search, hash, userinfo;
+    bool authority, has_query, has_hash;
+} bm_url_parts;
+
+static void bm_url_free(bm_url_parts *u) {
+    bm_sb_free(&u->proto); bm_sb_free(&u->host); bm_sb_free(&u->port);
+    bm_sb_free(&u->path); bm_sb_free(&u->search); bm_sb_free(&u->hash); bm_sb_free(&u->userinfo);
+}
+
+/* Parses an absolute URL; false if it isn't one. */
+static bool bm_url_parse_abs(const char *s, size_t n, bm_url_parts *u) {
+    size_t sl = bm_url_scheme_len(s, n);
+    if (sl == 0) return false;
+    for (size_t i = 0; i < sl; i++) bm_sb_push_char(&u->proto, (char)(s[i] >= 'A' && s[i] <= 'Z' ? s[i] + 32 : s[i]));
+    bm_sb_push_char(&u->proto, ':');
+    bool special = bm_url_special(u->proto.data, sl);
+    size_t i = sl + 1;
+    /* hash and query end the rest */
+    size_t hash_at = n, query_at = n;
+    for (size_t k = i; k < n; k++) if (s[k] == '#') { hash_at = k; break; }
+    for (size_t k = i; k < hash_at; k++) if (s[k] == '?') { query_at = k; break; }
+    size_t path_end = query_at;
+    bool has_auth = (i + 1 < n && (s[i] == '/' || (special && s[i] == '\\')) && (s[i + 1] == '/' || (special && s[i + 1] == '\\')));
+    if (has_auth) {
+        u->authority = true;
+        i += 2;
+        size_t a = i;
+        while (i < path_end && s[i] != '/' && !(special && s[i] == '\\')) i++;
+        /* authority s[a..i): userinfo (kept for href), host, port */
+        size_t at = a;
+        for (size_t k = a; k < i; k++) if (s[k] == '@') at = k + 1;
+        if (at > a) bm_url_push_encoded(&u->userinfo, s + a, at - 1 - a, false);
+        size_t colon = i;
+        if (at < i && s[at] == '[') {
+            size_t rb = at;
+            while (rb < i && s[rb] != ']') rb++;
+            for (size_t k = rb; k < i; k++) if (s[k] == ':') { colon = k; break; }
+        } else {
+            for (size_t k = at; k < i; k++) if (s[k] == ':') { colon = k; break; }
+        }
+        for (size_t k = at; k < colon; k++) bm_sb_push_char(&u->host, (char)(s[k] >= 'A' && s[k] <= 'Z' ? s[k] + 32 : s[k]));
+        if (special && u->host.len == 0) return false;
+        if (colon < i) {
+            size_t ps = colon + 1;
+            for (size_t k = ps; k < i; k++) if (s[k] < '0' || s[k] > '9') return false;
+            while (ps + 1 < i && s[ps] == '0') ps++; /* "080" → "80" */
+            if (ps < i) {
+                long port = strtol(s + ps, NULL, 10);
+                if (port > 65535) return false;
+                const char *def = bm_url_default_port(u->proto.data, sl);
+                if (!def || (size_t)(i - ps) != strlen(def) || memcmp(s + ps, def, strlen(def)) != 0) bm_sb_push(&u->port, s + ps, i - ps);
+            }
+        }
+    }
+    if (special) {
+        bm_url_normalize_path(&u->path, s + i, path_end - i);
+    } else {
+        bm_url_push_encoded(&u->path, s + i, path_end - i, false);
+    }
+    u->has_query = query_at < hash_at;
+    u->has_hash = hash_at < n;
+    if (query_at < hash_at && hash_at - query_at > 1) bm_url_push_encoded(&u->search, s + query_at, hash_at - query_at, true);
+    if (hash_at < n && n - hash_at > 1) bm_url_push_encoded(&u->hash, s + hash_at, n - hash_at, false);
+    return true;
+}
+
+/* The common case — `http(s)://host[:port]/path[?query][#hash]` with nothing to encode or
+ * normalize: its part boundaries (no allocation). False: take the full parser. */
+typedef struct bm_url_bounds { size_t scheme, host, host_end, port, port_end, path, query, hash; bool default_port; } bm_url_bounds;
+
+static bool bm_url_scan(const char *s, size_t n, bm_url_bounds *b) {
+    size_t sl = n >= 7 && memcmp(s, "http://", 7) == 0 ? 4 : n >= 8 && memcmp(s, "https://", 8) == 0 ? 5 : 0;
+    if (!sl) return false;
+    size_t h = sl + 3, i = h, colon = 0;
+    for (; i < n && s[i] != '/' && s[i] != '?' && s[i] != '#'; i++) {
+        char c = s[i];
+        if (c == ':') colon = i;
+        else if (c == '@' || c == '[' || c == '\\' || (c >= 'A' && c <= 'Z') || (unsigned char)c <= ' ' || (unsigned char)c >= 0x7f) return false;
+    }
+    size_t host_end = colon ? colon : i;
+    if (host_end == h) return false;
+    size_t port_at = colon ? colon + 1 : i;
+    for (size_t k = port_at; k < i; k++) if (s[k] < '0' || s[k] > '9') return false;
+    if (colon && (i - port_at == 0 || s[port_at] == '0' || i - port_at > 5)) return false;
+    size_t path_at = i, q = n, hash = n;
+    if (path_at == n || s[path_at] != '/') return false; /* "http://host" → path "/" */
+    for (size_t k = path_at; k < n; k++) {
+        unsigned char c = (unsigned char)s[k];
+        if (c <= ' ' || c >= 0x7f || c == '"' || c == '<' || c == '>' || c == '`' || c == '{' || c == '}' || c == '\\' || c == '\'') return false;
+        if (c == '#') { hash = k; break; }
+        if (c == '?' && q == n) q = k;
+        if (c == '.' && q == n && s[k - 1] == '/') return false; /* dot segments: normalize */
+        if (c == '%' && q == n) return false;                    /* %2e etc. */
+    }
+    b->scheme = sl;
+    b->host = h;
+    b->host_end = host_end;
+    b->port = port_at;
+    b->port_end = i;
+    b->path = path_at;
+    b->query = q < hash ? q : hash;
+    b->hash = hash;
+    b->default_port = colon && ((sl == 4 && i - port_at == 2 && memcmp(s + port_at, "80", 2) == 0) || (sl == 5 && i - port_at == 3 && memcmp(s + port_at, "443", 3) == 0));
+    return true;
+}
+
+static bool bm_url_fast(const char *s, size_t n, bm_arr *out) {
+    bm_url_bounds b;
+    if (!bm_url_scan(s, n, &b)) return false;
+    bm_str parts[6];
+    parts[0] = bm_str_from(s, b.scheme + 1);
+    parts[1] = bm_str_from(s + b.host, b.host_end - b.host);
+    parts[2] = b.port < b.port_end && !b.default_port ? bm_str_from(s + b.port, b.port_end - b.port) : BM_EMPTY_STR;
+    parts[3] = bm_str_from(s + b.path, b.query - b.path);
+    parts[4] = b.hash - b.query > 1 ? bm_str_from(s + b.query, b.hash - b.query) : BM_EMPTY_STR;
+    parts[5] = n - b.hash > 1 ? bm_str_from(s + b.hash, n - b.hash) : BM_EMPTY_STR;
+    *out = bm_arr_with_capacity(&bm_type_str, 6);
+    for (int k = 0; k < 6; k++) bm_arr_push(out, &bm_type_str, &parts[k]);
+    return true;
+}
+
+/* Parses `input` (resolved against `base` when relative) into u; false if it isn't a URL. */
+static bool bm_url_parse_full(bm_str input, bm_str base, bm_url_parts *u) {
+    const char *s = input.p->data;
+    size_t n = (size_t)input.p->len;
+    while (n && (unsigned char)*s <= ' ') { s++; n--; }
+    while (n && (unsigned char)s[n - 1] <= ' ') n--;
+    memset(u, 0, sizeof *u);
+    bool ok = bm_url_parse_abs(s, n, u);
+    if (!ok && base.p->len) {
+        bm_url_free(u);
+        memset(u, 0, sizeof *u);
+        bm_url_parts b = {0};
+        if (bm_url_parse_abs(base.p->data, (size_t)base.p->len, &b)) {
+            bm_sb abs = {0};
+            bm_sb_push(&abs, b.proto.data, (size_t)b.proto.len);
+            if (n >= 2 && s[0] == '/' && s[1] == '/') {
+                bm_sb_push(&abs, s, n);
+            } else {
+                bm_sb_push(&abs, "//", 2);
+                if (b.userinfo.len) { bm_sb_push(&abs, b.userinfo.data, (size_t)b.userinfo.len); bm_sb_push_char(&abs, '@'); }
+                bm_sb_push(&abs, b.host.data, (size_t)b.host.len);
+                if (b.port.len) { bm_sb_push_char(&abs, ':'); bm_sb_push(&abs, b.port.data, (size_t)b.port.len); }
+                if (n && s[0] == '/') {
+                    bm_sb_push(&abs, s, n);
+                } else if (n && s[0] == '?') {
+                    bm_sb_push(&abs, b.path.data, (size_t)b.path.len);
+                    bm_sb_push(&abs, s, n);
+                } else if (n && s[0] == '#') {
+                    bm_sb_push(&abs, b.path.data, (size_t)b.path.len);
+                    if (b.has_query) bm_sb_push_char(&abs, '?');
+                    if (b.search.len > 1) bm_sb_push(&abs, b.search.data + 1, (size_t)b.search.len - 1);
+                    bm_sb_push(&abs, s, n);
+                } else if (n == 0) {
+                    bm_sb_push(&abs, b.path.data, (size_t)b.path.len);
+                    if (b.has_query) bm_sb_push_char(&abs, '?');
+                    if (b.search.len > 1) bm_sb_push(&abs, b.search.data + 1, (size_t)b.search.len - 1);
+                } else {
+                    size_t dir = (size_t)b.path.len;
+                    while (dir && b.path.data[dir - 1] != '/') dir--;
+                    bm_sb_push(&abs, b.path.data, dir);
+                    bm_sb_push(&abs, s, n);
+                }
+            }
+            ok = bm_url_parse_abs(abs.data, (size_t)abs.len, u);
+            bm_sb_free(&abs);
+        }
+        bm_url_free(&b);
+    }
+    if (!ok) bm_url_free(u);
+    return ok;
+}
+
+bm_arr bm_native_urlParse(bm_str input, bm_str base) {
+    bm_arr fast;
+    if (bm_url_fast(input.p->data, (size_t)input.p->len, &fast)) return fast;
+    bm_url_parts u;
+    if (!bm_url_parse_full(input, base, &u)) return BM_EMPTY_ARR;
+    bm_arr out = bm_arr_with_capacity(&bm_type_str, 6);
+    bm_sb *parts[6] = { &u.proto, &u.host, &u.port, &u.path, &u.search, &u.hash };
+    for (int k = 0; k < 6; k++) {
+        bm_str v = bm_str_from_sb(parts[k]);
+        bm_arr_push(&out, &bm_type_str, &v);
+    }
+    bm_url_free(&u);
+    return out;
+}
+
+bm_str bm_native_urlDecode(bm_str s, bool plus) {
+    const char *p = s.p->data;
+    size_t n = (size_t)s.p->len;
+    bool any = false;
+    for (size_t i = 0; i < n; i++) if (p[i] == '%' || (plus && p[i] == '+')) { any = true; break; }
+    if (!any) { bm_str_retain(s); return s; }
+    bm_sb sb = {0};
+    for (size_t i = 0; i < n; i++) {
+        char c = p[i];
+        if (c == '+' && plus) { bm_sb_push_char(&sb, ' '); continue; }
+        if (c == '%' && i + 2 < n) {
+            int h, l;
+            char a = p[i + 1], b = p[i + 2];
+            h = a >= '0' && a <= '9' ? a - '0' : (a | 32) >= 'a' && (a | 32) <= 'f' ? (a | 32) - 'a' + 10 : -1;
+            l = b >= '0' && b <= '9' ? b - '0' : (b | 32) >= 'a' && (b | 32) <= 'f' ? (b | 32) - 'a' + 10 : -1;
+            if (h >= 0 && l >= 0) { bm_sb_push_char(&sb, (char)(h * 16 + l)); i += 2; continue; }
+        }
+        bm_sb_push_char(&sb, c);
+    }
+    return bm_str_from_sb(&sb);
+}
+
+bm_str bm_native_urlEncode(bm_str s) {
+    static const char hex[] = "0123456789ABCDEF";
+    bm_sb sb = {0};
+    for (int64_t i = 0; i < s.p->len; i++) {
+        unsigned char c = (unsigned char)s.p->data[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '*' || c == '-' || c == '.' || c == '_') bm_sb_push_char(&sb, (char)c);
+        else if (c == ' ') bm_sb_push_char(&sb, '+');
+        else { char e[3] = { '%', hex[c >> 4], hex[c & 15] }; bm_sb_push(&sb, e, 3); }
+    }
+    return bm_str_from_sb(&sb);
+}
+
+/* Normalized href of a URL ("" if it isn't one). An already-normal URL is returned as is. */
+bm_str bm_native_urlNormalize(bm_str input, bm_str base) {
+    const char *s = input.p->data;
+    size_t n = (size_t)input.p->len;
+    size_t lead = 0;
+    while (lead < n && (unsigned char)s[lead] <= ' ') lead++;
+    size_t trail = n;
+    while (trail > lead && (unsigned char)s[trail - 1] <= ' ') trail--;
+    bm_url_bounds b;
+    /* already normal: no default port, no empty "?" or "#" */
+    if (lead == 0 && trail == n && bm_url_scan(s, n, &b) && !b.default_port && b.hash - b.query != 1 && n - b.hash != 1) {
+        bm_str_retain(input);
+        return input;
+    }
+    bm_url_parts u;
+    if (!bm_url_parse_full(input, base, &u)) return BM_EMPTY_STR;
+    bm_sb sb = {0};
+    bm_sb_push(&sb, u.proto.data, (size_t)u.proto.len);
+    if (u.authority) {
+        bm_sb_push(&sb, "//", 2);
+        if (u.userinfo.len) { bm_sb_push(&sb, u.userinfo.data, (size_t)u.userinfo.len); bm_sb_push_char(&sb, '@'); }
+        bm_sb_push(&sb, u.host.data, (size_t)u.host.len);
+        if (u.port.len) { bm_sb_push_char(&sb, ':'); bm_sb_push(&sb, u.port.data, (size_t)u.port.len); }
+    }
+    bm_sb_push(&sb, u.path.data, (size_t)u.path.len);
+    if (u.has_query) bm_sb_push_char(&sb, '?');
+    if (u.search.len > 1) bm_sb_push(&sb, u.search.data + 1, (size_t)u.search.len - 1);
+    if (u.has_hash) bm_sb_push_char(&sb, '#');
+    if (u.hash.len > 1) bm_sb_push(&sb, u.hash.data + 1, (size_t)u.hash.len - 1);
+    bm_url_free(&u);
+    return bm_str_from_sb(&sb);
+}
+
+/* Part k of a normalized href: 0 protocol ("http:"), 1 hostname, 2 port, 3 pathname,
+ * 4 search ("?q" or ""), 5 hash ("#h" or ""). */
+bm_str bm_native_urlPart(bm_str href, bm_int k) {
+    const char *s = href.p->data, *end = s + href.p->len;
+    const char *colon = memchr(s, ':', (size_t)href.p->len);
+    if (!colon) return BM_EMPTY_STR;
+    if (k == 0) return bm_str_from(s, (size_t)(colon + 1 - s));
+    const char *p = colon + 1, *host = p, *host_end = p, *port = p, *port_end = p;
+    if (end - p >= 2 && p[0] == '/' && p[1] == '/') {
+        host = p + 2;
+        const char *a = host;
+        while (a < end && *a != '/' && *a != '?' && *a != '#') a++;
+        for (const char *x = host; x < a; x++) if (*x == '@') host = x + 1; /* userinfo */
+        const char *c = host;
+        if (c < a && *c == '[') { while (c < a && *c != ']') c++; }
+        while (c < a && *c != ':') c++;
+        host_end = c;
+        port = c < a ? c + 1 : a;
+        port_end = a;
+        p = a;
+    }
+    if (k == 1) return bm_str_from(host, (size_t)(host_end - host));
+    if (k == 2) return bm_str_from(port, (size_t)(port_end - port));
+    const char *hash = memchr(p, '#', (size_t)(end - p));
+    if (!hash) hash = end;
+    const char *q = memchr(p, '?', (size_t)(hash - p));
+    if (!q) q = hash;
+    if (k == 3) return bm_str_from(p, (size_t)(q - p));
+    if (k == 4) return hash - q > 1 ? bm_str_from(q, (size_t)(hash - q)) : BM_EMPTY_STR;
+    return end - hash > 1 ? bm_str_from(hash, (size_t)(end - hash)) : BM_EMPTY_STR;
 }

@@ -35,8 +35,8 @@ pub(crate) struct ClassInst {
 
 pub(crate) enum ClassWork {
     Ctor { ty: TyId, cname: String },
-    Method { ty: TyId, member: u32, cname: String },
-    Static { decl: u32, member: u32, cname: String },
+    Method { ty: TyId, member: u32, cname: String, msubst: FxMap<u32, TyId> },
+    Static { decl: u32, member: u32, cname: String, subst: FxMap<u32, TyId> },
 }
 
 pub(crate) struct Dispatcher {
@@ -249,7 +249,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.heap_rooted(*obj)
             }
             ExprKind::Index { obj, .. } => self.heap_rooted(*obj) || self.boxed_local(*obj),
-            ExprKind::Ident(_) => self.boxed_local(e),
+            ExprKind::Ident(_) => match self.ident_fact(m, e) {
+                // A module variable that code changes: a call may replace it while we borrow it.
+                Some(crate::check::IdentFact::Const(cm, ci)) => self.mutated_globals.contains(&(cm, ci)),
+                _ => self.boxed_local(e),
+            },
             _ => false,
         }
     }
@@ -479,18 +483,34 @@ impl<'c, 'a> Gen<'c, 'a> {
     // ------------------------------------------------------------ methods
 
     /// C name of method `member` of the class instance `owner_ty` (queued for emission).
-    fn method_instance(&mut self, owner_ty: TyId, member: u32) -> String {
-        if let Some(n) = self.method_insts.get(&(owner_ty, member)) {
+    /// A method's C function; `msubst` instantiates a generic method's own type parameters.
+    fn method_instance(&mut self, owner_ty: TyId, member: u32, msubst: &FxMap<u32, TyId>) -> String {
+        let mut targs: Vec<(u32, TyId)> = msubst.iter().map(|(&k, &v)| (k, v)).collect();
+        targs.sort();
+        if targs.is_empty() {
+            if let Some(n) = self.method_insts.get(&(owner_ty, member)) {
+                return n.clone();
+            }
+        } else if let Some(n) = self.generic_method_insts.get(&(owner_ty, member, targs.clone())) {
             return n.clone();
         }
         let ci = self.class_inst(owner_ty);
-        let (params, ret) = self.own_method_sig(ci.decl, member, &ci.subst);
+        let mut subst = ci.subst.clone();
+        subst.extend(msubst.iter().map(|(&k, &v)| (k, v)));
+        let (params, ret) = self.own_method_sig(ci.decl, member, &subst);
         let mname = self.sym(self.c.class_member_decl(ci.decl, member).name).replace('#', "P_");
-        let cname = format!("M{}_{mname}", ci.name);
-        self.method_insts.insert((owner_ty, member), cname.clone());
+        let cname = if targs.is_empty() {
+            let n = format!("M{}_{mname}", ci.name);
+            self.method_insts.insert((owner_ty, member), n.clone());
+            n
+        } else {
+            let n = format!("M{}_{mname}_{}", ci.name, self.generic_method_insts.len());
+            self.generic_method_insts.insert((owner_ty, member, targs), n.clone());
+            n
+        };
         let proto = self.self_proto(&cname, &ci.name, &params, ret);
         let _ = writeln!(self.protos, "static {proto};");
-        self.class_work.push(ClassWork::Method { ty: owner_ty, member, cname: cname.clone() });
+        self.class_work.push(ClassWork::Method { ty: owner_ty, member, cname: cname.clone(), msubst: msubst.clone() });
         cname
     }
 
@@ -504,19 +524,22 @@ impl<'c, 'a> Gen<'c, 'a> {
         (params, self.c.types.subst(ret, subst))
     }
 
-    pub(crate) fn static_method_instance(&mut self, decl: u32, member: u32) -> String {
-        let key = (TyId(u32::MAX - decl), member);
-        if let Some(n) = self.method_insts.get(&key) {
+    /// A static method's C function (one per type-argument list for a generic one).
+    pub(crate) fn static_method_instance(&mut self, decl: u32, member: u32, subst: FxMap<u32, TyId>) -> String {
+        let mut targs: Vec<(u32, TyId)> = subst.iter().map(|(&k, &v)| (k, v)).collect();
+        targs.sort();
+        let key = (decl, member, targs);
+        if let Some(n) = self.static_insts.get(&key) {
             return n.clone();
         }
-        let (params, ret) = self.own_method_sig(decl, member, &FxMap::default());
+        let (params, ret) = self.own_method_sig(decl, member, &subst);
         let cls: String = self.c.class_names[decl as usize].chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
         let mname = self.sym(self.c.class_member_decl(decl, member).name).replace('#', "P_");
-        let cname = format!("S{decl}_{cls}_{mname}");
-        self.method_insts.insert(key, cname.clone());
+        let cname = if subst.is_empty() { format!("S{decl}_{cls}_{mname}") } else { format!("S{decl}_{cls}_{mname}_{}", self.static_insts.len()) };
+        self.static_insts.insert(key, cname.clone());
         let proto = self.fn_proto(&cname, &params, ret, &FxMap::default(), false);
         let _ = writeln!(self.protos, "static {proto};");
-        self.class_work.push(ClassWork::Static { decl, member, cname: cname.clone() });
+        self.class_work.push(ClassWork::Static { decl, member, cname: cname.clone(), subst });
         cname
     }
 
@@ -544,6 +567,11 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     /// Code calling method `name` on receiver `recv` (of class type `recv_ty`) with `argv`.
     pub(crate) fn method_call_code(&mut self, recv: &str, recv_ty: TyId, name: Sym, sup: bool, argv: Vec<String>) -> String {
+        self.method_call_code_with(recv, recv_ty, name, sup, argv, &FxMap::default())
+    }
+
+    /// `msubst`: a generic method's type arguments at this call.
+    pub(crate) fn method_call_code_with(&mut self, recv: &str, recv_ty: TyId, name: Sym, sup: bool, argv: Vec<String>, msubst: &FxMap<u32, TyId>) -> String {
         let Some(ClassMemberRef::Method(mm) | ClassMemberRef::Getter(mm)) = self.c.class_member(recv_ty, name) else { return "0".into() };
         let Some((decl, _)) = self.c.class_of(recv_ty) else { return "0".into() };
         let mut all = Vec::new();
@@ -554,7 +582,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             let owner = self.c.upcast_to(recv_ty, mm.owner).unwrap_or(recv_ty);
             let ot = self.ctype(owner);
             all.push(if owner == recv_ty { recv.to_string() } else { format!("({ot})({recv})") });
-            self.method_instance(owner, mm.member)
+            self.method_instance(owner, mm.member, msubst)
         };
         all.extend(argv);
         format!("{f}({})", all.join(", "))
@@ -581,6 +609,14 @@ impl<'c, 'a> Gen<'c, 'a> {
         let ast = self.ast(m);
         let ExprKind::Call { callee, .. } = &ast.expr(e).kind else { return Val::plain("0", ty) };
         let ExprKind::Member { obj, optional: mopt, .. } = &ast.expr(*callee).kind else { return Val::plain("0", ty) };
+        // A generic method's type arguments at this call.
+        let mut msubst = FxMap::default();
+        if let Some(fact) = self.facts(m).calls.get(&e).cloned() {
+            for (p, t) in &fact.targs {
+                let t = self.inst(*t);
+                msubst.insert(*p, t);
+            }
+        }
         let ret = match self.c.class_member(recv, name) {
             Some(ClassMemberRef::Method(mm)) => self.c.method_ret(&mm),
             _ => {
@@ -588,10 +624,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                 return Val::plain("0", ty);
             }
         };
+        let ret = self.c.types.subst(ret, &msubst);
         if sup {
             let bn = self.ctype(recv);
             let argv = self.args_pub(args, params);
-            let code = self.method_call_code(&format!("({bn})self_"), recv, name, true, argv);
+            let code = self.method_call_code_with(&format!("({bn})self_"), recv, name, true, argv, &msubst);
             return self.finish_call_pub(&code, ret, ty);
         }
         let v = self.expr(*obj);
@@ -604,7 +641,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             self.open_block(&format!("if ({present}) {{"));
             let rv = self.project(v, recv);
             let argv = self.args_pub(args, params);
-            let code = self.method_call_code(&rv.code, recv, name, false, argv);
+            let code = self.method_call_code_with(&rv.code, recv, name, false, argv, &msubst);
             let inner = self.c.types.without_undefined(ty);
             let r = self.finish_call_pub(&code, ret, inner);
             let r = self.coerce(r, ty);
@@ -623,7 +660,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         let v = self.project(v, recv);
         let v = if self.heap_rooted(*obj) { self.own(v) } else { v };
         let argv = self.args_pub(args, params);
-        let code = self.method_call_code(&v.code, recv, name, false, argv);
+        let code = self.method_call_code_with(&v.code, recv, name, false, argv, &msubst);
         self.finish_call_pub(&code, ret, ty)
     }
 
@@ -886,23 +923,25 @@ impl<'c, 'a> Gen<'c, 'a> {
                 };
                 let _ = writeln!(self.funcs, "static {proto} {{\n{code}}}\n");
             }
-            ClassWork::Method { ty, member, cname } => {
+            ClassWork::Method { ty, member, cname, msubst } => {
                 let ci = self.class_inst(ty);
                 let m = self.c.classes[ci.decl as usize].module;
                 let fd = self.c.member_fn(ci.decl, member);
-                let (params, ret) = self.own_method_sig(ci.decl, member, &ci.subst);
+                let mut subst = ci.subst.clone();
+                subst.extend(msubst);
+                let (params, ret) = self.own_method_sig(ci.decl, member, &subst);
                 let proto = self.self_proto(&cname, &ci.name, &params, ret);
                 let ps: Vec<(u32, TyId, bool)> = fd.params.iter().zip(&params).map(|(p, fp)| (p.span.start, fp.ty, fp.inout)).collect();
-                let code = self.function_body(m, ci.subst.clone(), &ps, ret, FnBodyKind::Block(fd.body), None, Some((fd.name_span.start, ty)), None);
+                let code = self.function_body(m, subst, &ps, ret, FnBodyKind::Block(fd.body), None, Some((fd.name_span.start, ty)), None);
                 let _ = writeln!(self.funcs, "static {proto} {{\n{code}}}\n");
             }
-            ClassWork::Static { decl, member, cname } => {
+            ClassWork::Static { decl, member, cname, subst } => {
                 let m = self.c.classes[decl as usize].module;
                 let fd = self.c.member_fn(decl, member);
-                let (params, ret) = self.own_method_sig(decl, member, &FxMap::default());
+                let (params, ret) = self.own_method_sig(decl, member, &subst);
                 let proto = self.fn_proto(&cname, &params, ret, &FxMap::default(), false);
                 let ps: Vec<(u32, TyId, bool)> = fd.params.iter().zip(&params).map(|(p, fp)| (p.span.start, fp.ty, fp.inout)).collect();
-                let code = self.function_body(m, FxMap::default(), &ps, ret, FnBodyKind::Block(fd.body), None, None, None);
+                let code = self.function_body(m, subst, &ps, ret, FnBodyKind::Block(fd.body), None, None, None);
                 let _ = writeln!(self.funcs, "static {proto} {{\n{code}}}\n");
             }
         }

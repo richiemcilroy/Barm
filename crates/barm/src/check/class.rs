@@ -33,6 +33,8 @@ pub(crate) struct CMethod {
     pub(crate) member: u32,
     pub(crate) params: Vec<FnParam>,
     pub(crate) param_names: Vec<Sym>,
+    /// A generic static method's own type parameters.
+    pub(crate) tparams: Vec<u32>,
     /// `None` until inferred on the owner (see `method_ret`).
     pub(crate) ret: Option<TyId>,
     /// Declared `throws` (or inferred like `ret`; `Some(NEVER)` when the body can't throw).
@@ -328,7 +330,15 @@ impl<'a> Checker<'a> {
                 }
                 MemberKind::Method(f) | MemberKind::Getter(f) => {
                     let getter = matches!(mem.kind, MemberKind::Getter(_));
-                    let scope: Vec<(Sym, TyId)> = if mem.is_static { Vec::new() } else { tscope.clone() };
+                    let mut scope: Vec<(Sym, TyId)> = if mem.is_static { Vec::new() } else { tscope.clone() };
+                    let mut mtparams = Vec::new();
+                    if !getter {
+                        for tp in &f.tparams {
+                            let id = self.new_gparam(tp.name, None);
+                            scope.push((tp.name, self.types.intern(Ty::Param(id))));
+                            mtparams.push(id);
+                        }
+                    }
                     let (ps, names) = self.member_params(f, &scope);
                     if getter && !ps.is_empty() {
                         self.report(Diagnostic::new("T0818", mem.name_span, format!("getter `{n}` can't take parameters")));
@@ -356,6 +366,7 @@ impl<'a> Checker<'a> {
                         member: mi,
                         params: ps,
                         param_names: names,
+                        tparams: mtparams,
                         ret,
                         throws,
                         map,
@@ -487,6 +498,10 @@ impl<'a> Checker<'a> {
 
     fn check_override(&mut self, base: &CMethod, over: &CMethod, n: &str) {
         let span = over.span;
+        if !base.tparams.is_empty() || !over.tparams.is_empty() {
+            self.report(Diagnostic::new("U0015", span, format!("generic method `{n}` can't be overridden (or override another method) yet")));
+            return;
+        }
         if base.getter != over.getter {
             let (a, b) = if base.getter { ("a getter", "a method") } else { ("a method", "a getter") };
             self.report(Diagnostic::new("T0807", span, format!("`{n}` is {a} in the base class but {b} here")));
@@ -583,11 +598,15 @@ impl<'a> Checker<'a> {
                 }
             }
         };
-        let tscope: Vec<(Sym, TyId)> = if mem.is_static {
+        // The method's own type parameters (a generic method), after the class's.
+        let mm = info.methods.iter().chain(info.statics.iter()).find(|x| x.owner == c && x.member == member);
+        let own: Vec<(Sym, TyId)> = f.tparams.iter().zip(mm.map(|m| m.tparams.clone()).unwrap_or_default()).map(|(tp, id)| (tp.name, self.types.intern(Ty::Param(id)))).collect();
+        let mut tscope: Vec<(Sym, TyId)> = if mem.is_static {
             Vec::new()
         } else {
             self.class_decl(c).tparams.iter().zip(&info.params).map(|(tp, &id)| (tp.name, self.types.intern(Ty::Param(id)))).collect()
         };
+        tscope.extend(own);
         let this = if mem.is_static { None } else { Some(ThisInfo { ty: info.this_ty, ctor: is_ctor }) };
         let sig = Sig { tparams: Vec::new(), params, param_names: f.params.iter().map(|p| p.name).collect(), ret: ret.unwrap_or(ERROR), throws: throws.unwrap_or(UNKNOWN), rest: false };
         let (r, errs) = self.check_decl_body(m, f, &sig, &tscope, ret, this, Some(c));

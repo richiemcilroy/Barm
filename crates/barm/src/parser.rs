@@ -7,7 +7,7 @@ use crate::source::{FileId, Span};
 pub fn parse(src: &str, file: FileId, interner: &mut Interner) -> (Ast, Vec<Diagnostic>) {
     let mut diags = Vec::new();
     let lexed = lexer::lex(src, file, &mut diags);
-    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags };
+    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new() };
     p.module();
     (p.ast, p.diags)
 }
@@ -21,6 +21,8 @@ struct Parser<'a> {
     interner: &'a mut Interner,
     ast: Ast,
     diags: Vec<Diagnostic>,
+    /// Top-level statements: (index of the next item, statement).
+    script_stmts: Vec<(usize, StmtId)>,
 }
 
 impl<'a> Parser<'a> {
@@ -281,6 +283,36 @@ impl<'a> Parser<'a> {
                 self.bump();
             }
         }
+        self.finish_script();
+    }
+
+    /// A module with top-level statements is a script: its statements, and the initializers of
+    /// its module variables, run in source order in a synthesized function `<script>`.
+    fn finish_script(&mut self) {
+        let Some(first) = self.ast.script_span else { return };
+        let mut body = Vec::new();
+        let mut stmt_iter = std::mem::take(&mut self.script_stmts).into_iter().peekable();
+        for ii in 0..self.ast.items.len() {
+            // statements that came before this item
+            while let Some(&(at, s)) = stmt_iter.peek() {
+                if at > ii {
+                    break;
+                }
+                body.push(s);
+                stmt_iter.next();
+            }
+            if let ItemKind::Const { .. } = self.ast.items[ii].kind {
+                let span = self.ast.items[ii].span;
+                body.push(self.mk_stmt(StmtKind::InitGlobal(ii as u32), span));
+            }
+        }
+        body.extend(stmt_iter.map(|(_, s)| s));
+        let span = first;
+        let block = self.mk_stmt(StmtKind::Block(body), span);
+        let name = self.interner.intern("<script>");
+        let f = FnDecl { name, name_span: span, tparams: Vec::new(), params: Vec::new(), ret: None, throws: None, body: block };
+        self.ast.script = Some(self.ast.items.len() as u32);
+        self.ast.items.push(Item { kind: ItemKind::Function(f), span, exported: false });
     }
 
     fn item(&mut self) {
@@ -325,29 +357,22 @@ impl<'a> Parser<'a> {
                     self.ast.items.push(Item { kind: ItemKind::Function(f), span, exported });
                 }
             }
-            Tok::Async => {
-                let span = self.cur_span();
-                self.err("U0003", span, "`async` functions are not supported yet (planned for M6)");
+            // `async function`: Barm's async is synchronous for now (see spec §7b), so `async` is
+            // accepted and has no effect.
+            Tok::Async if self.nth(1) == Tok::Function => {
                 self.bump();
-                if self.at(Tok::Function)
-                    && let Some(f) = self.function() {
-                        let span = start.to(self.prev_span());
-                        self.ast.items.push(Item { kind: ItemKind::Function(f), span, exported });
-                    }
+                if let Some(f) = self.function() {
+                    let span = start.to(self.prev_span());
+                    self.ast.items.push(Item { kind: ItemKind::Function(f), span, exported });
+                }
             }
             Tok::Type if self.nth(1) == Tok::Ident => self.type_alias(start, exported),
             Tok::Interface => self.interface(start, exported),
             Tok::Const => self.const_item(start, exported),
-            Tok::Let | Tok::Var => {
+            Tok::Let => self.const_item(start, exported),
+            Tok::Var => {
                 let kw = self.cur_span();
-                let d = if self.at(Tok::Var) {
-                    Diagnostic::new("X0004", kw, "`var` is not supported").fix(Applicability::Safe, "use `const`", kw, "const")
-                } else {
-                    Diagnostic::new("V0201", kw, "mutable module-level state is not allowed")
-                        .note("instead", "use `const` for module constants, and keep mutable state inside functions")
-                        .fix(Applicability::Maybe, "use `const`", kw, "const")
-                };
-                self.push(d);
+                self.push(Diagnostic::new("X0004", kw, "`var` is not supported").fix(Applicability::Safe, "use `let`", kw, "let"));
                 self.const_item(start, exported);
             }
             Tok::Class | Tok::Abstract => self.class_decl(start, exported, false),
@@ -384,13 +409,15 @@ impl<'a> Parser<'a> {
             }
             Tok::Ident if self.text(self.tok()) == "test" && self.nth(1) == Tok::LParen => self.test_item(start),
             _ => {
+                // A script statement (only the entry module may have them; the checker says so).
                 let s = self.stmt();
                 let span = self.ast.stmts[s as usize].span;
                 if !matches!(self.ast.stmts[s as usize].kind, StmtKind::Error | StmtKind::Empty) {
-                    self.push(
-                        Diagnostic::new("P0201", span, "statements are not allowed at the top level")
-                            .note("instead", "put program logic in `function main() { ... }`; the top level holds only declarations, `const`s and `test(...)` calls"),
-                    );
+                    if exported {
+                        self.err("P0201", span, "only declarations can be exported");
+                    }
+                    self.ast.script_span.get_or_insert(span);
+                    self.script_stmts.push((self.ast.items.len(), s));
                 }
             }
         }
@@ -471,10 +498,7 @@ impl<'a> Parser<'a> {
                 "readonly" => readonly = true,
                 "weak" => weak = true,
                 "override" => {}
-                "async" => {
-                    let span = self.cur_span();
-                    self.err("U0003", span, "`async` methods are not supported yet (planned for M6)");
-                }
+                "async" => {}
                 "declare" => {
                     let span = self.cur_span();
                     self.err("X0021", span, "`declare` is not supported");
@@ -530,10 +554,6 @@ impl<'a> Parser<'a> {
         }
         if self.at(Tok::LParen) || self.at(Tok::Lt) {
             let tparams = self.tparams();
-            if !tparams.is_empty() {
-                let span = start.to(self.prev_span());
-                self.err("U0015", span, "generic methods are not supported yet; make the class generic or use a top-level generic function");
-            }
             let params = self.params();
             let ret = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
             let throws = self.effects_clause();
@@ -867,7 +887,8 @@ impl<'a> Parser<'a> {
     }
 
     fn const_item(&mut self, start: Span, exported: bool) {
-        self.bump(); // const
+        let mutable = self.at(Tok::Let);
+        self.bump(); // const / let
         if self.at(Tok::LBrace) || self.at(Tok::LBracket) {
             let span = self.cur_span();
             self.err("U0006", span, "destructuring is not supported yet; bind the value, then read its fields");
@@ -892,7 +913,7 @@ impl<'a> Parser<'a> {
             self.terminator();
         }
         let span = start.to(self.prev_span());
-        self.ast.items.push(Item { kind: ItemKind::Const { name, name_span, ty, init }, span, exported });
+        self.ast.items.push(Item { kind: ItemKind::Const { name, name_span, ty, init, mutable }, span, exported });
     }
 
     fn test_item(&mut self, start: Span) {
@@ -966,8 +987,14 @@ impl<'a> Parser<'a> {
                         let params = self.params();
                         self.expect(Tok::Arrow, "in the function type");
                         let ret = self.ty();
+                        let throws = if self.at_word("throws") {
+                            self.bump();
+                            Some(self.ty())
+                        } else {
+                            None
+                        };
                         let span = start.to(self.prev_span());
-                        return self.mk_ty(TypeExprKind::Func(params, ret), span);
+                        return self.mk_ty(TypeExprKind::Func(params, ret, throws), span);
                     }
                 self.bump();
                 let t = self.ty();
@@ -1085,8 +1112,9 @@ impl<'a> Parser<'a> {
                     let params = self.params();
                     self.expect(Tok::Colon, "before the method return type");
                     let ret = self.ty();
+                    let throws = self.effects_clause();
                     let span = start.to(self.prev_span());
-                    let ty = self.mk_ty(TypeExprKind::Func(params, ret), span);
+                    let ty = self.mk_ty(TypeExprKind::Func(params, ret, throws), span);
                     fields.push(FieldTy { name, name_span, optional, ty });
                 } else {
                     self.expect(Tok::Colon, "after the field name");
@@ -1573,9 +1601,9 @@ impl<'a> Parser<'a> {
                 );
                 return self.unary();
             }
+            // `await e` is `e`: async is synchronous for now (spec §7b).
             Tok::Await => {
                 self.bump();
-                self.err("U0003", start, "`await` is not supported yet (planned for M6)");
                 return self.unary();
             }
             Tok::Try => {
@@ -1746,9 +1774,14 @@ impl<'a> Parser<'a> {
     fn try_arrow(&mut self) -> Option<ExprId> {
         let start = self.cur_span();
         if self.at(Tok::Async) && matches!(self.nth(1), Tok::LParen | Tok::Ident) {
-            self.err("U0003", start, "`async` functions are not supported yet (planned for M6)");
+            // `async (x) => ...`: accepted, synchronous for now.
+            let save = self.pos;
             self.bump();
-            return self.try_arrow();
+            let r = self.try_arrow();
+            if r.is_none() {
+                self.pos = save;
+            }
+            return r;
         }
         if self.at(Tok::Ident) && self.nth(1) == Tok::Arrow {
             let t = self.bump();
@@ -2011,6 +2044,29 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// `name(params): T { body }` in an object literal: a field holding an arrow function
+    /// (there is no `this` for it to see).
+    fn object_method(&mut self, start: Span) -> Option<ObjField> {
+        let (name, name_span) = self.prop_name()?;
+        if self.at(Tok::Lt) {
+            let span = self.cur_span();
+            self.err("U0015", span, "generic methods in object literals are not supported");
+            self.tparams();
+        }
+        let params = self.params();
+        let ret = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
+        if !self.at(Tok::LBrace) {
+            let msg = format!("expected `{{` to start the method body, found {}", self.found());
+            let span = self.cur_span();
+            self.err("P0001", span, msg);
+            return None;
+        }
+        let body = ArrowBody::Block(self.block());
+        let span = start.to(self.prev_span());
+        let value = self.mk_expr(ExprKind::Arrow(Box::new(ArrowFn { params, ret, body })), span);
+        Some(ObjField { name, name_span, value, quoted: false })
+    }
+
     fn object_literal(&mut self) -> ExprId {
         let start = self.cur_span();
         self.bump(); // {
@@ -2021,9 +2077,9 @@ impl<'a> Parser<'a> {
                 self.err("U0011", fstart, "object spread is not supported yet; list the fields");
                 self.bump();
                 self.assign();
-            } else if self.at(Tok::Str) || self.at(Tok::Int) || self.at(Tok::LBracket) {
+            } else if self.at(Tok::Int) || self.at(Tok::LBracket) {
                 self.push(
-                    Diagnostic::new("X0017", fstart, "string, number and computed keys are not supported in object literals")
+                    Diagnostic::new("X0017", fstart, "number and computed keys are not supported in object literals")
                         .note("instead", "records have identifier field names; use `Map<K, V>` for dynamic keys"),
                 );
                 if self.at(Tok::LBracket) {
@@ -2034,23 +2090,41 @@ impl<'a> Parser<'a> {
                 if self.eat(Tok::Colon) {
                     self.assign();
                 }
-            } else if let Some((name, name_span)) = self.prop_name() {
-                if self.at(Tok::LParen) {
-                    self.err("U0012", fstart, "methods in object literals are not supported yet; use a field holding an arrow function");
-                    self.skip_balanced();
-                    if self.eat(Tok::Colon) {
-                        self.ty();
+            } else if self.at(Tok::Str) {
+                // `"key": value` — valid for a `Record<string, V>` (or a record field of that name).
+                let t = self.bump();
+                let text = self.strings[t.val as usize].clone();
+                let name = self.interner.intern(&text);
+                // A route key ("/users/:id"): its params become field names of `req.params`.
+                for seg in text.split('/') {
+                    if let Some(p) = seg.strip_prefix(':') {
+                        self.interner.intern(p);
                     }
-                    if self.at(Tok::LBrace) {
-                        self.skip_balanced();
-                    }
-                } else if self.eat(Tok::Colon) {
+                }
+                self.interner.intern("params");
+                let name_span = self.span_of(t);
+                if self.expect(Tok::Colon, "after the key") {
                     let value = self.assign();
-                    fields.push(ObjField { name, name_span, value });
+                    fields.push(ObjField { name, name_span, value, quoted: true });
+                }
+            } else if self.at(Tok::Async) && matches!(self.nth(1), Tok::Ident) && self.nth(2) == Tok::LParen {
+                // `async name(params) { ... }`
+                self.bump();
+                if let Some(f) = self.object_method(fstart) {
+                    fields.push(f);
+                }
+            } else if matches!(self.kind(), Tok::Ident) && self.nth(1) == Tok::LParen || self.kind().is_keyword() && self.nth(1) == Tok::LParen {
+                if let Some(f) = self.object_method(fstart) {
+                    fields.push(f);
+                }
+            } else if let Some((name, name_span)) = self.prop_name() {
+                if self.eat(Tok::Colon) {
+                    let value = self.assign();
+                    fields.push(ObjField { name, name_span, value, quoted: false });
                 } else {
                     // Shorthand `{ r }`.
                     let value = self.mk_expr(ExprKind::Ident(name), name_span);
-                    fields.push(ObjField { name, name_span, value });
+                    fields.push(ObjField { name, name_span, value, quoted: false });
                 }
             } else {
                 let msg = format!("expected a field name, found {}", self.found());

@@ -65,7 +65,11 @@ fn check(args: &[String]) -> ExitCode {
         if result.diags.is_empty() {
             println!("check: ok ({files})");
         } else {
-            let mut with_errors: Vec<_> = result.diags.iter().map(|d| d.span.file).collect();
+            // Program files only (errors in the standard library are counted, but it isn't a file of yours).
+            let mut with_errors: Vec<_> = result.diags.iter().map(|d| d.span.file).filter(|&f| {
+                let name = &result.sm.get(f).name;
+                !(name.starts_with("std/") || name.starts_with("node:") || name.starts_with('<'))
+            }).collect();
             with_errors.sort();
             with_errors.dedup();
             let n = result.diags.len();

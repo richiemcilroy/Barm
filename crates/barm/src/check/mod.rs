@@ -34,6 +34,8 @@ pub struct Module {
     pub builtin: bool,
     /// Part of the standard library (the prelude, `node:fs`, ...): may use `__native`.
     pub std: bool,
+    /// Named on the command line (only entry modules may be scripts).
+    pub entry: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -146,11 +148,13 @@ struct Frame {
     try_frames: Vec<Vec<TyId>>,
     /// Inside the operand of a `try` expression.
     try_expr: u32,
+    /// A module variable's initializer (not a closure) — for the "can't throw" message.
+    module_init: bool,
 }
 
 impl Frame {
     fn new(ret: Option<TyId>, name: Option<Sym>, can_throw: bool, throws_decl: Option<TyId>) -> Frame {
-        Frame { ret, returns: Vec::new(), loops: 0, switches: 0, name, can_throw, throws_decl, thrown: Vec::new(), try_frames: Vec::new(), try_expr: 0 }
+        Frame { ret, returns: Vec::new(), loops: 0, switches: 0, name, can_throw, throws_decl, thrown: Vec::new(), try_frames: Vec::new(), try_expr: 0, module_init: false }
     }
 }
 
@@ -176,6 +180,9 @@ struct FnCtx {
     /// Names of locals assigned or changed inside a closure: never narrowed (the closure may run
     /// between the check and the use).
     closure_mutated: HashSet<Sym>,
+    /// `routes` handlers' request parameters and their route (`"/users/:id"`): `req.params`
+    /// is typed from the route.
+    route_locals: Vec<(LocalId, Sym)>,
     /// Active narrowings of paths that go through a class instance (`this.left`): any call may
     /// change them through another reference, so calls forget them.
     heap_paths: Vec<(LocalId, Vec<Sym>)>,
@@ -244,7 +251,11 @@ pub struct Checker<'a> {
     /// Bodies checked in phase A (read-only in phase B) and by this checker.
     checked_bodies: Arc<HashSet<(u32, u32)>>,
     checked_local: HashSet<(u32, u32)>,
+    /// Checking the value of a `Record` literal entry whose key is a route with `:params`.
+    route_key: Option<Sym>,
     pub(crate) consts: Arc<HashMap<(u32, u32), TyId>>,
+    /// Module variables of a script whose initializer can throw (the script checks after it).
+    pub(crate) const_throws: Arc<HashSet<(u32, u32)>>,
     const_in_progress: HashSet<(u32, u32)>,
     exhaustive: HashSet<(u32, StmtId)>,
     fcx: Vec<FnCtx>,
@@ -290,7 +301,9 @@ fn new_checker<'a>(modules: &'a [Module], interner: &'a mut Interner, sm: &'a So
         sig_in_progress: HashSet::default(),
         checked_bodies: Arc::default(),
         checked_local: HashSet::default(),
+        route_key: None,
         consts: Arc::default(),
+        const_throws: Arc::default(),
         const_in_progress: HashSet::default(),
         exhaustive: HashSet::default(),
         fcx: Vec::new(),
@@ -309,6 +322,7 @@ pub fn check_for_build<'a>(modules: &'a [Module], interner: &'a mut Interner, sm
     c.facts = Some(modules.iter().map(|m| ModuleFacts::new(m.ast.exprs.len())).collect());
     c.collect();
     c.resolve_imports();
+    c.bind_web_globals();
     c.find_recursive_aliases();
     for m in 0..modules.len() as u32 {
         c.cur = m;
@@ -330,6 +344,7 @@ pub fn check_program(modules: &[Module], interner: &mut Interner, sm: &SourceMap
     let mut c = new_checker(modules, interner, sm);
     c.collect();
     c.resolve_imports();
+    c.bind_web_globals();
     c.find_recursive_aliases();
     let ta = std::time::Instant::now();
     // Phase A.
@@ -437,7 +452,9 @@ impl<'a> Checker<'a> {
             sig_in_progress: HashSet::default(),
             checked_bodies: self.checked_bodies.clone(),
             checked_local: HashSet::default(),
+            route_key: None,
             consts: self.consts.clone(),
+            const_throws: self.const_throws.clone(),
             const_in_progress: HashSet::default(),
             exhaustive: HashSet::default(),
             fcx: Vec::new(),
@@ -635,6 +652,29 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Binds std/http's web globals (`Bun`, `Response`, ...) in every program module that
+    /// doesn't declare the name itself.
+    fn bind_web_globals(&mut self) {
+        let modules = self.modules;
+        let Some(w) = modules.iter().position(|m| m.path.as_os_str() == "<std>/http") else { return };
+        let ws = self.scopes[w].clone();
+        for (mi, module) in modules.iter().enumerate() {
+            if module.std {
+                continue;
+            }
+            let scope = &mut Arc::make_mut(&mut self.scopes)[mi];
+            for name in crate::driver::WEB_GLOBALS {
+                let Some(sym) = self.interner.lookup(name) else { continue };
+                if let Some(&(decl, span)) = ws.values.get(&sym) {
+                    scope.values.entry(sym).or_insert((decl, span));
+                }
+                if let Some(&(decl, span)) = ws.types.get(&sym) {
+                    scope.types.entry(sym).or_insert((decl, span));
+                }
+            }
+        }
+    }
+
     fn resolve_imports(&mut self) {
         let modules = self.modules;
         for (mi, module) in modules.iter().enumerate() {
@@ -738,6 +778,15 @@ impl<'a> Checker<'a> {
     /// Phase A: everything other modules can depend on.
     fn check_interface(&mut self, m: u32) {
         let ast = self.ast();
+        if let Some(span) = ast.script_span
+            && !self.modules[m as usize].entry
+        {
+            self.done.push(
+                Diagnostic::new("P0201", span, "only the program's entry file can have top-level statements")
+                    .note("why", "importing a module has no side effects; its top level holds only declarations")
+                    .note("instead", "export a function and call it from the entry file"),
+            );
+        }
         let mut test_names: HashMap<&str, Span> = HashMap::default();
         for (ii, item) in ast.items.iter().enumerate() {
             let ii = ii as u32;
@@ -832,17 +881,22 @@ impl<'a> Checker<'a> {
         if let Some(&t) = self.consts.get(&(m, ii)) {
             return t;
         }
-        let ItemKind::Const { name, name_span, ty, init } = &self.modules[m as usize].ast.items[ii as usize].kind else { return ERROR };
+        let ItemKind::Const { name, name_span, ty, init, .. } = &self.modules[m as usize].ast.items[ii as usize].kind else { return ERROR };
+        // In a script, initializers run in the script body, so they can throw like its statements.
+        let script = self.modules[m as usize].ast.script.is_some() && self.modules[m as usize].entry;
         if !self.const_in_progress.insert((m, ii)) {
             let n = self.name(*name).to_string();
             self.done.push(Diagnostic::new("T0308", *name_span, format!("constant `{n}` depends on itself")));
             return ERROR;
         }
         let (ty, init) = (*ty, *init);
-        let t = self.committed(|c| {
+        let (t, throws) = self.committed(|c| {
             c.with_module(m, |c| {
                 c.fcx.push(FnCtx::default());
                 c.fcx.last_mut().unwrap().scopes.push(Vec::new());
+                let mut frame = Frame::new(None, None, script, None);
+                frame.module_init = true;
+                c.fcx.last_mut().unwrap().frames.push(frame);
                 let t = match ty {
                     Some(te) => {
                         let declared = c.resolve_type(te, &[]);
@@ -855,10 +909,14 @@ impl<'a> Checker<'a> {
                         c.check_inferred_binding(found, c.ast().expr(init).span)
                     }
                 };
+                let throws = !c.fcx.last().unwrap().frames[0].thrown.is_empty();
                 c.fcx.pop();
-                t
+                (t, throws)
             })
         });
+        if throws {
+            Arc::make_mut(&mut self.const_throws).insert((m, ii));
+        }
         self.const_in_progress.remove(&(m, ii));
         Arc::make_mut(&mut self.consts).insert((m, ii), t);
         t
@@ -1332,7 +1390,7 @@ impl<'a> Checker<'a> {
                 self.types.note_field_order(t, order);
                 t
             }
-            TypeExprKind::Func(params, ret) => {
+            TypeExprKind::Func(params, ret, throws) => {
                 let ps: Vec<FnParam> = params
                     .iter()
                     .map(|p| {
@@ -1345,7 +1403,16 @@ impl<'a> Checker<'a> {
                     })
                     .collect();
                 let r = self.resolve_type(*ret, tscope);
-                self.types.func(ps, r)
+                let th = match throws {
+                    Some(t) => {
+                        let th = self.resolve_type(*t, tscope);
+                        let span = self.ast().ty(*t).span;
+                        self.check_throws_type(th, span);
+                        th
+                    }
+                    None => NEVER,
+                };
+                self.types.func_throws(ps, r, th)
             }
             TypeExprKind::Named { ns, name, name_span, args } => self.resolve_named(*ns, *name, *name_span, args, span, tscope),
         }
@@ -1507,7 +1574,23 @@ impl<'a> Checker<'a> {
                 );
                 Some(ERROR)
             }
-            "object" | "Object" | "Record" => {
+            // Async is synchronous until M6: a `Promise<T>` is its `T` (see spec §7b).
+            "Promise" => Some(if arity(self, 1) { targs[0] } else { ERROR }),
+            // `Record<string, V>` is a string-keyed `Map` that object literals can build.
+            "Record" => {
+                if !arity(self, 2) {
+                    return Some(ERROR);
+                }
+                if targs[0] != STR && targs[0] != ERROR {
+                    self.report(
+                        Diagnostic::new("X0030", span, "`Record` keys must be `string`")
+                            .note("instead", "declare a record type `{ a: T, b: T }` for fixed keys, or use `Map<K, V>`"),
+                    );
+                    return Some(ERROR);
+                }
+                Some(self.types.intern(Ty::Map(STR, targs[1])))
+            }
+            "object" | "Object" => {
                 self.report(
                     Diagnostic::new("X0030", name_span, format!("`{text}` is not supported"))
                         .note("instead", "declare a record type `{ field: T }`, or use `Map<K, V>` for dynamic keys"),
@@ -1519,9 +1602,8 @@ impl<'a> Checker<'a> {
                 self.report(Diagnostic::new("N0002", name_span, format!("unknown type `{text}`")).fix(Applicability::Safe, format!("use `{lower}`"), name_span, lower));
                 Some(ERROR)
             }
-            "bigint" | "symbol" | "Function" | "Promise" | "Date" | "RegExp" => {
+            "bigint" | "symbol" | "Function" | "Date" | "RegExp" => {
                 let msg = match text {
-                    "Promise" => "`Promise` is not supported yet (async is planned for M6)".to_string(),
                     "Function" => "`Function` is not supported; write the function type: `(x: T) => R`".to_string(),
                     _ => format!("`{text}` is not supported"),
                 };
@@ -1587,7 +1669,11 @@ impl<'a> Checker<'a> {
                     && a.iter().zip(&b).all(|(fa, fb)| fa.name == fb.name && fa.optional == fb.optional)
                     && a.iter().zip(&b).all(|(fa, fb)| self.assignable_in(fa.ty, fb.ty, false, assuming))
             }
-            (Ty::Func(pa, ra), Ty::Func(pb, rb)) => {
+            (Ty::Func(pa, ra, ta), Ty::Func(pb, rb, tb)) => {
+                // A function that can throw can't stand in for one that can't.
+                if ta != NEVER && !self.assignable_in(ta, tb, true, assuming) {
+                    return false;
+                }
                 let (pa, pb) = (self.types.params(pa).to_vec(), self.types.params(pb).to_vec());
                 if pa.len() > pb.len() {
                     // A callback may ignore trailing parameters, but can't demand more.
@@ -1869,9 +1955,12 @@ fn collect_type_refs(ast: &Ast, te: ast::TypeId, out: &mut Vec<(Option<Sym>, Sym
         TypeExprKind::Array(e) => collect_type_refs(ast, *e, out),
         TypeExprKind::Union(ms) => ms.iter().for_each(|&m| collect_type_refs(ast, m, out)),
         TypeExprKind::Record(fs) => fs.iter().for_each(|f| collect_type_refs(ast, f.ty, out)),
-        TypeExprKind::Func(ps, r) => {
+        TypeExprKind::Func(ps, r, th) => {
             ps.iter().filter_map(|p| p.ty).for_each(|t| collect_type_refs(ast, t, out));
             collect_type_refs(ast, *r, out);
+            if let Some(t) = th {
+                collect_type_refs(ast, *t, out);
+            }
         }
         _ => {}
     }

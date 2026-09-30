@@ -424,6 +424,12 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             StmtKind::While(c, _) | StmtKind::For { cond: Some(c), .. } => matches!(ast.expr(*c).kind, ExprKind::Bool(true)),
             StmtKind::For { cond: None, .. } => true,
+            StmtKind::DoWhile(body, _) => self.always_returns_stmt(m, *body),
+            StmtKind::Throw(_) => true,
+            StmtKind::Try { body, catch, finally } => {
+                finally.map(|f| self.always_returns_stmt(m, f)).unwrap_or(false)
+                    || (self.always_returns_stmt(m, *body) && catch.as_ref().map(|c| self.always_returns_stmt(m, c.body)).unwrap_or(true))
+            }
             _ => false,
         }
     }
@@ -725,6 +731,14 @@ impl<'c, 'a> Gen<'c, 'a> {
         let node = ast.stmt(s);
         match &node.kind {
             StmtKind::Empty | StmtKind::Error => {}
+            StmtKind::InitGlobal(ii) => {
+                // `g = init_g();` here, in source order (a script's module variable).
+                let g = self.const_ref(m, *ii);
+                self.line(format!("{} = init_{}();", g.code, g.code));
+                if self.c.const_throws.contains(&(m, *ii)) {
+                    self.error_check();
+                }
+            }
             StmtKind::Expr(e) => {
                 self.push_temps();
                 let v = self.expr(*e);
@@ -1331,6 +1345,22 @@ impl<'c, 'a> Gen<'c, 'a> {
                 } else {
                     target
                 };
+                // A `Record<string, V>` literal: a map built key by key.
+                if let Ty::Map(k, v) = self.tget(target) {
+                    let res = self.tmp(target, "BM_EMPTY_MAP", true);
+                    let (kd, vd) = (self.desc(k), self.desc(v));
+                    let (kct, vct) = (self.ctype(k), self.ctype(v));
+                    for f in fields {
+                        let key = self.lit(self.sym(f.name).to_string().as_bytes());
+                        let vv = self.expr(f.value);
+                        let vv = self.coerce(vv, v);
+                        let vc = self.consume(vv);
+                        let (kn, vn) = (self.fresh("k"), self.fresh("v"));
+                        self.line(format!("{kct} {kn} = {key}; {vct} {vn} = {vc};"));
+                        self.line(format!("bm_map_set(&{}, {kd}, {vd}, &{kn}, &{vn});", res.code));
+                    }
+                    return self.coerce(res, ty);
+                }
                 let Ty::Record(fs) = self.tget(target) else {
                     self.unsupported(span, "an object literal of this type");
                     return Val::plain("0", ty);
@@ -1485,6 +1515,11 @@ impl<'c, 'a> Gen<'c, 'a> {
     pub(crate) fn project(&mut self, v: Val, to: TyId) -> Val {
         if v.ty == to || to == ERROR {
             return v;
+        }
+        // A string narrowed to a literal (`if (path === "/")`): the value is known.
+        if matches!(self.tget(to), Ty::StrLit(_)) && matches!(self.tget(v.ty), Ty::Str) {
+            let d = self.default_value(to);
+            return Val::plain(d, to);
         }
         // Narrowed by `instanceof`: a class viewed as a subclass (or a union member downcast).
         if let Ty::Class(tc, _) = self.tget(to) {
@@ -2047,6 +2082,25 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             Some(MemberFact::NsConst(cm, ci)) => return self.const_ref(cm, ci),
             Some(MemberFact::StaticField(c, mi)) => return self.static_field_ref(c, mi),
+            // `req.params` in a route handler: the record of the route's params, from the map.
+            Some(MemberFact::RouteParams(rt)) => {
+                let base = self.expr(obj);
+                let map_ty = self.c.types.intern(Ty::Map(STR, STR));
+                let mv = self.field(base, name, map_ty, span);
+                let res = self.fresh("rp");
+                let ct = self.ctype(rt);
+                self.line(format!("{ct} {res};"));
+                let Ty::Record(fs) = self.tget(rt) else { return Val::plain("0", ty) };
+                for f in self.c.types.fields(fs).to_vec() {
+                    let fname = self.sym(f.name).to_string();
+                    let key = self.lit(fname.as_bytes());
+                    let (kn, pn) = (self.fresh("k"), self.fresh("p"));
+                    self.line(format!("bm_str {kn} = {key}; bm_str *{pn} = bm_map_get({}, &bm_type_str, &bm_type_str, &{kn});", mv.code));
+                    self.line(format!("{res}.f_{fname} = {pn} ? *{pn} : BM_EMPTY_STR; bm_str_retain({res}.f_{fname});"));
+                }
+                self.b().temps.last_mut().unwrap().push((res.clone(), rt));
+                return self.coerce(Val { code: res, ty: rt, owned: true }, ty);
+            }
             Some(MemberFact::Env(var)) => {
                 let lit = self.lit(self.sym(var).to_string().as_bytes());
                 let (ok, sv) = (self.fresh("ok"), self.fresh("ev"));
@@ -2241,6 +2295,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                         Place { lv: "bm__dummy".into(), ty: ERROR, weak: false }
                     }
                 },
+                Some(IdentFact::Const(cm, ci)) => {
+                    let g = self.const_ref(cm, ci);
+                    Place { lv: g.code, ty: g.ty, weak: false }
+                }
                 _ => {
                     self.unsupported(span, "assigning to this name");
                     Place { lv: "bm__dummy".into(), ty: ERROR, weak: false }
@@ -2445,7 +2503,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         let m = self.cur_m();
         let ast = self.ast(m);
         let ExprKind::Arrow(f) = &ast.expr(e).kind else { unreachable!() };
-        let Ty::Func(ps, ret) = self.tget(fty) else {
+        let Ty::Func(ps, ret, _) = self.tget(fty) else {
             let span = self.expr_span(e);
             self.unsupported(span, "this function value");
             return ArrowInfo { cname: "NULL".into(), env_type: String::new(), captures: Vec::new() };
@@ -2474,7 +2532,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let _ = write!(fields, " {ct} c{j};");
                 }
             }
-            let _ = writeln!(self.typedefs, "typedef struct {env_type} {{ bm_env h;{fields} }} {env_type};");
+            // Environments hold captured values by value: defined after every value struct.
+            let _ = writeln!(self.typedefs, "typedef struct {env_type} {env_type};");
+            let _ = writeln!(self.env_structs, "struct {env_type} {{ bm_env h;{fields} }};");
             if !stack {
                 let mut drops = String::new();
                 for (j, (_, ty, bx)) in captures.iter().enumerate() {
@@ -2661,8 +2721,17 @@ fn collect_exprs_stmt(ast: &ast::Ast, s: StmtId, out: &mut Vec<ExprId>) {
                 }
             }
         }
-        StmtKind::Return(Some(e)) => collect_exprs_expr(ast, *e, out),
+        StmtKind::Return(Some(e)) | StmtKind::Throw(e) => collect_exprs_expr(ast, *e, out),
         StmtKind::Block(ss) => ss.iter().for_each(|&x| collect_exprs_stmt(ast, x, out)),
+        StmtKind::Try { body, catch, finally } => {
+            collect_exprs_stmt(ast, *body, out);
+            if let Some(c) = catch {
+                collect_exprs_stmt(ast, c.body, out);
+            }
+            if let Some(f) = finally {
+                collect_exprs_stmt(ast, *f, out);
+            }
+        }
         _ => {}
     }
 }
@@ -2670,7 +2739,7 @@ fn collect_exprs_stmt(ast: &ast::Ast, s: StmtId, out: &mut Vec<ExprId>) {
 fn collect_exprs_expr(ast: &ast::Ast, e: ExprId, out: &mut Vec<ExprId>) {
     out.push(e);
     match &ast.expr(e).kind {
-        ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::As(x, _) => collect_exprs_expr(ast, *x, out),
+        ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::As(x, _) | ExprKind::Try(x) => collect_exprs_expr(ast, *x, out),
         ExprKind::Binary(_, l, r) | ExprKind::Assign(_, l, r) => {
             collect_exprs_expr(ast, *l, out);
             collect_exprs_expr(ast, *r, out);

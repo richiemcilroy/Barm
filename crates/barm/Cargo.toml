@@ -31,3 +31,8 @@ harness = false
 name = "http"
 path = "../../tests/http.rs"
 harness = false
+
+[[test]]
+name = "parity"
+path = "../../tests/parity.rs"
+harness = false

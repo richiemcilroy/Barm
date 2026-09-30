@@ -16,6 +16,14 @@ impl<'a> Checker<'a> {
         let span = node.span;
         match &node.kind {
             StmtKind::Empty | StmtKind::Error => {}
+            StmtKind::InitGlobal(ii) => {
+                let m = self.cur;
+                self.const_type(m, *ii);
+                if self.const_throws.contains(&(m, *ii)) {
+                    let err = self.error_class();
+                    self.cur_frame().thrown.push(err);
+                }
+            }
             StmtKind::Expr(e) => {
                 self.expr(*e, None);
             }
@@ -738,8 +746,17 @@ fn collect_assigned_stmt(ast: &Ast, s: StmtId, out: &mut Vec<Sym>) {
                 }
             }
         }
-        StmtKind::Return(Some(e)) => collect_assigned_expr(ast, *e, out),
+        StmtKind::Return(Some(e)) | StmtKind::Throw(e) => collect_assigned_expr(ast, *e, out),
         StmtKind::Block(ss) => ss.iter().for_each(|&x| collect_assigned_stmt(ast, x, out)),
+        StmtKind::Try { body, catch, finally } => {
+            collect_assigned_stmt(ast, *body, out);
+            if let Some(c) = catch {
+                collect_assigned_stmt(ast, c.body, out);
+            }
+            if let Some(f) = finally {
+                collect_assigned_stmt(ast, *f, out);
+            }
+        }
         _ => {}
     }
 }
@@ -918,8 +935,17 @@ fn effects_into(ast: &Ast, e: ExprId, fx: &mut Effects) {
 /// The expressions a statement evaluates directly or in nested statements (not inside arrows).
 fn stmt_exprs(ast: &Ast, s: StmtId, out: &mut Vec<ExprId>) {
     match &ast.stmt(s).kind {
-        StmtKind::Expr(e) | StmtKind::Return(Some(e)) => out.push(*e),
+        StmtKind::Expr(e) | StmtKind::Return(Some(e)) | StmtKind::Throw(e) => out.push(*e),
         StmtKind::Let { init: Some(e), .. } => out.push(*e),
+        StmtKind::Try { body, catch, finally } => {
+            stmt_exprs(ast, *body, out);
+            if let Some(c) = catch {
+                stmt_exprs(ast, c.body, out);
+            }
+            if let Some(f) = finally {
+                stmt_exprs(ast, *f, out);
+            }
+        }
         StmtKind::If(c, t, e) => {
             out.push(*c);
             stmt_exprs(ast, *t, out);
@@ -1002,7 +1028,7 @@ fn closure_mutated_into(ast: &Ast, e: ExprId, inside: bool, out: &mut HashSet<Sy
 
 fn collect_children(ast: &Ast, e: ExprId, out: &mut Vec<ExprId>) {
     match &ast.expr(e).kind {
-        ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::As(x, _) => out.push(*x),
+        ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::As(x, _) | ExprKind::Try(x) => out.push(*x),
         ExprKind::Binary(_, l, r) | ExprKind::Assign(_, l, r) => out.extend([*l, *r]),
         ExprKind::Update { target, .. } => out.push(*target),
         ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args, .. } => {
