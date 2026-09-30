@@ -457,10 +457,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             FnBodyKind::Block(s) => {
                 if self.b().tre.as_ref().is_some_and(|t| t.entry.is_none()) {
                     // The looping copy starts with the first term (parameter `tre_a0`). Every
-                    // partial sum the recursion would compute is checked at the end, from the
-                    // smallest and largest prefix sums: 64-bit while they fit, then exact 128-bit.
-                    self.line("bm_int tre_acc = 0, tre_min = 0, tre_max = 0; bool tre_on = false, tre_wide = false;");
-                    self.line("bmg_tre_wide tre_ws;");
+                    // partial sum the recursion would compute is checked at the end (see
+                    // BMG_TRE_ADD): one register while the terms are non-negative, else exact.
+                    self.line("bm_int tre_acc = 0; bmg_tre_wide tre_ws;");
                     self.line("BMG_TRE_ADD(tre_a0);");
                     self.line("tre_top:;");
                 }
@@ -1394,7 +1393,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                         self.line(format!("bm_int {r} = {code};"));
                         self.release_all_temps();
                         self.unwind_for_exit(0);
-                        self.line(format!("if (tre_on) {r} = BMG_TRE_END({r}, {loc});"));
+                        self.line(format!("{r} = BMG_TRE_END({r}, {loc});"));
                         self.line(format!("return {r};"));
                         self.b().temps.pop();
                     }

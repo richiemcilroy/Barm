@@ -1937,48 +1937,42 @@ static void bmg_sort_f64(double *a, bm_int n, bool desc) {
 #else
 #define BMG_THREAD_QOS(a) 1
 #endif
-/* Accumulator recursion elimination (tre_candidate): add a term to the running sum,
- * remembering the smallest and largest prefix sum; at the end, the total must make every
- * suffix sum (total - prefix) fit, as the recursion's own additions would have checked.
- * 64-bit while the prefix sums fit; after that, exact 128-bit state kept out of registers. */
+/* Accumulator recursion elimination (tre_candidate). The recursion computes suffix sums
+ * (the total minus a prefix sum), so each must fit. While every term is non-negative the
+ * prefix sums rise from 0 to the running sum `tre_acc`, and every suffix sum lies between the
+ * base value and the total: checking the final `acc + base` covers them all, in one register.
+ * The first negative term or 64-bit overflow moves the sum to exact 128-bit state, which
+ * remembers the smallest and largest prefix sum, and sets `tre_acc` to INT64_MIN to say so.
+ * One sign test then covers all three: with `acc` >= 0 and `t` >= 0 the wrapped `acc + t` is
+ * negative exactly on overflow, and INT64_MIN + t is negative for every `t` >= 0. */
 typedef struct { __int128 acc, mn, mx; } bmg_tre_wide;
-static __attribute__((noinline, cold)) void bmg_tre_widen(bmg_tre_wide *w, bm_int acc, bm_int mn, bm_int mx, bm_int t) {
-    w->mn = mn < acc ? mn : acc;
-    w->mx = mx > acc ? mx : acc;
-    w->acc = (__int128)acc + t;
-}
-static __attribute__((noinline, cold)) void bmg_tre_add_wide(bmg_tre_wide *w, bm_int t) {
-    if (w->acc < w->mn) w->mn = w->acc;
-    if (w->acc > w->mx) w->mx = w->acc;
+static __attribute__((noinline)) bm_int bmg_tre_add_slow(bmg_tre_wide *w, bm_int acc, bm_int t) {
+    if (acc >= 0) { w->acc = acc; w->mn = 0; w->mx = acc; }
+    else {
+        if (w->acc < w->mn) w->mn = w->acc;
+        if (w->acc > w->mx) w->mx = w->acc;
+    }
     w->acc += t;
+    return INT64_MIN;
 }
-static __attribute__((noinline, cold)) bm_int bmg_tre_end_wide(bmg_tre_wide *w, bm_int b, const char *loc) {
+static __attribute__((noinline, cold)) bm_int bmg_tre_end_slow(bmg_tre_wide *w, bm_int acc, bm_int b, const char *loc) {
+    if (acc >= 0) { w->acc = acc; w->mn = 0; w->mx = acc; }
     __int128 T = w->acc + b;
-#ifndef BARM_UNCHECKED
     if (T - w->mx < INT64_MIN || T - w->mn > INT64_MAX) bm_trap("integer overflow in +", loc);
-#endif
-    (void)loc;
     return (bm_int)T;
 }
-#define BMG_TRE_ADD(t) do { bm_int tre_t_ = (t), tre_n_; \
-    if (__builtin_expect(tre_wide, 0)) bmg_tre_add_wide(&tre_ws, tre_t_); \
-    else if (__builtin_expect(__builtin_add_overflow(tre_acc, tre_t_, &tre_n_), 0)) { bmg_tre_widen(&tre_ws, tre_acc, tre_min, tre_max, tre_t_); tre_wide = true; } \
-    else { tre_min = tre_acc < tre_min ? tre_acc : tre_min; tre_max = tre_acc > tre_max ? tre_acc : tre_max; tre_acc = tre_n_; } \
-    tre_on = true; } while (0)
-static inline bm_int bmg_tre_end64(bm_int acc, bm_int mn, bm_int mx, bm_int b, const char *loc) {
-    bm_int t, u;
-    if (__builtin_add_overflow(acc, b, &t) || __builtin_sub_overflow(t, mx, &u) || __builtin_sub_overflow(t, mn, &u)) {
-        /* the 64-bit total or a difference overflowed: decide exactly */
-        __int128 T = (__int128)acc + b;
-#ifndef BARM_UNCHECKED
-        if (T - mx < INT64_MIN || T - mn > INT64_MAX) bm_trap("integer overflow in +", loc);
+#ifdef BARM_UNCHECKED
+#define BMG_TRE_ADD(t) (tre_acc = (bm_int)((uint64_t)tre_acc + (uint64_t)(t)))
+#define BMG_TRE_END(b, loc) ((void)(loc), (bm_int)((uint64_t)tre_acc + (uint64_t)(b)))
+#else
+#define BMG_TRE_ADD(t) do { bm_int tre_t_ = (t), tre_n_ = (bm_int)((uint64_t)tre_acc + (uint64_t)tre_t_); \
+    if (__builtin_expect((tre_t_ | tre_n_) < 0, 0)) tre_acc = bmg_tre_add_slow(&tre_ws, tre_acc, tre_t_); \
+    else tre_acc = tre_n_; } while (0)
+#define BMG_TRE_END(b, loc) ({ bm_int tre_b_ = (b), tre_r_; \
+    if (__builtin_expect(tre_acc < 0, 0)) tre_r_ = bmg_tre_end_slow(&tre_ws, tre_acc, tre_b_, (loc)); \
+    else if (__builtin_expect(__builtin_add_overflow(tre_acc, tre_b_, &tre_r_), 0)) tre_r_ = bmg_tre_end_slow(&tre_ws, tre_acc, tre_b_, (loc)); \
+    tre_r_; })
 #endif
-        return (bm_int)T;
-    }
-    (void)loc;
-    return t;
-}
-#define BMG_TRE_END(b, loc) (__builtin_expect(tre_wide, 0) ? bmg_tre_end_wide(&tre_ws, (b), (loc)) : bmg_tre_end64(tre_acc, tre_min, tre_max, (b), (loc)))
 #ifdef BARM_UNCHECKED
 /* --unchecked: two's-complement wrapping (defined behaviour, like Rust release builds). */
 #define BM_ADD(T, a, b, loc) ({ T bm__r; (void)__builtin_add_overflow((a), (b), &bm__r); bm__r; })
