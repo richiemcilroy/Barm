@@ -21,6 +21,8 @@ pub enum BuildError {
 pub struct Built {
     pub binary: PathBuf,
     pub cached: bool,
+    /// The program's source files on disk (the entry and everything it imports).
+    pub sources: Vec<PathBuf>,
     /// (check, generate C, C compile)
     pub timings: (Duration, Duration, Duration),
 }
@@ -33,6 +35,11 @@ pub struct Options {
     pub opt: String,
     /// Also write the generated C here.
     pub emit_c: Option<PathBuf>,
+}
+
+/// The files on disk behind a source map (not the standard library's built-in modules).
+pub fn source_paths(sm: &SourceMap) -> Vec<PathBuf> {
+    sm.files.iter().map(|f| f.path.clone()).filter(|p| p.is_file()).collect()
 }
 
 pub fn cache_dir() -> PathBuf {
@@ -73,6 +80,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     let t0 = Instant::now();
     let loaded = driver::load(paths, base).map_err(BuildError::Message)?;
     let driver::Loaded { sm, mut interner, modules, diags } = loaded;
+    let sources = source_paths(&sm);
     if !diags.is_empty() {
         return Err(BuildError::Diagnostics(sm, diags));
     }
@@ -111,7 +119,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     let bin_dir = dir.join("bin");
     let binary = bin_dir.join(&key);
     if binary.is_file() {
-        return Ok(Built { binary, cached: true, timings: (t1 - t0, t2 - t1, Duration::ZERO) });
+        return Ok(Built { binary, cached: true, sources, timings: (t1 - t0, t2 - t1, Duration::ZERO) });
     }
     let c_dir = dir.join("c");
     for d in [&bin_dir, &c_dir] {
@@ -158,7 +166,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     linked?;
     std::fs::rename(&tmp, &binary).map_err(|e| BuildError::Message(format!("can't move the binary into the cache: {e}")))?;
     let t3 = Instant::now();
-    Ok(Built { binary, cached: false, timings: (t1 - t0, t2 - t1, t3 - t2) })
+    Ok(Built { binary, cached: false, sources, timings: (t1 - t0, t2 - t1, t3 - t2) })
 }
 
 fn run_cc(mut cmd: Command, cc: &str, c_path: &Path) -> Result<(), BuildError> {
