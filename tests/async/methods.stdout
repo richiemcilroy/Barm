@@ -1,0 +1,12 @@
+1 102
+caught cache: no zzz
+started
+2
+cache with 102 items
+plain with 1 items
+t2 0 1
+t1 0 102
+t2 1 1
+t1 1 102
+t2 2 1
+t1 2 102

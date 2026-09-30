@@ -1,0 +1,82 @@
+// Async methods: instance, static and inherited ones, through a base class and an interface,
+// interleaving with each other and rejecting with checked errors.
+class NotFound extends Error {}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+interface Named {
+  describe(): Promise<string>
+}
+
+class Store {
+  private items: Map<string, int> = new Map<string, int>()
+  constructor(readonly name: string) {}
+
+  static async open(name: string): Promise<Store> {
+    await sleep(1)
+    return new Store(name)
+  }
+
+  async put(key: string, value: int): Promise<void> {
+    await sleep(1)
+    this.items.set(key, value)
+  }
+
+  async get(key: string): Promise<int> throws NotFound {
+    await sleep(1)
+    const v = this.items.get(key)
+    if (v === undefined) {
+      throw new NotFound(this.name + ": no " + key)
+    }
+    return v
+  }
+
+  async size() {
+    await undefined
+    return this.items.size
+  }
+
+  async describe(): Promise<string> {
+    return this.name + " with " + String(await this.size()) + " items"
+  }
+}
+
+class Cached extends Store {
+  async size() {
+    const n = await super.size()
+    return n + 100
+  }
+}
+
+async function ticker(label: string, s: Store) {
+  for (let i = 0; i < 3; i++) {
+    console.log(label, i, await s.size())
+  }
+}
+
+async function main() {
+  const s: Store = new Cached("cache")
+  await s.put("a", 1)
+  await s.put("b", 2)
+  console.log(try await s.get("a"), await s.size())
+  try {
+    await s.get("zzz")
+  } catch (e) {
+    console.log("caught", e.message)
+  }
+  const pending = s.get("b")
+  console.log("started")
+  console.log(try await pending)
+  const opened = await Store.open("plain")
+  await opened.put("x", 9)
+  const named: Named[] = [s, opened]
+  for (const n of named) {
+    console.log(await n.describe())
+  }
+  const t1 = ticker("t1", s)
+  const t2 = ticker("t2", opened)
+  await t1
+  await t2
+}

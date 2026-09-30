@@ -487,6 +487,11 @@ impl<'a> Parser<'a> {
                 is_abstract = true;
                 continue;
             }
+            if self.at(Tok::Async) && self.at_modifier() {
+                self.bump();
+                is_async = true;
+                continue;
+            }
             if !self.at(Tok::Ident) || !self.at_modifier() {
                 break;
             }
