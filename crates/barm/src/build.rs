@@ -54,22 +54,59 @@ pub fn cache_dir() -> PathBuf {
 }
 
 /// The C compiler: `$CC`, else the newest clang we can find (Homebrew LLVM is usually newer
-/// than the system compiler, and generates faster code), else `cc`.
-fn c_compiler() -> String {
+/// than the system compiler, and generates faster code), else `cc`. On macOS, with the SDK to
+/// pass as `-isysroot`.
+fn c_compiler() -> (String, Option<String>) {
     if let Ok(cc) = std::env::var("CC") {
-        return cc;
+        return (cc, None);
     }
     // macOS: the system clang generates code as fast as Homebrew's LLVM (bench/run.py) and
-    // starts faster, and it links in the same invocation.
-    if cfg!(target_vendor = "apple") && Path::new("/usr/bin/cc").is_file() {
-        return "/usr/bin/cc".into();
+    // starts faster, and it links in the same invocation. Called directly rather than through
+    // /usr/bin/cc, an xcrun trampoline that adds 10–15 ms to every build.
+    if cfg!(target_vendor = "apple") {
+        if let Some((clang, sdk)) = apple_toolchain() {
+            return (clang, Some(sdk));
+        }
+        if Path::new("/usr/bin/cc").is_file() {
+            return ("/usr/bin/cc".into(), None);
+        }
     }
     for candidate in ["/opt/homebrew/opt/llvm/bin/clang", "/usr/local/opt/llvm/bin/clang", "/usr/lib/llvm-21/bin/clang", "/usr/lib/llvm-20/bin/clang"] {
         if Path::new(candidate).is_file() {
-            return candidate.to_string();
+            return (candidate.to_string(), None);
         }
     }
-    "cc".into()
+    ("cc".into(), None)
+}
+
+/// Xcode's clang and the macOS SDK, found with xcrun once and remembered in the cache.
+fn apple_toolchain() -> Option<(String, String)> {
+    let file = cache_dir().join("toolchain");
+    if let Ok(text) = std::fs::read_to_string(&file) {
+        let mut lines = text.lines();
+        if let (Some(clang), Some(sdk)) = (lines.next(), lines.next())
+            && Path::new(clang).is_file()
+            && Path::new(sdk).is_dir()
+        {
+            return Some((clang.to_string(), sdk.to_string()));
+        }
+    }
+    let run = |args: &[&str]| -> Option<String> {
+        let out = Command::new("xcrun").args(args).output().ok()?;
+        let s = String::from_utf8(out.stdout).ok()?.trim().to_string();
+        (out.status.success() && !s.is_empty()).then_some(s)
+    };
+    let clang = run(&["--find", "clang"])?;
+    let sdk = run(&["--show-sdk-path"])?;
+    if !Path::new(&clang).is_file() || !Path::new(&sdk).is_dir() {
+        return None;
+    }
+    let _ = std::fs::create_dir_all(cache_dir());
+    let tmp = file.with_extension(format!("tmp{}", std::process::id()));
+    if std::fs::write(&tmp, format!("{clang}\n{sdk}\n")).is_ok() {
+        let _ = std::fs::rename(&tmp, &file);
+    }
+    Some((clang, sdk))
 }
 
 /// The linker driver. Homebrew clang loads its LTO library on every link (~40 ms), so when we
@@ -107,7 +144,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     if let Some(p) = &opts.emit_c {
         std::fs::write(p, codegen::standalone(&c_src)).map_err(|e| BuildError::Message(format!("can't write {}: {e}", p.display())))?;
     }
-    let cc = c_compiler();
+    let (cc, sysroot) = c_compiler();
     // BARM_CFLAGS adds C compiler flags (e.g. "-fsanitize=address,undefined -g" to audit memory safety).
     let extra = std::env::var("BARM_CFLAGS").unwrap_or_default();
     // No FMA contraction: `a * b + c` rounds twice, exactly as in JavaScript (and it's faster on
@@ -122,6 +159,10 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     // The program links with a big main stack (below), so main needn't check for one.
     if cfg!(target_vendor = "apple") && !extra.contains("-fsanitize") {
         flags.push("-DBMG_MAIN_STACK=1");
+    }
+    if let Some(sdk) = &sysroot {
+        flags.push("-isysroot");
+        flags.push(sdk);
     }
     flags.extend(extra.split_whitespace());
     let flag_text = flags.join(" ");
