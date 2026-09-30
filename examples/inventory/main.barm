@@ -1,0 +1,79 @@
+// Classes: an inventory with an abstract base, overrides, statics, a weak back-reference and a
+// cyclic tree of categories.
+
+abstract class Item {
+  constructor(readonly name: string, protected cents: int) {}
+  abstract kind(): string
+  price(): f64 {
+    return this.cents / 100
+  }
+  toString(): string {
+    return `${this.kind()} ${this.name} ($${this.price().toFixed(2)})`
+  }
+}
+
+class Book extends Item {
+  constructor(name: string, cents: int, readonly author: string) {
+    super(name, cents)
+  }
+  kind(): string {
+    return "book"
+  }
+}
+
+class Gadget extends Item {
+  static readonly TAX = 0.2
+  kind(): string {
+    return "gadget"
+  }
+  price(): f64 {
+    return super.price() * (1 + Gadget.TAX)
+  }
+}
+
+cyclic class Category {
+  children: Category[] = []
+  items: Item[] = []
+  weak parent: Category | undefined = undefined
+  constructor(readonly name: string) {}
+
+  add(child: Category): Category {
+    child.parent = this
+    this.children.push(child)
+    return child
+  }
+
+  path(): string {
+    const p = this.parent
+    return p === undefined ? this.name : `${p.path()}/${this.name}`
+  }
+
+  total(): f64 {
+    let t = 0.0
+    for (const i of this.items) {
+      t += i.price()
+    }
+    for (const c of this.children) {
+      t += c.total()
+    }
+    return t
+  }
+}
+
+function main() {
+  const root = new Category("shop")
+  const books = root.add(new Category("books"))
+  const tech = root.add(new Category("tech"))
+  books.items.push(new Book("Dune", 999, "Herbert"))
+  tech.items.push(new Gadget("Radio", 2500))
+  for (const c of [books, tech]) {
+    for (const i of c.items) {
+      console.log(`${c.path()}: ${i}`)
+    }
+  }
+  console.log(`total ${root.total().toFixed(2)}`)
+}
+
+test("gadgets include tax", () => {
+  expect(new Gadget("x", 100).price()).toBeCloseTo(1.2)
+})
