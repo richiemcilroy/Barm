@@ -1,0 +1,10 @@
+// Native-only: a counted push loop needing more elements than an int can count traps before
+// it starts, instead of reserving a wrapped-around size.
+function main() {
+  console.log("start")
+  const xs: int[] = []
+  for (let i = -4611686018427387904; i < 4611686018427387905; i++) {
+    xs.push(i)
+  }
+  console.log(xs.length)
+}

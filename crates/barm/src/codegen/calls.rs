@@ -604,7 +604,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                         // A local made unique before the loop: no ownership check per push.
                         let b = self.b();
                         let key = b.unique.iter().copied().find(|k| b.locals.get(k).is_some_and(|l| l.access == lv));
+                        let exact = key.is_some_and(|k| b.exact_pushes.contains(&k));
                         match key.and_then(|k| b.push_caps.get(&k).cloned()) {
+                            // Capacity reserved before the loop for every push it makes.
+                            Some(_) if exact => self.line(format!("BMG_PUSH_X({ect}, &{lv}, {code});")),
                             // Only pushes can reallocate it in this loop: compare against a cached capacity.
                             Some(cap) => self.line(format!("BMG_PUSH_C({ect}, &{lv}, {cap}, {d}, {code});")),
                             None => {
