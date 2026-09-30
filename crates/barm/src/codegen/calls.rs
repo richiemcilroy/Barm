@@ -47,6 +47,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                     subst.insert(*p, t);
                 }
                 let cname = self.instance(fm, fi, subst);
+                if self.is_async_fn(fm, fi) {
+                    let argv = self.args(args, &params, Some((fm, fi)));
+                    let ret = self.inst(fact.ret);
+                    return self.spawn_call(&cname, &argv, ret, ty);
+                }
                 let mut argv = self.args(&args[..args.len().min(params.len())], &params, Some((fm, fi)));
                 if let Some(rest) = fact.rest {
                     // `...xs`: the remaining arguments become one array.
@@ -158,10 +163,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let _ = c;
                 self.new_object(e, ty, args, &params, span)
             }
-            Callee::NewPromise => {
-                self.unsupported(span, "`new Promise`");
-                Val::plain("0", ty)
-            }
+            Callee::NewPromise => self.new_promise(args, ty),
             Callee::SuperCtor(base) => {
                 let base = self.inst(base);
                 self.super_ctor_call(base, args, &params);
@@ -211,6 +213,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 out.push(format!("&{}", pl.lv));
             } else {
                 let v = self.expr(a.expr);
+                // An argument before one that awaits is read before the call suspends.
+                let v = if args[i + 1..].iter().any(|later| self.awaits_in(later.expr)) { self.snapshot(v) } else { v };
                 // A value reached through a class instance (or a closure's cell) could be released by
                 // the callee through another reference: keep it alive for the call.
                 let v = if !v.owned && self.is_rc(v.ty) && (self.heap_rooted(a.expr) || (has_inout && self.is_place_expr(a.expr))) { self.own(v) } else { v };
@@ -1232,6 +1236,35 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 self.line(format!("double {out} = 0; bool {ok} = bm_parse_float({}, &{out});", s.code));
                 self.optional_from(&ok, Val::plain(out, F64), ty)
+            }
+            // Timers (real async).
+            (None, "setTimeout" | "setInterval") => {
+                let cb = self.expr(args[0].expr);
+                let ms = match args.get(1) {
+                    Some(a) => {
+                        let v = self.expr(a.expr);
+                        self.coerce(v, F64).code
+                    }
+                    None => "0".into(),
+                };
+                let repeat = name == "setInterval";
+                self.tmp(INT, &format!("bm_set_timer({}, {ms}, {repeat})", cb.code), false)
+            }
+            (None, "clearTimeout" | "clearInterval") => {
+                let v = self.expr(args[0].expr);
+                if self.tget(v.ty) == Ty::Int {
+                    self.line(format!("bm_clear_timer({});", v.code));
+                } else {
+                    let present = self.truthy_val(v.clone());
+                    let id = self.project(v, INT);
+                    self.line(format!("if ({present}) bm_clear_timer({});", id.code));
+                }
+                Val::plain("0", VOID)
+            }
+            (None, "queueMicrotask") => {
+                let cb = self.expr(args[0].expr);
+                self.line(format!("bm_queue_microtask({});", cb.code));
+                Val::plain("0", VOID)
             }
             (None, "isNaN") => {
                 let v = self.expr(args[0].expr);

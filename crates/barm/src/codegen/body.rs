@@ -66,6 +66,10 @@ pub(crate) struct Body {
     pub ctor_class: Option<TyId>,
     /// Enclosing `try` blocks of this function: (label of the handler, scope depth to unwind to).
     pub handlers: Vec<(String, usize)>,
+    /// An async function's body (module, item): its locals live in a frame (see asyncfn.rs).
+    pub async_fn: Option<(u32, u32)>,
+    /// Awaited calls embedded in the frame: (union member, frame type).
+    pub children: Vec<(String, String)>,
     /// Enclosing `try` blocks that have a `finally`, innermost last: (the `finally` block, scope
     /// depth outside the `try`). `return`, `break` and `continue` run them on the way out.
     pub finallies: Vec<(StmtId, usize)>,
@@ -203,6 +207,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             params: FxSet::default(),
             ctor_class: None,
             handlers: Vec::new(),
+            async_fn: None,
+            children: Vec::new(),
             finallies: Vec::new(),
         });
     }
@@ -386,6 +392,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             params: params.iter().filter(|p| !p.2).map(|p| p.0).collect(),
             ctor_class,
             handlers: Vec::new(),
+            async_fn: self.pending_async.take(),
+            children: Vec::new(),
             finallies: Vec::new(),
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
@@ -446,6 +454,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             FnBodyKind::Init => self.unwind_to(0),
         }
         let b = self.bodies.pop().unwrap();
+        if b.async_fn.is_some() {
+            self.last_children = b.children;
+        }
         b.out
     }
 
@@ -539,8 +550,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                             {
                                 mutated.insert(k);
                             }
+                            // (An async arrow's task can outlive the call: its environment is on the heap.)
                             for a in args {
-                                if matches!(ast.expr(a.expr).kind, ExprKind::Arrow(_)) {
+                                if matches!(&ast.expr(a.expr).kind, ExprKind::Arrow(f) if !(f.is_async && crate::async_enabled())) {
                                     stack_arrows.insert(a.expr);
                                 }
                             }
@@ -1357,8 +1369,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 if let Some(fact) = self.facts(m).calls.get(&e)
                     && let Callee::NewPromise = fact.callee
                 {
-                    self.unsupported(span, "`new Promise`");
-                    return Val::plain("0", ty);
+                    return self.new_promise(args, ty);
                 }
                 let name = match &ast.expr(*callee).kind {
                     ExprKind::Ident(s) => self.sym(*s).to_string(),
@@ -1526,7 +1537,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             ExprKind::This => self.ident(e, ty),
             ExprKind::Try(x) => self.expr(*x),
             // Synchronous until real async is on (BARM_ASYNC): the value itself.
-            ExprKind::Await(x) => self.expr(*x),
+            ExprKind::Await(x) if !crate::async_enabled() => self.expr(*x),
+            ExprKind::Await(x) => self.await_expr(e, *x),
             ExprKind::Super => Val::plain("0", ty),
         }
     }
@@ -1963,13 +1975,13 @@ impl<'c, 'a> Gen<'c, 'a> {
                 Val { code: res, ty, owned }
             }
             Eq | Ne | LooseEq | LooseNe => {
-                let lv = self.expr(l);
+                let lv = self.expr_before(l, &[r]);
                 let rv = self.expr(r);
                 let eq = self.equality(lv, rv, true);
                 Val::plain(if matches!(op, Eq | LooseEq) { eq } else { format!("(!{eq})") }, BOOL)
             }
             Lt | Gt | Le | Ge => {
-                let lv = self.expr(l);
+                let lv = self.expr_before(l, &[r]);
                 let rv = self.expr(r);
                 let o = op.as_str();
                 if self.c.types.is_string(lv.ty) {
@@ -1980,7 +1992,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 Val::plain(format!("({} {o} {})", a, b), BOOL)
             }
             Add if ty == STR => {
-                let lv = self.expr(l);
+                let lv = self.expr_before(l, &[r]);
                 let rv = self.expr(r);
                 if lv.ty == STR && rv.ty == STR {
                     return self.tmp(STR, &format!("bm_str_concat({}, {})", lv.code, rv.code), true);
@@ -1997,12 +2009,12 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.tmp(STR, &format!("bm_str_from_sb(&{sbv})"), true)
             }
             Add | Sub | Mul | Div | Rem | Pow => {
-                let lv = self.expr(l);
+                let lv = self.expr_before(l, &[r]);
                 let rv = self.expr(r);
                 self.arith(op, lv, rv, ty, span)
             }
             BitAnd | BitOr | BitXor | Shl | Shr | UShr => {
-                let lv = self.expr(l);
+                let lv = self.expr_before(l, &[r]);
                 let rv = self.expr(r);
                 let ct = self.ctype(ty);
                 let (a, b) = (lv.code, rv.code);
@@ -2468,6 +2480,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let pv = self.fresh("p");
                 self.line(format!("{ct} *{pv} = &{};", p.lv));
                 let cur = Val::plain(format!("(*{pv})"), p.ty);
+                // `x += await f()` reads `x` before it waits, as JavaScript does.
+                let cur = if self.awaits_in(value) { self.snapshot(cur) } else { cur };
                 let rhs = self.expr(value);
                 let result = match bop {
                     BinOp::Nullish => {
@@ -2621,6 +2635,10 @@ impl<'c, 'a> Gen<'c, 'a> {
             };
             env_locals.insert(*k, Local { access, ty: *ty });
         }
+        if f.is_async && crate::async_enabled() {
+            self.emit_async_arrow(&cname, m, subst, &params, ret, kind, env_locals);
+            return ArrowInfo { cname, env_type, captures };
+        }
         let code = self.arrow_body(m, subst, &params, ret, kind, env_locals);
         let _ = writeln!(self.funcs, "static {proto} {{\n    (void)env_;\n{code}}}\n");
         ArrowInfo { cname, env_type, captures }
@@ -2649,6 +2667,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             params: params.iter().filter(|p| !p.2).map(|p| p.0).collect(),
             ctor_class: None,
             handlers: Vec::new(),
+            async_fn: self.pending_async.take(),
+            children: Vec::new(),
             finallies: Vec::new(),
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
@@ -2684,7 +2704,15 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             FnBodyKind::Init => {}
         }
-        self.bodies.pop().unwrap().out
+        let b = self.bodies.pop().unwrap();
+        if b.async_fn.is_some() {
+            self.last_children = b.children;
+        }
+        b.out
+    }
+
+    pub(crate) fn arrow_body_pub(&mut self, m: u32, subst: FxMap<u32, TyId>, params: &[(u32, TyId, bool)], ret: TyId, kind: FnBodyKind, env_locals: FxMap<u32, Local>) -> String {
+        self.arrow_body(m, subst, params, ret, kind, env_locals)
     }
 }
 
@@ -2735,7 +2763,7 @@ pub(crate) fn collect_exprs_stmt_pub(ast: &ast::Ast, s: StmtId, out: &mut Vec<Ex
     collect_exprs_stmt(ast, s, out)
 }
 
-fn collect_exprs_stmt(ast: &ast::Ast, s: StmtId, out: &mut Vec<ExprId>) {
+pub(crate) fn collect_exprs_stmt(ast: &ast::Ast, s: StmtId, out: &mut Vec<ExprId>) {
     match &ast.stmt(s).kind {
         StmtKind::Expr(e) => collect_exprs_expr(ast, *e, out),
         StmtKind::Let { init: Some(e), .. } => collect_exprs_expr(ast, *e, out),
