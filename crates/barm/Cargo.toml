@@ -36,3 +36,8 @@ harness = false
 name = "parity"
 path = "../../tests/parity.rs"
 harness = false
+
+[[test]]
+name = "async"
+path = "../../tests/async.rs"
+harness = false

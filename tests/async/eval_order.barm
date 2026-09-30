@@ -1,0 +1,33 @@
+// Operands before an `await` are evaluated before it suspends, as in JavaScript.
+let counter = 10
+
+async function bump(by: int): Promise<int> {
+  await undefined
+  counter += by
+  return by
+}
+
+async function main() {
+  const other = bump(5)
+  const a = counter + (await bump(1))
+  console.log("a", a, "counter", counter)
+  const parts = [counter, await bump(100), counter]
+  console.log("parts", parts.join(","))
+  let s = "x" + String(counter)
+  s += String(await bump(1000))
+  console.log("s", s)
+  await other
+  console.log("final", counter)
+  await more()
+}
+
+async function more() {
+  counter = 1
+  const bg = bump(10)
+  counter += await bump(2)
+  console.log("compound", counter)
+  await bg
+  console.log("after bg", counter)
+  const tag = (label: string, n: int) => label + "=" + String(n)
+  console.log(tag("c" + String(counter), await bump(3)), counter)
+}

@@ -1,0 +1,53 @@
+// Microtask ordering: awaits, spawned tasks, queueMicrotask and promise chains interleave exactly as in JavaScript.
+const log: string[] = []
+
+async function depth0(): Promise<int> {
+  return 0
+}
+
+async function depth1(): Promise<int> {
+  await undefined
+  return 1
+}
+
+async function depth2(): Promise<int> {
+  await depth1()
+  return 2
+}
+
+async function tagged(tag: string, n: int) {
+  for (let i = 0; i < n; i++) {
+    log.push(tag + String(i))
+    await undefined
+  }
+}
+
+async function race(name: string, f: () => Promise<int>) {
+  const v = await f()
+  log.push(name + "=" + String(v))
+}
+
+async function main() {
+  const t = tagged("t", 6)
+  race("d0", depth0)
+  race("d1", depth1)
+  race("d2", depth2)
+  queueMicrotask(() => log.push("q"))
+  log.push("sync")
+  await t
+  console.log(log.join(" "))
+
+  // A value awaited by several tasks wakes them in the order they started waiting.
+  const shared = depth2()
+  const waiters: Promise<void>[] = []
+  for (const name of ["a", "b", "c"]) {
+    const w = (async () => {
+      const v = await shared
+      console.log(name, v)
+    })()
+    waiters.push(w)
+  }
+  for (const w of waiters) {
+    await w
+  }
+}

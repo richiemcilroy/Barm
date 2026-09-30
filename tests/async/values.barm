@@ -1,0 +1,49 @@
+// Values of every kind flow through promises and frames without leaks or copies going wrong.
+type Point = { x: int, y: int }
+class Box {
+  constructor(readonly label: string, readonly items: string[]) {}
+  describe(): string {
+    return this.label + ":" + this.items.join("|")
+  }
+}
+
+async function makePoint(x: int): Promise<Point> {
+  await undefined
+  return { x, y: x * 2 }
+}
+
+async function makeBox(label: string, n: int): Promise<Box> {
+  const items: string[] = []
+  for (let i = 0; i < n; i++) {
+    items.push(label + String(i))
+    await undefined
+  }
+  return new Box(label, items)
+}
+
+async function concat(parts: string[], sep: string): Promise<string> {
+  await undefined
+  return parts.join(sep)
+}
+
+async function main() {
+  const p = await makePoint(4)
+  console.log(p.x, p.y)
+  const shared = makeBox("b", 3)
+  const first = await shared
+  const second = await shared
+  console.log(first.describe(), second === first)
+  const words = ["alpha", "beta", "gamma"]
+  const joined = await concat(words, "-")
+  words.push("delta")
+  console.log(joined, words.length)
+  const many: Promise<Point>[] = []
+  for (let i = 0; i < 5; i++) {
+    many.push(makePoint(i))
+  }
+  let total = 0
+  for (const m of many) {
+    total += (await m).y
+  }
+  console.log("total", total)
+}

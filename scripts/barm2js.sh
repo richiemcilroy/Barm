@@ -71,7 +71,7 @@ while True:
     text = (text[:cls_open + 1] + ' ' + decls + text[cls_open + 1:open_p + 1] + new_params + text[close_p:body_open + 1] + body + text[body_close:])
     pos = cls_open + len(decls) + 1
 
-if re.search(r"^(export )?function main\(", text, flags=re.M):
+if re.search(r"^(export )?(async )?function main\(", text, flags=re.M):
     text += "\nmain();\n"
 open(sys.argv[2], 'w').write(text)
 PY

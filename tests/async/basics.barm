@@ -1,0 +1,23 @@
+// Async functions awaiting each other, and a call that isn't awaited running alongside.
+async function leaf(name: string): Promise<string> {
+  console.log("leaf", name)
+  await 0
+  console.log("leaf after", name)
+  return name + "!"
+}
+
+async function mid(name: string): Promise<int> {
+  const s = await leaf(name)
+  console.log("mid got", s)
+  return s.byteLength
+}
+
+async function main() {
+  console.log("start")
+  const p = mid("a")
+  console.log("spawned")
+  const n = await mid("bb")
+  console.log("n", n)
+  const m = await p
+  console.log("m", m)
+}

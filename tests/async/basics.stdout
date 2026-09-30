@@ -1,0 +1,10 @@
+start
+leaf a
+spawned
+leaf bb
+leaf after a
+leaf after bb
+mid got a!
+mid got bb!
+n 3
+m 2
