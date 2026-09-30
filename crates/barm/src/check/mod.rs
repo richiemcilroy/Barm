@@ -888,7 +888,8 @@ impl<'a> Checker<'a> {
         if let Some(&t) = self.consts.get(&(m, ii)) {
             return t;
         }
-        let ItemKind::Const { name, name_span, ty, init, .. } = &self.modules[m as usize].ast.items[ii as usize].kind else { return ERROR };
+        let ItemKind::Const { name, name_span, ty, init, mutable } = &self.modules[m as usize].ast.items[ii as usize].kind else { return ERROR };
+        let mutable = *mutable;
         // In a script, initializers run in the script body, so they can throw like its statements.
         let script = self.modules[m as usize].ast.script.is_some() && self.modules[m as usize].entry;
         if !self.const_in_progress.insert((m, ii)) {
@@ -914,7 +915,9 @@ impl<'a> Checker<'a> {
                     }
                     None => {
                         let found = c.expr(init, None);
-                        c.check_inferred_binding(found, c.ast().expr(init).span)
+                        let t = c.check_inferred_binding(found, c.ast().expr(init).span);
+                        // `let s = ""` holds any string later, as in TypeScript
+                        if mutable { c.types.widen(t) } else { t }
                     }
                 };
                 let throws = !c.fcx.last().unwrap().frames[0].thrown.is_empty();
