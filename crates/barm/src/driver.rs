@@ -10,6 +10,23 @@ use crate::source::{FileId, SourceFile, SourceMap, Span};
 use crate::hash::FxMap as HashMap;
 use std::path::{Path, PathBuf};
 
+/// Built-in declarations (the `Error` classes), written in Barm.
+const PRELUDE: &str = include_str!("prelude.barm");
+
+/// Standard library modules (Node's names), written in Barm on top of `__native` runtime calls.
+/// Standard modules: (name, source, also importable as `"node:name"`/`"name"`).
+const STD_MODULES: &[(&str, &str, bool)] =
+    &[("fs", include_str!("std/fs.barm"), true), ("path", include_str!("std/path.barm"), true), ("http", include_str!("std/http.barm"), false)];
+
+/// The standard module an import names (`"node:fs"`, `"fs"`, `"std/http"`), if any.
+fn std_module(spec: &str) -> Option<&'static (&'static str, &'static str, bool)> {
+    if let Some(name) = spec.strip_prefix("std/") {
+        return STD_MODULES.iter().find(|m| m.0 == name);
+    }
+    let name = spec.strip_prefix("node:").unwrap_or(spec);
+    STD_MODULES.iter().find(|m| m.0 == name && m.2)
+}
+
 pub struct CheckResult {
     pub sm: SourceMap,
     pub diags: Vec<Diagnostic>,
@@ -39,8 +56,10 @@ pub fn check_paths_with(paths: &[PathBuf], base: &Path, threads: Option<usize>) 
     let t2 = std::time::Instant::now();
     diags.sort_by(|a, b| (a.span.file, a.span.start, a.code).cmp(&(b.span.file, b.span.start, b.code)));
     diags.dedup_by(|a, b| a.span == b.span && a.code == b.code && a.message == b.message);
-    let lines = sm.files.iter().map(|f| f.line_count()).sum();
-    Ok(CheckResult { files: modules.len(), sm, diags, lines, phases: (t1 - t0, t2 - t1) })
+    let lines: usize = sm.files.iter().map(|f| f.line_count()).sum();
+    let files = modules.iter().filter(|m| !m.std).count();
+    let lines = lines - modules.iter().filter(|m| m.std).map(|m| sm.get(m.file).line_count()).sum::<usize>();
+    Ok(CheckResult { files, sm, diags, lines, phases: (t1 - t0, t2 - t1) })
 }
 
 /// Parsed program: every reachable module, with parse diagnostics.
@@ -98,7 +117,7 @@ pub fn load(paths: &[PathBuf], base: &Path) -> Result<Loaded, String> {
             let file = sm.add(source);
             diags.extend(pd);
             by_path.insert(path.clone(), modules.len() as u32);
-            modules.push(Module { file, path, name, ast, imports: HashMap::default() });
+            modules.push(Module { file, path, name, ast, imports: HashMap::default(), builtin: false, std: false });
         }
     }
 
@@ -112,7 +131,7 @@ pub fn load(paths: &[PathBuf], base: &Path) -> Result<Loaded, String> {
         for (ii, item) in modules[mi].ast.items.iter().enumerate() {
             if let ItemKind::Import(imp) = &item.kind {
                 match resolve_import(&modules[mi].path, &imp.path, imp.path_span) {
-                    Ok(target) => targets.push((ii as u32, normalize(&target))),
+                    Ok(target) => targets.push((ii as u32, if target.starts_with("<std>") { target } else { normalize(&target) })),
                     Err(d) => diags.push(d),
                 }
             }
@@ -121,14 +140,21 @@ pub fn load(paths: &[PathBuf], base: &Path) -> Result<Loaded, String> {
             let t = match by_path.get(&target) {
                 Some(&t) => t,
                 None => {
-                    let text = std::fs::read_to_string(&target).map_err(|e| format!("can't read {}: {e}", target.display()))?;
-                    let name = display_name(&target, &base);
+                    let std_src = target.to_str().and_then(|p| p.strip_prefix("<std>/")).and_then(|n| STD_MODULES.iter().find(|m| m.0 == n));
+                    let text = match std_src {
+                        Some(m) => m.1.to_string(),
+                        None => std::fs::read_to_string(&target).map_err(|e| format!("can't read {}: {e}", target.display()))?,
+                    };
+                    let name = match std_src {
+                        Some(m) => format!("{}{}", if m.2 { "node:" } else { "std/" }, m.0),
+                        None => display_name(&target, &base),
+                    };
                     let file = sm.add(SourceFile::new(target.clone(), name.clone(), text));
                     let (ast, pd) = parser::parse(&sm.get(file).text, file, &mut interner);
                     diags.extend(pd);
                     let t = modules.len() as u32;
                     by_path.insert(target.clone(), t);
-                    modules.push(Module { file, path: target, name, ast, imports: HashMap::default() });
+                    modules.push(Module { file, path: target, name, ast, imports: HashMap::default(), builtin: false, std: std_src.is_some() });
                     t
                 }
             };
@@ -136,6 +162,11 @@ pub fn load(paths: &[PathBuf], base: &Path) -> Result<Loaded, String> {
         }
         mi += 1;
     }
+    // The built-in prelude (`Error` and friends), last.
+    let file = sm.add(SourceFile::new(PathBuf::from("<builtin>"), "<builtin>".into(), PRELUDE.into()));
+    let (ast, pd) = parser::parse(&sm.get(file).text, file, &mut interner);
+    diags.extend(pd);
+    modules.push(Module { file, path: PathBuf::from("<builtin>"), name: "<builtin>".into(), ast, imports: HashMap::default(), builtin: true, std: true });
 
     Ok(Loaded { sm, interner, modules, diags })
 }
@@ -265,8 +296,14 @@ fn display_name(path: &Path, base: &Path) -> String {
 }
 
 fn resolve_import(from: &Path, spec: &str, span: Span) -> Result<PathBuf, Diagnostic> {
-    if spec.starts_with("std/") || spec == "std" {
-        return Err(Diagnostic::new("N0103", span, format!("the standard library module \"{spec}\" is not available yet (planned for M3)")));
+    if let Some(m) = std_module(spec) {
+        return Ok(PathBuf::from(format!("<std>/{}", m.0)));
+    }
+    if spec.starts_with("node:") || spec.starts_with("std/") || matches!(spec, "os" | "child_process" | "http" | "https" | "net" | "crypto" | "util" | "events" | "stream" | "readline" | "url" | "buffer" | "zlib") {
+        let name = spec.strip_prefix("node:").or_else(|| spec.strip_prefix("std/")).unwrap_or(spec);
+        let have: Vec<String> = STD_MODULES.iter().filter(|m| m.2).map(|(n, _, _)| format!("node:{n}")).collect();
+        let d = Diagnostic::new("N0103", span, format!("the Node module \"{name}\" is not available yet")).note("available", have.join(", "));
+        return Err(if name == "http" { d.note("instead", "use the Bun-style server: `import { serve } from \"std/http\"`") } else { d });
     }
     if !spec.starts_with("./") && !spec.starts_with("../") {
         return Err(Diagnostic::new("N0104", span, format!("\"{spec}\" is not a relative path; npm packages are not supported"))
