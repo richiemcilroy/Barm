@@ -73,6 +73,27 @@ timeout: TimeoutError: The operation timed out.
 abort with a reason: Error: stopped by the test
 signal that doesn't fire: 200 "OK" ok=true redirected=false BASE/text | hello
 signal state: false
+blob: size=14 type="text/plain" text="héllo wörld!"
+blob slices: héllo|örld!|örld|0|"x/y"
+blob type not ASCII: ""
+blob bad UTF-8: "a�b" bytes=97,195,98
+file: data.json application/x-thing 8 1700000000000 blob=true
+file json: 1
+POST Blob: 200 "OK" ok=true redirected=false BASE/echo | POST |content-type=text/plain|content-length=14|body=héllo wörld!
+POST File: 200 "OK" ok=true redirected=false BASE/echo | POST |content-type=application/x-thing|content-length=8|body={"k": 1}
+POST untyped Blob: 200 "OK" ok=true redirected=false BASE/echo | POST |content-length=3|body=raw
+POST Blob, own type: 200 "OK" ok=true redirected=false BASE/echo | POST |content-type=text/x-own|content-length=14|body=héllo wörld!
+form: has(a)=true get(a)="one\ntwo\r\nthree\rfour" getAll(a)=2 keys=a,q"x
+y,empty,uni,file,renamed,bytes,a
+form content-type: multipart/form-data; boundary=
+form round trip: "a"="one\r\ntwo\r\nthree\r\nfour" "q%22x%0D%0Ay"="v" "empty"="" "uni"="ünï ✓" "file"=File("f.bin", "application/octet-stream", 9) "renamed"=File("new %22name%22.bin", "application/octet-stream", 1) "bytes"=File("b.bin", "application/octet-stream", 8) "a"="second"
+form files: 102,105,108,101,32,98,111,100,121 | 120 | 0,195,169,13,10,45,45,120
+form after set/delete: a,q"x
+y,uni,file,renamed,bytes a="only" getAll(a)=1
+Request.formData: "a"="only" "q%22x%0D%0Ay"="v" "uni"="ünï ✓" "file"=File("f.bin", "application/octet-stream", 9) "renamed"=File("new %22name%22.bin", "application/octet-stream", 1) "bytes"=File("b.bin", "application/octet-stream", 8)
+urlencoded formData: "x"="1" "y"="two words" "x"="3"
+formData on text: TypeError ERR_FORMDATA_PARSE_ERROR: Can't decode form data from body because of incorrect MIME type/boundary
+res.blob: "Application/X-Thing; A=B" 5 hello
 connection refused: TypeError ConnectionRefused: Unable to connect. Is the computer able to access the url?
 https connection refused: TypeError ConnectionRefused: Unable to connect. Is the computer able to access the url?
 https connection refused (every address): TypeError ConnectionRefused: Unable to connect. Is the computer able to access the url?

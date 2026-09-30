@@ -93,6 +93,8 @@ fn handle(s: &mut (impl Read + Write), r: &Req, served: usize, fixtures: &Path, 
             out.push_str(&format!("|body={}", String::from_utf8_lossy(&r.body)));
             respond(s, "200 OK", &[], out.as_bytes());
         }
+        // the body back, under the request's Content-Type (for form data: its boundary is random)
+        "/mirror" => respond(s, "200 OK", &[("Content-Type", r.header("content-type").unwrap_or_default().to_string())], &r.body),
         "/chunked" => {
             let _ = s.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3;ext=1\r\nhel\r\n2\r\nlo\r\nA\r\n, chunked!\r\n0\r\nX-Trailer: 1\r\n\r\n");
         }

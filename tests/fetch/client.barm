@@ -254,6 +254,93 @@ const signal = AbortSignal.timeout(5000)
 await show("signal that doesn't fire", fetch(base + "/text", { signal }))
 console.log(`signal state: ${signal.aborted}`)
 
+// Blob, File and FormData
+function showEntries(label: string, fd: FormData): File[] {
+  const files: File[] = []
+  const lines: string[] = []
+  fd.forEach((v, k) => {
+    if (typeof v === "string") {
+      lines.push(`${JSON.stringify(k)}=${JSON.stringify(v)}`)
+    } else {
+      lines.push(`${JSON.stringify(k)}=File(${JSON.stringify(v.name)}, ${JSON.stringify(v.type)}, ${v.size})`)
+      files.push(v)
+    }
+  })
+  console.log(`${label}: ${lines.join(" ")}`)
+  return files
+}
+
+const blob = new Blob(["héllo ", new TextEncoder().encode("wörld"), new Blob(["!"])], { type: "Text/Plain" })
+console.log(`blob: size=${blob.size} type=${JSON.stringify(blob.type)} text=${JSON.stringify(await blob.text())}`)
+console.log(`blob slices: ${await blob.slice(0, 6).text()}|${await blob.slice(-6).text()}|${await blob.slice(-6, -1).text()}|${blob.slice(3, 1).size}|${JSON.stringify(blob.slice(0, 1, "X/Y").type)}`)
+console.log(`blob type not ASCII: ${JSON.stringify(new Blob([], { type: "a/bé" }).type)}`)
+// half of "é": a byte that isn't UTF-8 on its own
+const bad = new Blob(["a", new Blob(["é"]).slice(0, 1), "b"])
+console.log(`blob bad UTF-8: ${JSON.stringify(await bad.text())} bytes=${(await bad.bytes()).join(",")}`)
+const file = new File(["{\"k\": 1}"], "data.json", { type: "application/x-thing", lastModified: 1700000000000 })
+console.log(`file: ${file.name} ${file.type} ${file.size} ${file.lastModified} blob=${file instanceof Blob}`)
+const obj: { k: number } = try await file.json()
+console.log(`file json: ${obj.k}`)
+await show("POST Blob", fetch(base + "/echo", { method: "POST", body: blob }))
+await show("POST File", fetch(base + "/echo", { method: "POST", body: file }))
+await show("POST untyped Blob", fetch(base + "/echo", { method: "POST", body: new Blob(["raw"]) }))
+await show("POST Blob, own type", fetch(base + "/echo", { method: "POST", body: blob, headers: { "Content-Type": "text/x-own" } }))
+
+const form = new FormData()
+form.append("a", "one\ntwo\r\nthree\rfour")
+form.append("q\"x\ny", "v")
+form.append("empty", "")
+form.append("uni", "ünï ✓")
+// (Bun sends every file here as application/octet-stream, whatever its type: typed files are
+// in native_client)
+form.append("file", new File(["file body"], "f.bin"))
+form.append("renamed", new File(["x"], "orig.bin"), "new \"name\".bin")
+form.append("bytes", new File([new TextEncoder().encode("\u0000é\r\n--x")], "b.bin"))
+form.append("a", "second")
+console.log(`form: has(a)=${form.has("a")} get(a)=${JSON.stringify(form.get("a"))} getAll(a)=${form.getAll("a").length} keys=${form.keys().join(",")}`)
+try {
+  const r = await fetch(base + "/mirror", { method: "POST", body: form })
+  const ctype = r.headers.get("content-type") ?? ""
+  console.log(`form content-type: ${ctype.slice(0, ctype.indexOf("boundary=") + 9)}`)
+  const back = try await r.formData()
+  const files = showEntries("form round trip", back)
+  const texts: string[] = []
+  for (const f of files) {
+    texts.push((await f.bytes()).join(","))
+  }
+  console.log(`form files: ${texts.join(" | ")}`)
+} catch (e) {
+  console.log(`form round trip: ${describe(e)}`)
+}
+form.set("a", "only")
+form.delete("empty")
+console.log(`form after set/delete: ${form.keys().join(",")} a=${JSON.stringify(form.get("a"))} getAll(a)=${form.getAll("a").length}`)
+try {
+  const req = new Request(base + "/echo", { method: "POST", body: form })
+  showEntries("Request.formData", try await req.formData())
+} catch (e) {
+  console.log(`Request.formData: ${describe(e)}`)
+}
+try {
+  const r = await fetch(base + "/mirror", { method: "POST", body: new URLSearchParams("x=1&y=two+words&x=3") })
+  showEntries("urlencoded formData", try await r.formData())
+} catch (e) {
+  console.log(`urlencoded formData: ${describe(e)}`)
+}
+try {
+  await (await fetch(base + "/text")).formData()
+  console.log("formData on text: no error")
+} catch (e) {
+  console.log(`formData on text: ${describe(e)}`)
+}
+try {
+  // (not a text/ type: Bun adds ";charset=utf-8" to those)
+  const b = await (await fetch(base + "/mirror", { method: "POST", body: "hello", headers: { "Content-Type": "Application/X-Thing; A=B" } })).blob()
+  console.log(`res.blob: ${JSON.stringify(b.type)} ${b.size} ${await b.text()}`)
+} catch (e) {
+  console.log(`res.blob: ${describe(e)}`)
+}
+
 // failures
 await show("connection refused", fetch("http://127.0.0.1:1/"))
 // the ClientHello goes out while TCP connects: a refusal is still reported as one

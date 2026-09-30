@@ -73,6 +73,9 @@ pub(super) fn native_sig(types: &mut Types, name: &str) -> Option<(Vec<TyId>, Ty
             (vec![bytes], INT)
         }
         "headerGet" => (vec![STR, STR], STR),
+        "byteSlice" => (vec![STR, INT, INT], STR),
+        "mimeLower" => (vec![STR], STR),
+        "multipartParse" => (vec![STR, STR], str_arr),
         "headerEntries" => (vec![STR], str_arr),
         "headerValues" => (vec![STR, STR], str_arr),
         _ => return None,
