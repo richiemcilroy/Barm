@@ -20,6 +20,15 @@ pub(crate) struct Callback {
 
 impl<'c, 'a> Gen<'c, 'a> {
     pub(crate) fn call(&mut self, e: ExprId) -> Val {
+        let v = self.call_inner(e);
+        let m = self.cur_m();
+        if self.facts(m).throwing.contains(&e) {
+            self.error_check();
+        }
+        v
+    }
+
+    fn call_inner(&mut self, e: ExprId) -> Val {
         let m = self.cur_m();
         let ast = self.ast(m);
         let ExprKind::Call { callee, args, optional, .. } = &ast.expr(e).kind else { unreachable!() };
@@ -38,11 +47,42 @@ impl<'c, 'a> Gen<'c, 'a> {
                     subst.insert(*p, t);
                 }
                 let cname = self.instance(fm, fi, subst);
-                let argv = self.args(args, &params, Some((fm, fi)));
+                let mut argv = self.args(&args[..args.len().min(params.len())], &params, Some((fm, fi)));
+                if let Some(rest) = fact.rest {
+                    // `...xs`: the remaining arguments become one array.
+                    let rest = self.inst(rest);
+                    let arr = self.pack_rest(&args[params.len().min(args.len())..], rest);
+                    argv.push(arr);
+                }
                 let ret = self.inst(fact.ret);
                 self.finish_call(&format!("{cname}({})", argv.join(", ")), ret, ty)
             }
             Callee::Value => {
+                // `x.m(args)` on an interface value or a class (through a generic bound): a direct call.
+                if let ExprKind::Member { obj, name, optional: false, .. } = &ast.expr(*callee).kind {
+                    let ot = self.ty(*obj);
+                    match self.tget(ot) {
+                        Ty::Interface(..) => {
+                            let rv = self.expr(*obj);
+                            let rv = if self.heap_rooted(*obj) { self.own(rv) } else { rv };
+                            let argv = self.args(args, &params, None);
+                            if let Some((call, ret)) = self.iface_call(&rv, *name, argv) {
+                                return self.finish_call(&call, ret, ty);
+                            }
+                        }
+                        Ty::Class(..) => {
+                            if let Some(crate::check::class::ClassMemberRef::Method(mm)) = self.c.class_member(ot, *name) {
+                                let rv = self.expr(*obj);
+                                let rv = if self.heap_rooted(*obj) { self.own(rv) } else { rv };
+                                let argv = self.args(args, &mm.params, None);
+                                let ret = self.c.method_ret(&mm);
+                                let call = self.method_call_code(&rv.code, ot, *name, false, argv);
+                                return self.finish_call(&call, ret, ty);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 let fv = self.expr(*callee);
                 let fty = self.c.types.without_undefined(fv.ty);
                 let fv = if *optional || fty != fv.ty {
@@ -99,6 +139,25 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 self.method_on(None, *obj, recv, &name, args, &params, ty, span)
             }
+            Callee::ClassMethod { recv, name, sup } => {
+                let recv = self.inst(recv);
+                self.class_method_call(e, recv, name, sup, args, &params, ty, span)
+            }
+            Callee::StaticMethod(c, mi) => {
+                let argv = self.args(args, &params, None);
+                let cname = self.static_method_instance(c, mi);
+                let ret = self.inst(fact.ret);
+                self.finish_call(&format!("{cname}({})", argv.join(", ")), ret, ty)
+            }
+            Callee::New(c) => {
+                let _ = c;
+                self.new_object(e, ty, args, &params, span)
+            }
+            Callee::SuperCtor(base) => {
+                let base = self.inst(base);
+                self.super_ctor_call(base, args, &params);
+                Val::plain("0", VOID)
+            }
             Callee::Builtin { ns, name } => {
                 let ns = ns.map(|s| self.sym(s).to_string());
                 let name = self.sym(name).to_string();
@@ -121,6 +180,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// Evaluates arguments against (instantiated) parameter types.
     fn args(&mut self, args: &[Arg], params: &[FnParam], callee: Option<(u32, u32)>) -> Vec<String> {
         let mut out = Vec::new();
+        let has_inout = params.iter().any(|p| p.inout);
         for (i, a) in args.iter().enumerate() {
             let p = params.get(i).copied().unwrap_or(FnParam { ty: ERROR, inout: false, optional: false });
             if p.inout {
@@ -142,6 +202,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 out.push(format!("&{}", pl.lv));
             } else {
                 let v = self.expr(a.expr);
+                // A value reached through a class instance (or a closure's cell) could be released by
+                // the callee through another reference: keep it alive for the call.
+                let v = if !v.owned && self.is_rc(v.ty) && (self.heap_rooted(a.expr) || (has_inout && self.is_place_expr(a.expr))) { self.own(v) } else { v };
                 let v = self.coerce(v, p.ty);
                 out.push(v.code);
             }
@@ -152,6 +215,41 @@ impl<'c, 'a> Gen<'c, 'a> {
             out.push(v.code);
         }
         out
+    }
+
+    /// An owned array (a temporary) holding the given arguments, for a rest parameter.
+    fn pack_rest(&mut self, args: &[Arg], elem: TyId) -> String {
+        let arr_ty = self.c.types.array(elem);
+        if args.is_empty() {
+            return "BM_EMPTY_ARR".into();
+        }
+        let d = self.desc(elem);
+        let ect = self.ctype(elem);
+        let mut codes = Vec::new();
+        for a in args {
+            let v = self.expr(a.expr);
+            let v = self.coerce(v, elem);
+            let code = self.consume(v);
+            let n = self.fresh("e");
+            self.line(format!("{ect} {n} = {code};"));
+            codes.push(n);
+        }
+        let arr = self.tmp(arr_ty, "BM_EMPTY_ARR", true);
+        let w = self.fresh("w");
+        self.line(format!("{ect} *{w} = ({ect} *)bm_arr_reserve_tail(&{}, {d}, {});", arr.code, codes.len()));
+        for (i, c) in codes.iter().enumerate() {
+            self.line(format!("{w}[{i}] = {c};"));
+        }
+        self.line(format!("{}.len = {};", arr.code, codes.len()));
+        arr.code
+    }
+
+    pub(crate) fn args_pub(&mut self, args: &[Arg], params: &[FnParam]) -> Vec<String> {
+        self.args(args, params, None)
+    }
+
+    pub(crate) fn finish_call_pub(&mut self, call: &str, ret: TyId, ty: TyId) -> Val {
+        self.finish_call(call, ret, ty)
     }
 
     fn finish_call(&mut self, call: &str, ret: TyId, ty: TyId) -> Val {
@@ -613,13 +711,13 @@ impl<'c, 'a> Gen<'c, 'a> {
         Val { code: res, ty, owned }
     }
 
-    fn open_block(&mut self, s: &str) {
+    pub(crate) fn open_block(&mut self, s: &str) {
         self.line(s);
         self.b().temps.push(Vec::new());
         self.bump(1);
     }
 
-    fn mid_block(&mut self, s: &str) {
+    pub(crate) fn mid_block(&mut self, s: &str) {
         self.flush_block_temps();
         self.bump(-1);
         self.line(s);
@@ -627,7 +725,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.b().temps.push(Vec::new());
     }
 
-    fn close_block(&mut self, s: &str) {
+    pub(crate) fn close_block(&mut self, s: &str) {
         self.flush_block_temps();
         self.bump(-1);
         self.line(s);
@@ -824,6 +922,14 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
     }
 
+    pub(crate) fn optional_int_pub(&mut self, v: &Val) -> (String, String) {
+        self.optional_int(v)
+    }
+
+    pub(crate) fn optional_from_pub(&mut self, ok: &str, v: Val, ty: TyId) -> Val {
+        self.optional_from(ok, v, ty)
+    }
+
     /// Splits an `int | undefined` value into (value, present).
     fn optional_int(&mut self, v: &Val) -> (String, String) {
         match self.tag_of(v.ty, UNDEFINED) {
@@ -835,12 +941,12 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
     }
 
-    fn truthy_val(&mut self, v: Val) -> String {
+    pub(crate) fn truthy_val(&mut self, v: Val) -> String {
         if v.ty == BOOL {
             return v.code;
         }
         match self.tag_of(v.ty, UNDEFINED) {
-            Some(k) => format!("(({}).tag != {k})", v.code),
+            Some(k) => format!("(!{})", self.u_is(&v.code, v.ty, k)),
             None => "true".into(),
         }
     }
@@ -997,6 +1103,60 @@ impl<'c, 'a> Gen<'c, 'a> {
                 Val::plain("0", VOID)
             }
             (Some("Math"), _) => self.math(name, args, ty, span),
+            (Some("process"), "exit") => {
+                let code = match args.first() {
+                    Some(a) => {
+                        let v = self.expr(a.expr);
+                        let oi = self.c.types.optional(INT);
+                        let v = self.coerce(v, oi);
+                        let (inner, _present) = self.optional_int_pub(&v);
+                        inner
+                    }
+                    None => "0".into(),
+                };
+                self.line(format!("bm_process_exit({code});"));
+                Val::plain("0", ty)
+            }
+            (Some("process"), "cwd") => self.tmp(STR, "bm_native_cwd()", true),
+            (Some("Date"), "now") => Val::plain("bm_date_now()", F64),
+            (Some("performance"), "now") => Val::plain("bm_performance_now()", F64),
+            (Some("stdout" | "stderr"), "write") => {
+                let v = self.expr(args[0].expr);
+                let v = self.coerce(v, STR);
+                let f = if ns == Some("stdout") { "bm_write_stdout" } else { "bm_write_stderr" };
+                self.line(format!("{f}({});", v.code));
+                Val::plain("0", VOID)
+            }
+            (Some("__native"), _) => {
+                let (ps, ret) = crate::check::native_sig_pub(&mut self.c.types, name).unwrap_or((Vec::new(), VOID));
+                let mut argv = Vec::new();
+                for (a, pt) in args.iter().zip(&ps) {
+                    let v = self.expr(a.expr);
+                    let v = self.coerce(v, *pt);
+                    argv.push(v.code);
+                }
+                let call = format!("bm_native_{name}({})", argv.join(", "));
+                if ret == VOID {
+                    self.line(format!("{call};"));
+                    return Val::plain("0", VOID);
+                }
+                let v = self.tmp(ret, &call, true);
+                self.coerce(v, ty)
+            }
+            (Some("JSON"), "stringify") => {
+                let v = self.expr(args[0].expr);
+                let indent = args.get(2).map(|a| self.expr(a.expr));
+                if let Some(a) = args.get(1) {
+                    let _ = self.expr(a.expr);
+                }
+                let r = self.json_stringify(v, indent);
+                self.coerce(r, ty)
+            }
+            (Some("JSON"), "parse") => {
+                let v = self.expr(args[0].expr);
+                let v = self.coerce(v, STR);
+                self.json_parse(v, ty)
+            }
             (None, "String") => {
                 let v = self.expr(args[0].expr);
                 if v.ty == STR {

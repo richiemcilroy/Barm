@@ -14,6 +14,9 @@
 
 mod body;
 mod calls;
+pub(crate) mod class;
+mod iface;
+mod json;
 
 use crate::ast::{self, ExprId, ItemKind};
 use crate::check::{Checker, IdentFact, ModuleFacts};
@@ -119,6 +122,8 @@ pub(crate) struct Gen<'c, 'a> {
     lits: String,
     helpers: String,
     funcs: String,
+    /// Class struct bodies (after records and unions: those only hold class pointers).
+    pub(crate) class_structs: String,
     ctypes: FxMap<TyId, String>,
     defined: FxSet<TyId>,
     helpers_done: FxSet<(TyId, u8)>,
@@ -140,6 +145,28 @@ pub(crate) struct Gen<'c, 'a> {
     pub(crate) internal: Vec<String>,
     /// Stack of function bodies being emitted (arrows nest).
     pub(crate) bodies: Vec<body::Body>,
+    // Classes (see `class.rs`).
+    pub(crate) class_insts: FxMap<TyId, class::ClassInst>,
+    pub(crate) class_list: Vec<TyId>,
+    pub(crate) ctor_insts: FxMap<TyId, String>,
+    pub(crate) method_insts: FxMap<(TyId, u32), String>,
+    pub(crate) dispatch_names: FxMap<(TyId, Sym), String>,
+    pub(crate) dispatchers: Vec<class::Dispatcher>,
+    pub(crate) dispatch_bodies: String,
+    pub(crate) overridden: FxMap<(u32, Sym), bool>,
+    pub(crate) isa_decls: FxSet<u32>,
+    pub(crate) class_work: Vec<class::ClassWork>,
+    pub(crate) statics_done: FxSet<(u32, u32)>,
+    pub(crate) ctor_move_memo: FxMap<u32, Vec<bool>>,
+    pub(crate) weak_memo: FxMap<u32, bool>,
+    /// Helper functions whose prototypes are in `protos`, emitted with the helpers.
+    pub(crate) helpers_after_decl: String,
+    /// Box types whose struct bodies are still to be defined.
+    pub(crate) pending_boxes: Vec<TyId>,
+    /// (source type, interface type) → itab name.
+    pub(crate) itabs: FxMap<(TyId, TyId), String>,
+    /// Emit `bmg_uncaught` (main can throw, or tests).
+    needs_uncaught: bool,
 }
 
 // Helper kinds for `helpers_done`.
@@ -160,6 +187,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             lits: String::new(),
             helpers: String::new(),
             funcs: String::new(),
+            class_structs: String::new(),
             ctypes: FxMap::default(),
             defined: FxSet::default(),
             helpers_done: FxSet::default(),
@@ -177,6 +205,23 @@ impl<'c, 'a> Gen<'c, 'a> {
             helpers_after: Vec::new(),
             leak_free: FxMap::default(),
             bodies: Vec::new(),
+            class_insts: FxMap::default(),
+            class_list: Vec::new(),
+            ctor_insts: FxMap::default(),
+            method_insts: FxMap::default(),
+            dispatch_names: FxMap::default(),
+            dispatchers: Vec::new(),
+            dispatch_bodies: String::new(),
+            overridden: FxMap::default(),
+            isa_decls: FxSet::default(),
+            class_work: Vec::new(),
+            statics_done: FxSet::default(),
+            ctor_move_memo: FxMap::default(),
+            weak_memo: FxMap::default(),
+            helpers_after_decl: String::new(),
+            pending_boxes: Vec::new(),
+            itabs: FxMap::default(),
+            needs_uncaught: false,
         }
     }
 
@@ -232,13 +277,17 @@ impl<'c, 'a> Gen<'c, 'a> {
                 };
                 let cname = self.instance(m, i, FxMap::default());
                 let ret = self.c.sigs[&(m, i)].ret;
+                let throws = self.c.sigs[&(m, i)].throws != NEVER;
+                self.needs_uncaught |= throws;
+                let uncaught = if throws { "    if (bmg_err) { bmg_uncaught(); return 1; }\n" } else { "" };
                 if ret == INT {
-                    let _ = writeln!(main_body, "    bm_int code = {cname}();\n    bm_out_flush();\n    return (int)code;");
+                    let _ = writeln!(main_body, "    bm_int code = {cname}();\n{uncaught}    bm_out_flush();\n    return (int)code;");
                 } else {
-                    let _ = writeln!(main_body, "    {cname}();\n    bm_out_flush();\n    return 0;");
+                    let _ = writeln!(main_body, "    {cname}();\n{uncaught}    bm_out_flush();\n    return 0;");
                 }
             }
             Mode::Test => {
+                self.needs_uncaught = true;
                 for (m, name, body) in tests {
                     let f = self.test_fn(m, body);
                     let _ = writeln!(main_body, "    bm_test_run({}, {f});", c_string(name.as_bytes()));
@@ -246,12 +295,38 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let _ = writeln!(main_body, "    bm_out_flush();\n    return bm_test_summary();");
             }
         }
-        // Emit queued function instances (they may queue more).
-        while let Some(inst) = self.queue.pop() {
-            self.emit_function(inst);
+        if self.needs_uncaught {
+            let uncaught = self.uncaught_fn();
+            self.helpers_after.push(uncaught);
         }
+        // Emit queued functions, constructors and methods (they may queue more); dispatch
+        // functions need every instantiated class, so they're recomputed until nothing new appears.
+        loop {
+            while let Some(inst) = self.queue.pop() {
+                self.emit_function(inst);
+            }
+            if let Some(w) = self.class_work.pop() {
+                self.emit_class_work(w);
+                continue;
+            }
+            if !self.refresh_dispatchers() && self.queue.is_empty() && self.class_work.is_empty() {
+                break;
+            }
+        }
+        let tables = self.emit_class_tables();
+        while let Some(t) = self.pending_boxes.pop() {
+            self.define_struct(t);
+        }
+        let dispatch = std::mem::take(&mut self.dispatch_bodies);
+        self.helpers_after.push(dispatch);
+        self.helpers_after.push(tables);
         let init = std::mem::take(&mut self.const_init);
-        let _ = writeln!(self.funcs, "int main(int argc, char **argv) {{\n    bm_init(argc, argv);\n{init}{main_body}}}");
+        // The program runs on a thread with a 1 GiB stack (reserved, committed as used): deep
+        // recursion — including freeing long linked structures — has room without per-call checks.
+        let _ = writeln!(
+            self.funcs,
+            "static int bmg_argc; static char **bmg_argv; static int bmg_exit;\nstatic int bmg_program(void) {{\n    bm_init(bmg_argc, bmg_argv);\n{init}{main_body}}}\nstatic void *bmg_thread(void *arg) {{ (void)arg; bmg_exit = bmg_program(); return NULL; }}\nint main(int argc, char **argv) {{\n    bmg_argc = argc; bmg_argv = argv;\n    pthread_attr_t attr; pthread_t th;\n    if (pthread_attr_init(&attr) == 0 && pthread_attr_setstacksize(&attr, (size_t)1 << 30) == 0 && pthread_create(&th, &attr, bmg_thread, NULL) == 0) {{\n        pthread_join(th, NULL);\n        return bmg_exit;\n    }}\n    return bmg_program();\n}}"
+        );
     }
 
     /// The program's C: the runtime header, the prelude and the generated code. It links
@@ -261,12 +336,13 @@ impl<'c, 'a> Gen<'c, 'a> {
         out.push_str(C_PREFIX);
         out.push_str(RUNTIME_H);
         out.push('\n');
-        out.push_str("#include <math.h>\n#include <stdlib.h>\n");
+        out.push_str("#include <math.h>\n#include <pthread.h>\n#include <stdio.h>\n#include <stdlib.h>\n");
         out.push_str(PRELUDE);
-        for s in [&self.typedefs, &self.structs, &self.lits, &self.protos, &self.helpers, &self.funcs] {
+        for s in [&self.typedefs, &self.structs, &self.class_structs, &self.lits, &self.protos, &self.helpers, &self.funcs] {
             out.push_str(s);
             out.push('\n');
         }
+        out.push_str(&self.helpers_after_decl);
         for h in &self.helpers_after {
             out.push_str(h);
         }
@@ -304,7 +380,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// Does this type own heap memory (needs retain/release)?
     pub(crate) fn is_rc(&mut self, t: TyId) -> bool {
         match self.tget(t) {
-            Ty::Str | Ty::Array(_) | Ty::Map(..) | Ty::Set(_) | Ty::Func(..) | Ty::Rec(..) => true,
+            Ty::Str | Ty::Array(_) | Ty::Map(..) | Ty::Set(_) | Ty::Func(..) | Ty::Rec(..) | Ty::Class(..) | Ty::Interface(..) => true,
             Ty::Record(fs) => {
                 let fs = self.c.types.fields(fs).to_vec();
                 fs.iter().any(|f| self.is_rc(f.ty))
@@ -350,6 +426,13 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.define_struct(t);
                 return n;
             }
+            Ty::Union(ms) if self.niche(t).is_some() => {
+                let (pi, _) = self.niche(t).unwrap();
+                let m = self.c.types.tys(ms)[pi];
+                let p = self.ctype(m);
+                self.ctypes.insert(t, p.clone());
+                return p;
+            }
             Ty::Union(_) => {
                 let n = format!("U{}{}", t.0, self.type_suffix(t));
                 let _ = writeln!(self.typedefs, "typedef struct {n} {n};");
@@ -358,14 +441,26 @@ impl<'c, 'a> Gen<'c, 'a> {
                 return n;
             }
             Ty::Rec(..) => {
+                // Boxes are only used through pointers: the body (which holds the value) is defined
+                // later, so types that contain the box pointer never wait for it.
                 let n = format!("B{}{}", t.0, self.type_suffix(t));
+                let _ = writeln!(self.typedefs, "typedef struct {n} {n};");
+                let p = format!("{n}*");
+                self.ctypes.insert(t, p.clone());
+                self.pending_boxes.push(t);
+                return p;
+            }
+            Ty::Class(..) => {
+                let ci = self.class_inst(t);
+                let n = ci.name.clone();
                 let _ = writeln!(self.typedefs, "typedef struct {n} {n};");
                 let p = format!("{n}*");
                 self.ctypes.insert(t, p.clone());
                 self.define_struct(t);
                 return p;
             }
-            Ty::Param(_) | Ty::Interface(..) | Ty::Namespace(_) | Ty::BuiltinNs(_) | Ty::Expect(_) => "bm_unit".into(),
+            Ty::Interface(..) => "bm_iface".into(),
+            Ty::Param(_) | Ty::Namespace(_) | Ty::BuiltinNs(_) | Ty::Expect(_) => "bm_unit".into(),
         };
         self.ctypes.insert(t, name.clone());
         name
@@ -424,11 +519,71 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let inner = self.c.unfold(t);
                 let ct = self.ctype(inner);
                 let _ = writeln!(body, "struct {name} {{\n    int64_t rc;\n    {ct} v;\n}};");
+                self.class_structs.push_str(&body);
+                return;
+            }
+            Ty::Class(..) => {
+                let b = self.define_class_struct(t);
+                self.class_structs.push_str(&b);
+                return;
             }
             _ => {}
         }
         // Struct bodies are appended after their by-value dependencies (defined by the recursive ctype calls above).
         self.structs.push_str(&body);
+    }
+
+    /// `C | undefined` for a class `C` is a nullable pointer (`NULL` = undefined) rather than a
+    /// tagged union: (index of the class member, index of `undefined`).
+    pub(crate) fn niche(&self, u: TyId) -> Option<(usize, usize)> {
+        let Ty::Union(ms) = self.tget(u) else { return None };
+        let ms = self.c.types.tys(ms);
+        if ms.len() != 2 {
+            return None;
+        }
+        let ui = ms.iter().position(|&m| m == UNDEFINED)?;
+        let pi = 1 - ui;
+        matches!(self.tget(ms[pi]), Ty::Class(..)).then_some((pi, ui))
+    }
+
+    /// The tag of a union value (for `switch`).
+    pub(crate) fn u_tag(&self, code: &str, u: TyId) -> String {
+        match self.niche(u) {
+            Some((pi, ui)) => format!("(({code}) != NULL ? {pi} : {ui})"),
+            None => format!("({code}).tag"),
+        }
+    }
+
+    /// Does a union value hold member `k`?
+    pub(crate) fn u_is(&self, code: &str, u: TyId, k: usize) -> String {
+        match self.niche(u) {
+            Some((pi, _)) if k == pi => format!("(({code}) != NULL)"),
+            Some(_) => format!("(({code}) == NULL)"),
+            None => format!("(({code}).tag == {k})"),
+        }
+    }
+
+    /// The payload of member `k` (an lvalue when `code` is one).
+    pub(crate) fn u_payload(&self, code: &str, u: TyId, k: usize) -> String {
+        match self.niche(u) {
+            Some(_) => format!("({code})"),
+            None => format!("({code}).u.m{k}"),
+        }
+    }
+
+    /// A union value holding member `k` (`payload`: its C value, `None` for unit members).
+    pub(crate) fn u_make(&mut self, u: TyId, k: usize, payload: Option<&str>) -> String {
+        match self.niche(u) {
+            Some((pi, _)) if k == pi => payload.unwrap_or("NULL").to_string(),
+            Some(_) => "NULL".to_string(),
+            None => {
+                let ct = self.ctype(u);
+                match payload {
+                    Some(p) => format!("({ct}){{ .tag = {k}, .u.m{k} = {p} }}"),
+                    None => format!("({ct}){{ .tag = {k} }}"),
+                }
+            }
+        }
     }
 
     /// Union members in tag order.
@@ -451,6 +606,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Map(..) | Ty::Set(_) => "BM_EMPTY_MAP".into(),
             Ty::Func(..) => "((bm_fn){NULL, NULL})".into(),
             Ty::Bool => "false".into(),
+            Ty::Class(..) => "NULL".into(),
+            Ty::Interface(..) => "((bm_iface){NULL, NULL})".into(),
+            Ty::Union(_) if self.niche(t).is_some() => "NULL".into(),
             Ty::Record(_) | Ty::Union(_) | Ty::Rec(..) => {
                 self.ensure_helper(t, H_DEFAULT);
                 let n = self.box_name(t);
@@ -501,8 +659,15 @@ impl<'c, 'a> Gen<'c, 'a> {
                     Ty::Rec(..) => {
                         let inner = self.c.unfold(t);
                         rt.push_str("    if (*x) (*x)->rc++;\n");
-                        let rel_inner = if self.is_rc(inner) { format!("{};", self.release_code(inner, "(*x)->v")) } else { String::new() };
-                        let _ = writeln!(rl, "    if (*x && --(*x)->rc == 0) {{ {rel_inner} bmg_free_small(*x, sizeof(**x)); }}");
+                        if self.is_rc(inner) {
+                            // Freeing a box can recurse (long lists): bounded depth, see bmg_drop_enter.
+                            let rel_inner = format!("{};", self.release_code(inner, "b->v"));
+                            let _ = writeln!(self.protos, "static void fb_{n}(void *p);");
+                            let _ = writeln!(self.helpers_after_decl, "static void fb_{n}(void *p) {{\n    {ct} b = p;\n    {rel_inner}\n    bmg_free_small(b, sizeof(*b));\n}}");
+                            let _ = writeln!(rl, "    if (*x && --(*x)->rc == 0) fb_{n}(*x);");
+                        } else {
+                            let _ = writeln!(rl, "    if (*x && --(*x)->rc == 0) bmg_free_small(*x, sizeof(**x));");
+                        }
                     }
                     _ => {}
                 }
@@ -662,6 +827,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Array(_) => format!("bm_arr_retain({place})"),
             Ty::Map(..) | Ty::Set(_) => format!("bm_map_retain({place})"),
             Ty::Func(..) => format!("bm_env_retain(({place}).env)"),
+            Ty::Class(..) => format!("bmg_obj_retain({place})"),
+            Ty::Interface(..) => format!("bm_iface_retain({place})"),
+            Ty::Union(_) if self.niche(t).is_some() => format!("bmg_obj_retain({place})"),
             _ if self.is_rc(t) => {
                 self.ensure_helper(t, H_RC);
                 format!("rt_{}(&{place})", self.box_name(t))
@@ -686,6 +854,13 @@ impl<'c, 'a> Gen<'c, 'a> {
                 format!("bm_map_release({place}, {kd}, &bm_type_undefined)")
             }
             Ty::Func(..) => format!("bm_env_release(({place}).env)"),
+            Ty::Class(..) => self.class_release_code(t, place),
+            Ty::Interface(..) => format!("bm_iface_release({place})"),
+            Ty::Union(ms) if self.niche(t).is_some() => {
+                let (pi, _) = self.niche(t).unwrap();
+                let m = self.c.types.tys(ms)[pi];
+                self.class_release_code(m, place)
+            }
             _ if self.is_rc(t) => {
                 self.ensure_helper(t, H_RC);
                 format!("rl_{}(&{place})", self.box_name(t))
@@ -703,6 +878,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 format!("({d})->eq(&({a}), &({b}))")
             }
             Ty::Func(..) => format!("(({a}).fn == ({b}).fn && ({a}).env == ({b}).env)"),
+            Ty::Class(..) => format!("((void *)({a}) == (void *)({b}))"),
+            Ty::Interface(..) => format!("(({a}).p == ({b}).p)"),
+            Ty::Union(_) if self.niche(t).is_some() => format!("((void *)({a}) == (void *)({b}))"),
             Ty::Record(_) | Ty::Union(_) | Ty::Rec(..) => {
                 self.ensure_helper(t, H_EQ);
                 format!("eq_{}(&({a}), &({b}))", self.box_name(t))
@@ -735,6 +913,14 @@ impl<'c, 'a> Gen<'c, 'a> {
                 format!("bm_to_str_arr(sb, {place}, {d})")
             }
             Ty::Func(..) => "bm_sb_push_cstr(sb, \"[Function]\")".into(),
+            Ty::Class(..) => self.class_string_code(t, place),
+            Ty::Interface(..) => format!("(({place}).t ? ({place}).t->to_str(sb, ({place}).p) : bm_sb_push_cstr(sb, \"undefined\"))"),
+            Ty::Union(ms) if self.niche(t).is_some() => {
+                let (pi, _) = self.niche(t).unwrap();
+                let m = self.c.types.tys(ms)[pi];
+                let inner = self.class_string_code(m, place);
+                format!("({{ if (({place}) != NULL) {inner}; else bm_sb_push_cstr(sb, \"undefined\"); }})")
+            }
             Ty::Map(..) | Ty::Set(_) => format!("({})->to_str(sb, &({place}))", self.desc(t)),
             _ => {
                 self.ensure_helper(t, H_STR);
@@ -767,6 +953,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 format!("bm_set_inspect(sb, {place}, {kd}, {depth})")
             }
             Ty::Func(..) => "bm_sb_push_cstr(sb, \"[Function (anonymous)]\")".into(),
+            Ty::Class(..) => format!("bmg_obj_inspect(sb, (void *)({place}), {depth})"),
+            Ty::Interface(..) => format!("(({place}).t ? ({place}).t->inspect(sb, ({place}).p, {depth}) : bm_sb_push_cstr(sb, \"undefined\"))"),
+            Ty::Union(_) if self.niche(t).is_some() => format!("({{ if (({place}) != NULL) bmg_obj_inspect(sb, (void *)({place}), {depth}); else bm_sb_push_cstr(sb, \"undefined\"); }})"),
             _ => {
                 self.ensure_helper(t, H_INSPECT);
                 format!("in_{}(sb, &({place}), {depth})", self.box_name(t))
@@ -808,6 +997,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             };
             let eq = self.eq_code(t, &format!("*(const {ct} *)a"), &format!("*(const {ct} *)b"));
             let hash = match self.tget(t) {
+                Ty::Class(..) => "((uint64_t)(uintptr_t)(*(void *const *)p) * 0x9E3779B97F4A7C15ull)".into(),
+                Ty::Interface(..) => "((uint64_t)(uintptr_t)(((const bm_iface *)p)->p) * 0x9E3779B97F4A7C15ull)".into(),
+                Ty::Union(_) if self.niche(t).is_some() => "((uint64_t)(uintptr_t)(*(void *const *)p) * 0x9E3779B97F4A7C15ull)".into(),
                 Ty::Record(_) | Ty::Union(_) | Ty::Rec(..) => {
                     self.ensure_helper(t, H_HASH);
                     format!("hs_{}(p)", self.box_name(t))
@@ -923,8 +1115,21 @@ impl<'c, 'a> Gen<'c, 'a> {
                 entry_unique.push(*key);
             }
         }
-        let code = self.function_body(inst.m, inst.subst.clone(), &params, ret, body::FnBodyKind::Block(f.body), Some(entry_unique));
+        let code = self.function_body(inst.m, inst.subst.clone(), &params, ret, body::FnBodyKind::Block(f.body), Some(entry_unique), None, None);
         let _ = writeln!(self.funcs, "static {proto} {{\n{code}}}\n");
+    }
+
+    /// Prints an error that escaped `main` (stderr) or fails the running test.
+    fn uncaught_fn(&mut self) -> String {
+        let err = self.c.error_class();
+        let text = if err == ERROR { "bm_sb_push_cstr(sb, \"Error\")".to_string() } else {
+            let ct = self.ctype(err);
+            self.string_code(err, &format!("(({ct})e)"))
+        };
+        let _ = writeln!(self.protos, "static void bmg_uncaught(void);");
+        format!(
+            "static void bmg_uncaught(void) {{\n    void *e = bmg_err; bmg_err = NULL;\n    bm_sb sbv = {{0}}; bm_sb *sb = &sbv;\n    bm_sb_push_cstr(sb, \"uncaught \");\n    {text};\n    bm_sb_push_char(sb, '\\0');\n    bm_out_flush();\n    if (bm_test_active()) bm_trap(sbv.data, NULL);\n    fprintf(stderr, \"%s\\n\", sbv.data);\n    fflush(stderr);\n}}\n"
+        )
     }
 
     fn test_fn(&mut self, m: u32, arrow: ExprId) -> String {
@@ -934,8 +1139,10 @@ impl<'c, 'a> Gen<'c, 'a> {
             ast::ArrowBody::Block(b) => body::FnBodyKind::Block(*b),
             ast::ArrowBody::Expr(e) => body::FnBodyKind::Expr(*e),
         };
-        let code = self.function_body(m, FxMap::default(), &[], VOID, body, None);
-        let _ = writeln!(self.funcs, "static void {name}(void) {{\n{code}}}\n");
+        let code = self.function_body(m, FxMap::default(), &[], VOID, body, None, None, None);
+        let _ = writeln!(self.funcs, "static void {name}_body(void) {{\n{code}}}\n");
+        let _ = writeln!(self.funcs, "static void {name}(void) {{ {name}_body(); if (bmg_err) bmg_uncaught(); }}\n");
+        let _ = writeln!(self.protos, "static void bmg_uncaught(void);");
         name
     }
 
@@ -950,7 +1157,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             let ct = self.ctype(ty);
             let _ = writeln!(self.protos, "static {ct} {gname};");
             // Initialize dependencies first (their `const_ref` calls happen while emitting this initializer).
-            let code = self.function_body(m, FxMap::default(), &[], ty, body::FnBodyKind::Expr(*init), None);
+            let code = self.function_body(m, FxMap::default(), &[], ty, body::FnBodyKind::Expr(*init), None, None, None);
             let fname = format!("init_{gname}");
             let _ = writeln!(self.funcs, "static {ct} {fname}(void) {{\n{code}}}\n");
             let _ = writeln!(self.const_init, "    {gname} = {fname}();");
@@ -1020,6 +1227,48 @@ static inline void *bmg_alloc_small(size_t size) {
     if (__builtin_expect(f != NULL, 1)) { bmg_bins[c] = f->next; return f; }
     return bmg_refill(c);
 }
+/* JSON.stringify indentation: a newline and `lvl` copies of `ind` (nothing when compact). */
+static void bmg_js_nl(bm_sb *sb, bm_str ind, int lvl) {
+    if (!ind.p->len) return;
+    bm_sb_push_char(sb, '\n');
+    for (int i = 0; i < lvl; i++) bm_sb_push(sb, ind.p->data, (size_t)ind.p->len);
+}
+static bm_str bmg_js_spaces(bm_int n) {
+    static const char sp[] = "          ";
+    if (n <= 0) return BM_EMPTY_STR;
+    return bm_str_from(sp, (size_t)(n > 10 ? 10 : n));
+}
+#if defined(__APPLE__)
+#define BMG_PLATFORM "darwin"
+#elif defined(_WIN32)
+#define BMG_PLATFORM "win32"
+#else
+#define BMG_PLATFORM "linux"
+#endif
+/* The error being thrown (a class instance extending Error), or NULL. Calls that can throw are
+ * followed by a check; `try` blocks jump to their handler, other code returns early. */
+static void *bmg_err;
+/* Interface values: data (object, boxed record copy, or cell) + itab (retain/release/print, then
+ * one thunk per member). */
+typedef struct bmg_itab {
+    void (*retain)(void *p);
+    void (*release)(void *p);
+    void (*inspect)(bm_sb *sb, void *p, int depth);
+    void (*to_str)(bm_sb *sb, void *p);
+} bmg_itab;
+typedef struct bm_iface { void *p; const bmg_itab *t; } bm_iface;
+static inline void bm_iface_retain(bm_iface v) { if (v.t) v.t->retain(v.p); }
+static inline void bm_iface_release(bm_iface v) { if (v.t) v.t->release(v.p); }
+/* Class instances: a 16-byte header, then fields (a subclass embeds its base first). */
+typedef struct bmg_obj { int32_t rc; int32_t weak; uint32_t cid; uint32_t flags; } bmg_obj;
+static void bmg_obj_drop(void *p);
+static void bmg_obj_free(void *p);
+static void bmg_obj_inspect(bm_sb *sb, void *p, int depth);
+#define bmg_obj_init(o, id) (*(bmg_obj *)(void *)(o) = (bmg_obj){1, 0, (id), 0})
+static inline void bmg_obj_retain(void *p) { if (p) ((bmg_obj *)p)->rc++; }
+static inline void bmg_obj_release(void *p) { if (p && --((bmg_obj *)p)->rc == 0) bmg_obj_drop(p); }
+static inline void bmg_weak_retain(void *p) { if (p) ((bmg_obj *)p)->weak++; }
+static inline void bmg_weak_release(void *p) { if (p && --((bmg_obj *)p)->weak == 0 && ((bmg_obj *)p)->rc <= 0) bmg_obj_free(p); }
 static inline void bmg_free_small(void *p, size_t size) {
 #ifdef BMG_PLAIN_ALLOC
     bm_free(p); return;
@@ -1029,6 +1278,127 @@ static inline void bmg_free_small(void *p, size_t size) {
     bmg_free_node *f = p;
     f->next = bmg_bins[c];
     bmg_bins[c] = f;
+}
+/* ---- Cycle collector for `cyclic class` objects (only they pay for it) ----
+ * Cyclic objects live in a list, with a 24-byte prefix before the header. A collection counts,
+ * for each cyclic object, the references it gets from other cyclic objects; any object with more
+ * references than that is referenced from outside (a variable, a temporary, an acyclic object)
+ * and is live, as is everything it reaches. The rest is garbage: unreachable cycles.
+ * Copy-on-write buffers (arrays, maps, boxes) reachable from cyclic objects are graph nodes too,
+ * so a buffer shared by two objects isn't counted twice. */
+typedef struct bmg_cyc { struct bmg_cyc *prev, *next; int64_t gc; } bmg_cyc;
+enum { BMG_CYCLIC = 1, BMG_COLLECTING = 2, BMG_REACHED = 4 };
+static bmg_cyc bmg_cyc_head = { &bmg_cyc_head, &bmg_cyc_head, 0 };
+static int64_t bmg_cyc_count, bmg_cyc_since, bmg_cyc_limit = 10000;
+static int bmg_gc_phase; /* 1: count internal references; 2: mark what's reachable */
+#define BMG_CYC(p) ((bmg_cyc *)(void *)((char *)(p) - sizeof(bmg_cyc)))
+#define BMG_OBJ(c) ((bmg_obj *)(void *)((char *)(c) + sizeof(bmg_cyc)))
+static void bmg_cyc_collect(void);
+static void bmg_obj_traverse(void *p);
+static void bmg_obj_dropfields(void *p);
+static inline void *bmg_cyc_alloc(size_t size) {
+    if (__builtin_expect(++bmg_cyc_since > bmg_cyc_limit, 0)) bmg_cyc_collect();
+    bmg_cyc *c = bmg_alloc_small(size + sizeof(bmg_cyc));
+    c->next = bmg_cyc_head.next; c->prev = &bmg_cyc_head; bmg_cyc_head.next->prev = c; bmg_cyc_head.next = c;
+    bmg_cyc_count++;
+    return c + 1;
+}
+static inline void bmg_cyc_unlink(void *p) { bmg_cyc *c = BMG_CYC(p); c->prev->next = c->next; c->next->prev = c->prev; bmg_cyc_count--; }
+static inline void bmg_cyc_free(void *p, size_t size) { bmg_free_small(BMG_CYC(p), size + sizeof(bmg_cyc)); }
+typedef void (*bmg_gv_fn)(void *buf, int64_t len);
+typedef struct { void *buf; int64_t internal; int64_t len; bmg_gv_fn fn; int reached; } bmg_gcb;
+static bmg_gcb *bmg_gcb_tab; static size_t bmg_gcb_cap, bmg_gcb_n;
+static void **bmg_gc_stack; static size_t bmg_gc_sn, bmg_gc_scap;
+static bmg_gcb *bmg_gcb_find(void *buf, int *fresh) {
+    if ((bmg_gcb_n + 1) * 2 > bmg_gcb_cap) {
+        size_t oc = bmg_gcb_cap, nc = oc ? oc * 2 : 1024;
+        bmg_gcb *old = bmg_gcb_tab;
+        bmg_gcb_tab = calloc(nc, sizeof(bmg_gcb));
+        if (!bmg_gcb_tab) bm_trap("out of memory", "cycle collector");
+        bmg_gcb_cap = nc;
+        for (size_t i = 0; i < oc; i++) if (old[i].buf) {
+            size_t h = ((uintptr_t)old[i].buf >> 4) * 0x9E3779B97F4A7C15ull & (nc - 1);
+            while (bmg_gcb_tab[h].buf) h = (h + 1) & (nc - 1);
+            bmg_gcb_tab[h] = old[i];
+        }
+        free(old);
+    }
+    size_t h = ((uintptr_t)buf >> 4) * 0x9E3779B97F4A7C15ull & (bmg_gcb_cap - 1);
+    while (bmg_gcb_tab[h].buf && bmg_gcb_tab[h].buf != buf) h = (h + 1) & (bmg_gcb_cap - 1);
+    *fresh = bmg_gcb_tab[h].buf == NULL;
+    if (*fresh) { bmg_gcb_tab[h].buf = buf; bmg_gcb_n++; }
+    return &bmg_gcb_tab[h];
+}
+static void bmg_gc_push(void *p) {
+    if (bmg_gc_sn == bmg_gc_scap) {
+        bmg_gc_scap = bmg_gc_scap ? bmg_gc_scap * 2 : 1024;
+        bmg_gc_stack = realloc(bmg_gc_stack, bmg_gc_scap * sizeof(void *));
+        if (!bmg_gc_stack) bm_trap("out of memory", "cycle collector");
+    }
+    bmg_gc_stack[bmg_gc_sn++] = p;
+}
+/* A strong reference from a cyclic object (or one of its buffers) to a class instance. */
+static inline void bmg_gc_obj(void *p) {
+    if (!p) return;
+    bmg_obj *h = p;
+    if (!(h->flags & BMG_CYCLIC)) return;
+    if (bmg_gc_phase == 1) BMG_CYC(p)->gc--;
+    else if (!(h->flags & BMG_REACHED)) { h->flags |= BMG_REACHED; bmg_gc_push(p); }
+}
+/* A buffer reachable from a cyclic object: returns true when its elements should be visited now. */
+static bool bmg_gc_buf(void *buf, int64_t len, bmg_gv_fn fn) {
+    if (!buf || *(int64_t *)buf < 0) return false;
+    int fresh;
+    bmg_gcb *b = bmg_gcb_find(buf, &fresh);
+    if (fresh) { b->len = len; b->fn = fn; }
+    if (bmg_gc_phase == 1) { b->internal++; return fresh; }
+    if (b->reached) return false;
+    b->reached = 1;
+    return true;
+}
+static void bmg_cyc_collect(void) {
+    bmg_cyc_since = 0;
+    if (bmg_gcb_tab) memset(bmg_gcb_tab, 0, bmg_gcb_cap * sizeof(bmg_gcb));
+    bmg_gcb_n = 0;
+    for (bmg_cyc *c = bmg_cyc_head.next; c != &bmg_cyc_head; c = c->next) c->gc = BMG_OBJ(c)->rc;
+    bmg_gc_phase = 1;
+    for (bmg_cyc *c = bmg_cyc_head.next; c != &bmg_cyc_head; c = c->next) bmg_obj_traverse(BMG_OBJ(c));
+    bmg_gc_phase = 2;
+    bmg_gc_sn = 0;
+    for (bmg_cyc *c = bmg_cyc_head.next; c != &bmg_cyc_head; c = c->next)
+        if (c->gc > 0) { BMG_OBJ(c)->flags |= BMG_REACHED; bmg_gc_push(BMG_OBJ(c)); }
+    for (size_t i = 0; i < bmg_gcb_cap; i++) {
+        bmg_gcb *b = &bmg_gcb_tab[i];
+        if (b->buf && !b->reached && *(int64_t *)b->buf > b->internal) { b->reached = 1; b->fn(b->buf, b->len); }
+    }
+    while (bmg_gc_sn) {
+        void *p = bmg_gc_stack[--bmg_gc_sn];
+        bmg_obj_traverse(p);
+    }
+    bmg_gc_phase = 0;
+    /* Garbage: not reached. Unlink it, release its fields (freeing what only it referenced; its
+     * own count reaching zero is ignored while it's being collected), then free it. */
+    bmg_cyc *garbage = NULL;
+    for (bmg_cyc *c = bmg_cyc_head.next, *next; c != &bmg_cyc_head; c = next) {
+        next = c->next;
+        bmg_obj *h = BMG_OBJ(c);
+        if (h->flags & BMG_REACHED) { h->flags &= ~BMG_REACHED; continue; }
+        h->flags |= BMG_COLLECTING;
+        bmg_cyc_unlink(h);
+        c->next = garbage;
+        garbage = c;
+    }
+    for (bmg_cyc *c = garbage; c; c = c->next) BMG_OBJ(c)->weak++; /* pinned while fields are released */
+    for (bmg_cyc *c = garbage; c; c = c->next) bmg_obj_dropfields(BMG_OBJ(c));
+    for (bmg_cyc *c = garbage, *next; c; c = next) {
+        next = c->next;
+        bmg_obj *h = BMG_OBJ(c);
+        h->rc = 0;
+        h->flags &= ~BMG_COLLECTING;
+        if (--h->weak == 0) bmg_obj_free(h);
+    }
+    int64_t live = bmg_cyc_count * 2;
+    bmg_cyc_limit = live > 10000 ? live : 10000;
 }
 /* Slow paths take arrays by value and return the updated value, so the array itself never
  * escapes: the C compiler keeps its length (and pointer) in registers and can reason about it. */
