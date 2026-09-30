@@ -178,6 +178,8 @@ pub(crate) struct Gen<'c, 'a> {
     pub(crate) pending_boxes: Vec<TyId>,
     /// (source type, interface type) → itab name.
     pub(crate) itabs: FxMap<(TyId, TyId), String>,
+    /// (source function type, target function type) → adapter function (see `fn_adapter`).
+    pub(crate) fn_adapters: FxMap<(TyId, TyId), String>,
     /// Emit `bmg_uncaught` (main can throw, or tests).
     needs_uncaught: bool,
     /// The async function whose body `function_body` emits next (see `asyncfn.rs`).
@@ -247,6 +249,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             helpers_after_decl: String::new(),
             pending_boxes: Vec::new(),
             itabs: FxMap::default(),
+            fn_adapters: FxMap::default(),
             needs_uncaught: false,
             pending_async: None,
             last_children: Vec::new(),
@@ -1380,6 +1383,9 @@ static void bmg_obj_free(void *p);
 static void bmg_obj_inspect(bm_sb *sb, void *p, int depth);
 #define bmg_obj_init(o, id) (*(bmg_obj *)(void *)(o) = (bmg_obj){1, 0, (id), 0})
 static inline void bmg_obj_retain(void *p) { if (p) ((bmg_obj *)p)->rc++; }
+/* A function value adapted to another function type: the environment holds the original. */
+typedef struct bmg_fnbox { bm_env h; bm_fn f; } bmg_fnbox;
+static void bmg_fnbox_drop(bm_env *e) { bm_env_release(((bmg_fnbox *)e)->f.env); }
 static inline void bmg_obj_release(void *p) { if (p && --((bmg_obj *)p)->rc == 0) bmg_obj_drop(p); }
 static inline void bmg_weak_retain(void *p) { if (p) ((bmg_obj *)p)->weak++; }
 static inline void bmg_weak_release(void *p) { if (p && --((bmg_obj *)p)->weak == 0 && ((bmg_obj *)p)->rc <= 0) bmg_obj_free(p); }

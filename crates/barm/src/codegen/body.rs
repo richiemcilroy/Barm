@@ -1747,15 +1747,84 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.close("}");
                 return res;
             }
-            (Ty::Func(..), Ty::Func(..)) => {
-                // Same C calling convention when parameter and return C types agree (e.g. a result ignored as void).
-                return Val { ty: to, ..v };
+            (Ty::Func(fps, fret, _), Ty::Func(tps, tret, _)) => {
+                // Same C calling convention when parameter and return C types agree (e.g. a result
+                // ignored as void); otherwise an adapter converts the arguments and the result.
+                let (fps, tps) = (self.c.types.params(fps).to_vec(), self.c.types.params(tps).to_vec());
+                let same_params = fps.len() == tps.len() && fps.iter().zip(&tps).all(|(a, b)| a.inout == b.inout && self.ctype(a.ty) == self.ctype(b.ty));
+                let same_ret = tret == VOID || self.ctype(fret) == self.ctype(tret);
+                if same_params && same_ret {
+                    return Val { ty: to, ..v };
+                }
+                let adapter = self.fn_adapter(from, to);
+                let fv = self.fresh("fa");
+                self.line(format!("bmg_fnbox *{fv} = bm_alloc(sizeof(bmg_fnbox)); {fv}->h.rc = 1; {fv}->h.drop = bmg_fnbox_drop; {fv}->f = {}; bm_env_retain({fv}->f.env);", v.code));
+                return self.tmp(to, &format!("((bm_fn){{ (void *){adapter}, (bm_env *){fv} }})"), true);
             }
             _ => {}
         }
         let (fs, ts) = (self.c.show(from), self.c.show(to));
         self.internal.push(format!("no conversion from `{fs}` to `{ts}`"));
         Val { ty: to, ..v }
+    }
+
+    /// A C function with `to`'s signature that calls a `from` function (the one in its
+    /// `bmg_fnbox` environment): arguments convert to `from`'s parameters (extra ones are
+    /// dropped), and the result to `to`'s return type.
+    fn fn_adapter(&mut self, from: TyId, to: TyId) -> String {
+        if let Some(n) = self.fn_adapters.get(&(from, to)) {
+            return n.clone();
+        }
+        let (Ty::Func(fps, fret, _), Ty::Func(tps, tret, _)) = (self.tget(from), self.tget(to)) else { unreachable!() };
+        let (fps, tps) = (self.c.types.params(fps).to_vec(), self.c.types.params(tps).to_vec());
+        let name = format!("bmg_adapt_{}", self.fn_adapters.len());
+        self.fn_adapters.insert((from, to), name.clone());
+        let proto = {
+            let rct = if tret == VOID { "void".to_string() } else { self.ctype(tret) };
+            let mut ps = vec!["bm_env *env_".to_string()];
+            for (i, p) in tps.iter().enumerate() {
+                let ct = self.ctype(p.ty);
+                ps.push(if p.inout { format!("{ct} *p{i}") } else { format!("{ct} p{i}") });
+            }
+            format!("{rct} {name}({})", ps.join(", "))
+        };
+        let _ = writeln!(self.protos, "static {proto};");
+        let m = self.cur_m();
+        self.begin_scratch(m);
+        let mut argv = vec!["inner.env".to_string()];
+        for (i, fp) in fps.iter().enumerate() {
+            let tp = tps.get(i).copied().unwrap_or(*fp);
+            if fp.inout {
+                argv.push(format!("p{i}"));
+            } else {
+                let a = self.coerce(Val::plain(format!("p{i}"), tp.ty), fp.ty);
+                argv.push(a.code);
+            }
+        }
+        self.line("bm_fn inner = ((bmg_fnbox *)env_)->f;");
+        let cast = {
+            let rct = if fret == VOID { "void".to_string() } else { self.ctype(fret) };
+            let mut ps = vec!["bm_env *".to_string()];
+            for p in &fps {
+                let ct = self.ctype(p.ty);
+                ps.push(if p.inout { format!("{ct} *") } else { ct });
+            }
+            format!("{rct} (*)({})", ps.join(", "))
+        };
+        let call = format!("(({cast})inner.fn)({})", argv.join(", "));
+        if fret == VOID {
+            self.line(format!("{call};"));
+            if tret != VOID {
+                let v = self.coerce(Val::plain("0", UNDEFINED), tret);
+                self.scratch_return(v, tret);
+            }
+        } else {
+            let r = self.tmp(fret, &call, true);
+            self.scratch_return(r, tret);
+        }
+        let body = self.end_scratch();
+        let _ = writeln!(self.helpers_after_decl, "static {proto} {{\n{body}}}\n");
+        name
     }
 
     /// The member of union `to` that a value of type `from` converts into.
