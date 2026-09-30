@@ -279,7 +279,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let rel_i = self.release_code(inner, "x");
                 let rel = self.release_code(t, "*out");
                 format!(
-                    "    {ict} x = {di};\n    if (!{pi}(p, &x)) {{ {rel_i}; return false; }}\n    {bn} *b = bmg_alloc_small(sizeof({bn})); b->rc = 1; b->v = x;\n    {rel};\n    *out = b;\n    return true;\n"
+                    "    {ict} x = {di};\n    if (!{pi}(p, &x)) {{ {rel_i}; return false; }}\n    {bn} *b = bmg_alloc_small(sizeof({bn})); RC_{bn}(b) = 1; b->v = x;\n    {rel};\n    *out = b;\n    return true;\n"
                 )
             }
             _ => "    return bm_jp_fail(p, \"a supported value\");\n".into(),

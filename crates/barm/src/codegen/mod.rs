@@ -188,6 +188,12 @@ pub(crate) struct Gen<'c, 'a> {
     pub(crate) weak_slot_memo: FxMap<u32, bool>,
     /// Whether the program formats a value through descriptors (console.log of a container, ...).
     pub(crate) uses_inspect: bool,
+    /// Types some code retains (copies with a count increment), and the recursive-alias boxes
+    /// defined: a box type no retained value can reach is never shared, so it has no count.
+    pub(crate) rc_roots: FxSet<TyId>,
+    pub(crate) rc_helper_depth: u32,
+    pub(crate) rec_boxes: Vec<(TyId, String)>,
+    box_defs: String,
     /// Helper functions whose prototypes are in `protos`, emitted with the helpers.
     pub(crate) helpers_after_decl: String,
     /// Box types whose struct bodies are still to be defined.
@@ -266,6 +272,10 @@ impl<'c, 'a> Gen<'c, 'a> {
             weak_memo: FxMap::default(),
             weak_slot_memo: FxMap::default(),
             uses_inspect: false,
+            rc_roots: FxSet::default(),
+            rc_helper_depth: 0,
+            rec_boxes: Vec::new(),
+            box_defs: String::new(),
             helpers_after_decl: String::new(),
             pending_boxes: Vec::new(),
             itabs: FxMap::default(),
@@ -431,6 +441,15 @@ impl<'c, 'a> Gen<'c, 'a> {
         while let Some(t) = self.pending_boxes.pop() {
             self.define_struct(t);
         }
+        // A never-shared box has no count: its "count" reads as 1, so releasing frees it.
+        let shared = self.shared_boxes();
+        for (t, name) in &self.rec_boxes {
+            if shared.contains(t) {
+                let _ = writeln!(self.box_defs, "#define RCF_{name} int64_t rc;\n#define RC_{name}(b) ((b)->rc)");
+            } else {
+                let _ = writeln!(self.box_defs, "#define RCF_{name}\n#define RC_{name}(b) ((int64_t){{1}})");
+            }
+        }
         let dispatch = std::mem::take(&mut self.dispatch_bodies);
         self.helpers_after.push(dispatch);
         self.helpers_after.push(tables);
@@ -449,6 +468,26 @@ impl<'c, 'a> Gen<'c, 'a> {
             self.funcs,
             "static int bmg_argc; static char **bmg_argv; static int bmg_exit;\nstatic int bmg_program(void) {{\n    bm_init(bmg_argc, bmg_argv);\n{init}{main_body}}}\nstatic void *bmg_thread(void *arg) {{ (void)arg; bmg_exit = bmg_program(); return NULL; }}\nint main(int argc, char **argv) {{\n    bmg_argc = argc; bmg_argv = argv;\n#if defined(__APPLE__)\n    /* Linked with a 512 MiB main stack (build.rs): run right here. */\n    if (pthread_get_stacksize_np(pthread_self()) >= ((size_t)256 << 20)) return bmg_program();\n#endif\n    pthread_attr_t attr; pthread_t th;\n    if (pthread_attr_init(&attr) == 0 && pthread_attr_setstacksize(&attr, (size_t)1 << 30) == 0 && BMG_THREAD_QOS(&attr) && pthread_create(&th, &attr, bmg_thread, NULL) == 0) {{\n        pthread_join(th, NULL);\n        return bmg_exit;\n    }}\n    return bmg_program();\n}}"
         );
+    }
+
+    /// Recursive-alias boxes that can be shared: those reachable from a retained type. Retaining
+    /// a record or union retains its members; a shared box may be cloned (copy-on-write), which
+    /// retains its contents.
+    fn shared_boxes(&mut self) -> FxSet<TyId> {
+        let mut seen = FxSet::default();
+        let mut stack: Vec<TyId> = self.rc_roots.iter().copied().collect();
+        while let Some(t) = stack.pop() {
+            if !seen.insert(t) {
+                continue;
+            }
+            match self.tget(t) {
+                Ty::Record(fs) => stack.extend(self.c.types.fields(fs).iter().map(|f| f.ty)),
+                Ty::Union(ms) => stack.extend(self.c.types.tys(ms).iter().copied()),
+                Ty::Rec(..) => stack.push(self.c.unfold(t)),
+                _ => {}
+            }
+        }
+        seen
     }
 
     /// Whether the generated code can leave work for the event loop: tasks, promises,
@@ -471,6 +510,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         // Descriptors reach their console.log formatter through BMG_INS: NULL unless the program
         // inspects something, so the formatter isn't linked into programs that never do.
         out.push_str(if self.uses_inspect { "#define BMG_INS(f) f\n" } else { "#define BMG_INS(f) NULL\n" });
+        out.push_str(&self.box_defs);
         let frames = self.ordered_frames();
         for s in [&self.typedefs, &self.structs, &self.class_structs, &self.env_structs, &frames, &self.lits, &self.protos, &self.helpers, &self.funcs] {
             out.push_str(s);
@@ -653,7 +693,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Rec(..) => {
                 let inner = self.c.unfold(t);
                 let ct = self.ctype(inner);
-                let _ = writeln!(body, "struct {name} {{\n    int64_t rc;\n    {ct} v;\n}};");
+                // The count is left out when no box of this type is ever shared (see `shared_boxes`).
+                let _ = writeln!(body, "struct {name} {{\n    RCF_{name}\n    {ct} v;\n}};");
+                self.rec_boxes.push((t, name.clone()));
                 self.class_structs.push_str(&body);
                 return;
             }
@@ -775,6 +817,8 @@ impl<'c, 'a> Gen<'c, 'a> {
         let mut h = String::new();
         match kind {
             H_RC => {
+                // Retains inside rt_ helpers happen only when their type is retained (see `shared_boxes`).
+                self.rc_helper_depth += 1;
                 let _ = writeln!(self.protos, "static void rt_{n}(void *p);\nstatic void rl_{n}(void *p);");
                 let (mut rt, mut rl) = (String::new(), String::new());
                 match self.tget(t) {
@@ -803,19 +847,20 @@ impl<'c, 'a> Gen<'c, 'a> {
                     }
                     Ty::Rec(..) => {
                         let inner = self.c.unfold(t);
-                        rt.push_str("    if (*x) (*x)->rc++;\n");
+                        let _ = writeln!(rt, "    if (*x) RC_{n}(*x)++;");
                         if self.is_rc(inner) {
                             // Freeing a box can recurse (long lists): bounded depth, see bmg_drop_enter.
                             let rel_inner = format!("{};", self.release_code(inner, "b->v"));
                             let _ = writeln!(self.protos, "static void fb_{n}(void *p);");
                             let _ = writeln!(self.helpers_after_decl, "static void fb_{n}(void *p) {{\n    {ct} b = p;\n    {rel_inner}\n    bmg_free_small(b, sizeof(*b));\n}}");
-                            let _ = writeln!(rl, "    if (*x && --(*x)->rc == 0) fb_{n}(*x);");
+                            let _ = writeln!(rl, "    if (*x && --RC_{n}(*x) == 0) fb_{n}(*x);");
                         } else {
-                            let _ = writeln!(rl, "    if (*x && --(*x)->rc == 0) bmg_free_small(*x, sizeof(**x));");
+                            let _ = writeln!(rl, "    if (*x && --RC_{n}(*x) == 0) bmg_free_small(*x, sizeof(**x));");
                         }
                     }
                     _ => {}
                 }
+                self.rc_helper_depth -= 1;
                 let _ = writeln!(h, "static void rt_{n}(void *p) {{\n    {ct} *x = p; (void)x;\n{rt}}}");
                 let _ = writeln!(h, "static void rl_{n}(void *p) {{\n    {ct} *x = p; (void)x;\n{rl}}}");
             }
@@ -955,7 +1000,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                         let inner = self.c.unfold(t);
                         let d = self.default_value(inner);
                         let bn = self.box_name(t);
-                        format!("({{ {bn} *b = bmg_alloc_small(sizeof({bn})); b->rc = 1; b->v = {d}; b; }})")
+                        format!("({{ {bn} *b = bmg_alloc_small(sizeof({bn})); RC_{bn}(b) = 1; b->v = {d}; b; }})")
                     }
                     _ => "0".into(),
                 };
@@ -967,6 +1012,9 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     pub(crate) fn retain_code(&mut self, t: TyId, place: &str) -> String {
+        if self.rc_helper_depth == 0 {
+            self.rc_roots.insert(t);
+        }
         match self.tget(t) {
             Ty::Str => format!("bm_str_retain({place})"),
             Ty::Array(_) => format!("bm_arr_retain({place})"),
@@ -1146,6 +1194,8 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     /// A `const bm_type *` expression describing `t` (for containers and printing).
     pub(crate) fn desc(&mut self, t: TyId) -> String {
+        // Containers retain through descriptors.
+        self.rc_roots.insert(t);
         match self.tget(t) {
             Ty::Int => return "&bm_type_int".into(),
             Ty::F64 => return "&bm_type_f64".into(),
