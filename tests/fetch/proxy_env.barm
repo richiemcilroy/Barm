@@ -1,0 +1,16 @@
+// HTTP_PROXY and NO_PROXY (the harness sets them for this program): requests go through the
+// proxy unless NO_PROXY names the host.
+const base = process.env.BASE ?? "http://127.0.0.1:1"
+
+async function show(label: string, p: Promise<Response, Error>): Promise<void> {
+  try {
+    const r = await p
+    console.log(`${label}: ${r.status} | ${(await r.text()).replaceAll(base, "BASE")}`)
+  } catch (e) {
+    console.log(`${label}: ${e instanceof FetchError ? e.code : e.name}: ${e.message}`)
+  }
+}
+
+await show("through HTTP_PROXY", fetch("http://example.test/x?y=1"))
+await show("NO_PROXY host", fetch(base + "/text"))
+await show("an explicit proxy wins", fetch("http://example.test/z", { proxy: process.env.HTTP_PROXY ?? "" }))

@@ -1,0 +1,8 @@
+http via proxy: 200 BASE/text?a=1 | proxied GET BASE/text?a=1 host=HOST auth=false
+https via proxy: 200 https://localhost:GOOD/text | secure hello
+https via proxy, unknown CA: UNABLE_TO_VERIFY_LEAF_SIGNATURE: unable to verify the first certificate
+no credentials (http): 407 BASE/text | proxy says no
+no credentials (https): 407 https://localhost:GOOD/text | proxy says no
+credentials (http): 200 BASE/text | proxied GET BASE/text host=HOST auth=true
+credentials (https): 200 https://localhost:GOOD/text | secure hello
+proxy down: ConnectionRefused: Unable to connect. Is the computer able to access the url?

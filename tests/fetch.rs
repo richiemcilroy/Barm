@@ -230,6 +230,44 @@ impl Drop for TlsServer {
     }
 }
 
+/// An HTTP proxy: absolute-form requests (`GET http://host/path`) are answered here with what
+/// the proxy saw; CONNECT opens a tunnel to the target. With `auth`, requests without
+/// `Proxy-Authorization: Basic dXNlcjpwYXNz` (user:pass) get 407.
+fn serve_proxy(listener: TcpListener, auth: bool) {
+    for conn in listener.incoming() {
+        let Ok(mut s) = conn else { continue };
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            while let Some(r) = read_req(&mut s, &mut buf) {
+                let authorized = r.header("proxy-authorization") == Some("Basic dXNlcjpwYXNz");
+                if auth && !authorized {
+                    respond(&mut s, "407 Proxy Authentication Required", &[("Proxy-Authenticate", "Basic realm=\"test\"".into())], b"proxy says no");
+                    continue;
+                }
+                if r.method == "CONNECT" {
+                    let Ok(up) = TcpStream::connect(r.path.as_str()) else {
+                        respond(&mut s, "502 Bad Gateway", &[], b"no route");
+                        return;
+                    };
+                    let _ = s.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n");
+                    let (mut a, mut b) = (s.try_clone().unwrap(), up.try_clone().unwrap());
+                    let mut up2 = up;
+                    std::thread::spawn(move || {
+                        let _ = std::io::copy(&mut b, &mut a);
+                        let _ = a.shutdown(std::net::Shutdown::Write);
+                    });
+                    let _ = std::io::copy(&mut s, &mut up2);
+                    let _ = up2.shutdown(std::net::Shutdown::Write);
+                    return;
+                }
+                let target = if r.query.is_empty() { r.path.clone() } else { format!("{}?{}", r.path, r.query) };
+                let body = format!("proxied {} {} host={} auth={}", r.method, target, r.header("host").unwrap_or(""), r.header("proxy-authorization").is_some());
+                respond(&mut s, "200 OK", &[], body.as_bytes());
+            }
+        });
+    }
+}
+
 /// The same routes on a Unix socket (Bun's `unix` option).
 fn serve_unix(listener: std::os::unix::net::UnixListener, fixtures: PathBuf) {
     for conn in listener.incoming() {
@@ -281,7 +319,11 @@ fn main() {
     // sanitizers in a container); prints the port.
     if let Ok(alt) = std::env::var("BARM_FETCH_SERVE") {
         let alt = alt.replace("PORT", &port.to_string());
-        println!("{port}");
+        let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_auth = TcpListener::bind("127.0.0.1:0").unwrap();
+        println!("{port} {} {}", proxy.local_addr().unwrap().port(), proxy_auth.local_addr().unwrap().port());
+        std::thread::spawn(move || serve_proxy(proxy, false));
+        std::thread::spawn(move || serve_proxy(proxy_auth, true));
         serve(listener, dir, alt, stop);
         return;
     }
@@ -289,6 +331,12 @@ fn main() {
         let (dir, alt, stop) = (dir.clone(), alt.clone(), stop.clone());
         std::thread::spawn(move || serve(listener, dir, alt, stop));
     }
+    let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy_port = proxy.local_addr().unwrap().port();
+    std::thread::spawn(move || serve_proxy(proxy, false));
+    let proxy_auth = TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy_auth_port = proxy_auth.local_addr().unwrap().port();
+    std::thread::spawn(move || serve_proxy(proxy_auth, true));
     let unix_path = std::env::temp_dir().join(format!("barm-fetch-{}.sock", std::process::id()));
     {
         let listener = std::os::unix::net::UnixListener::bind(&unix_path).expect("bind a unix socket");
@@ -300,18 +348,28 @@ fn main() {
     cases.sort();
     let mut failed = Vec::new();
     let bun = Command::new("bun").arg("--version").output().is_ok_and(|o| o.status.success());
-    // HTTPS: tests/fetch/tls/server.py (tls.barm needs it; skipped without python3)
+    // HTTPS: tests/fetch/tls/server.py (tls.barm and proxy.barm need it; skipped without python3)
     let tls = TlsServer::start(&dir.join("tls/server.py"));
     let mut skipped = 0;
     for case in &cases {
         let name = case.file_stem().unwrap().to_string_lossy().into_owned();
-        let mut env: Vec<(&str, String)> = vec![("BASE", base.clone()), ("ALT", alt.clone()), ("UNIX", unix_path.to_string_lossy().into_owned())];
-        if name == "tls" {
-            let Some(t) = &tls else {
+        let mut env: Vec<(&str, String)> = vec![
+            ("BASE", base.clone()),
+            ("ALT", alt.clone()),
+            ("UNIX", unix_path.to_string_lossy().into_owned()),
+            ("PROXY", format!("http://127.0.0.1:{proxy_port}")),
+            ("PROXY_AUTH", format!("127.0.0.1:{proxy_auth_port}")),
+        ];
+        match &tls {
+            Some(t) => env.extend([("TLS_GOOD", t.ports[0].to_string()), ("TLS_EXPIRED", t.ports[1].to_string()), ("TLS_SELF", t.ports[2].to_string())]),
+            None if name == "tls" || name == "proxy" => {
                 skipped += 1;
                 continue;
-            };
-            env.extend([("TLS_GOOD", t.ports[0].to_string()), ("TLS_EXPIRED", t.ports[1].to_string()), ("TLS_SELF", t.ports[2].to_string())]);
+            }
+            None => {}
+        }
+        if name == "proxy_env" {
+            env.extend([("HTTP_PROXY", format!("http://127.0.0.1:{proxy_port}")), ("NO_PROXY", "localhost,127.0.0.1".to_string())]);
         }
         let expected = std::fs::read_to_string(case.with_extension("stdout")).unwrap_or_default();
         if bun && !name.starts_with("native_") {
