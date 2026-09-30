@@ -145,4 +145,4 @@ scripts/sanitize.sh run file.barm # run under ASan/UBSan in a Linux container
 - `tests/`: checker snapshots, run tests and fuzzing
 - `bench/`: benchmarks against C, Rust, Node and Bun
 - `site/`: the landing page, served by a Barm program (`cd site && barm dev`)
-- `docs/`: [spec](docs/spec.md) and [research](docs/research.md)
+- `docs/`: the [language spec](docs/spec.md)
