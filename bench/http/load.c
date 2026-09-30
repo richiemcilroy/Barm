@@ -1,10 +1,13 @@
 /* load — a small keep-alive HTTP/1.1 load generator (wrk-style), for bench/http.
  *
- *   load [-c conns] [-t threads] [-d seconds] [-w warmup] [-P pipeline] [-m method] [-b body] [-j] url
+ *   load [-c conns] [-t threads] [-d seconds] [-w warmup] [-P pipeline] [-R rate] [-m method] [-b body] [-j] url
  *
- * Each thread drives its share of the connections with kqueue/epoll; every connection keeps
- * `pipeline` requests in flight. Latency is measured per request from write to the last byte
- * of its response. Prints a summary (or one JSON object with -j).
+ * Each thread drives its share of the connections with kqueue/epoll. Closed loop (default):
+ * every connection keeps `pipeline` requests in flight, and latency runs from write to the last
+ * byte of the response. Open loop (-R, like wrk2): requests go out on a fixed schedule totalling
+ * `rate` per second, and latency runs from each request's *scheduled* time, so a server that
+ * falls behind is charged for the queueing it causes (no coordinated omission).
+ * Prints a summary (or one JSON object with -j).
  */
 #define _GNU_SOURCE 1
 #include <arpa/inet.h>
@@ -30,6 +33,8 @@
 #define KQ 1
 #else
 #include <sys/epoll.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
 #endif
 
 #define MAXPIPE 64
@@ -38,13 +43,14 @@ typedef struct conn {
     int fd;
     char in[65536];
     size_t in_len;
-    uint64_t sent[MAXPIPE];  /* send times of in-flight requests (ring) */
+    uint64_t sent[MAXPIPE];  /* send (or scheduled) times of in-flight requests (ring) */
     int head, inflight;
+    uint64_t next;           /* open loop: when the next request is due */
 } conn;
 
 typedef struct worker {
     pthread_t th;
-    int nconns;
+    int nconns, first;  /* first: index of this thread's first connection among all */
     conn *conns;
     uint64_t done, errors, non2xx, bytes;
     uint32_t *lat;  /* microseconds, measured phase only */
@@ -55,6 +61,8 @@ static struct sockaddr_in addr;
 static char *req;
 static size_t req_len;
 static int pipeline = 1;
+static double rate;          /* open loop: requests per second in total (0: closed loop) */
+static int total_conns;
 static _Atomic int phase;  /* 0 warmup, 1 measure, 2 stop */
 
 static uint64_t now_ns(void) {
@@ -71,6 +79,28 @@ static int dial(void) {
     if (connect(fd, (struct sockaddr *)&addr, sizeof addr) != 0) { close(fd); return -1; }
     fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
     return fd;
+}
+
+/* Open loop: sends the requests that are due, each stamped with its scheduled time. */
+static bool send_due(conn *c, uint64_t now, uint64_t interval) {
+    static __thread char buf[65536];
+    size_t len = 0;
+    int n = 0;
+    while (c->next <= now && c->inflight + n < MAXPIPE && len + req_len <= sizeof buf) {
+        memcpy(buf + len, req, req_len);
+        len += req_len;
+        c->sent[(c->head + c->inflight + n) % MAXPIPE] = c->next;
+        c->next += interval;
+        n++;
+    }
+    size_t off = 0;
+    while (off < len) {
+        ssize_t w = write(c->fd, buf + off, len - off);
+        if (w < 0) { if (errno == EINTR || errno == EAGAIN) continue; return false; }
+        off += (size_t)w;
+    }
+    c->inflight += n;
+    return true;
 }
 
 static bool send_reqs(conn *c, int n) {
@@ -169,16 +199,42 @@ static void *run(void *arg) {
         struct epoll_event ev = { .events = EPOLLIN, .data.ptr = c };
         epoll_ctl(q, EPOLL_CTL_ADD, c->fd, &ev);
 #endif
-        send_reqs(c, pipeline);
+        if (rate <= 0) send_reqs(c, pipeline);
+    }
+    /* open loop: connection k of all sends every `interval`, staggered by k/rate */
+    uint64_t interval = rate > 0 ? (uint64_t)((double)total_conns * 1e9 / rate) : 0;
+    if (rate > 0) {
+        uint64_t t0 = now_ns();
+        for (int i = 0; i < w->nconns; i++) w->conns[i].next = t0 + (uint64_t)((double)(w->first + i) * 1e9 / rate);
+#ifndef KQ
+        prctl(PR_SET_TIMERSLACK, 1UL); /* wake on schedule, not 50 µs late */
+#endif
     }
     while (atomic_load_explicit(&phase, memory_order_relaxed) < 2) {
+        uint64_t wait_ns = 50000000;
+        if (rate > 0) {
+            uint64_t now = now_ns(), soonest = UINT64_MAX;
+            for (int i = 0; i < w->nconns; i++) {
+                conn *c = &w->conns[i];
+                if (c->next <= now && !send_due(c, now, interval)) { perror("write"); exit(1); }
+                if (c->next < soonest) soonest = c->next;
+            }
+            now = now_ns();
+            wait_ns = soonest > now ? soonest - now : 0;
+#ifdef KQ
+            /* macOS coalesces timers (a wakeup can be ms late): poll when a send is near */
+            if (wait_ns < 2000000) wait_ns = 0;
+#endif
+        }
 #ifdef KQ
         struct kevent evs[256];
-        struct timespec to = { 0, 50000000 };
+        struct timespec to = { (time_t)(wait_ns / 1000000000u), (long)(wait_ns % 1000000000u) };
         int n = kevent(q, NULL, 0, evs, 256, &to);
 #else
         struct epoll_event evs[256];
-        int n = epoll_wait(q, evs, 256, 50);
+        struct timespec to = { (time_t)(wait_ns / 1000000000u), (long)(wait_ns % 1000000000u) };
+        int n = (int)syscall(SYS_epoll_pwait2, q, evs, 256, &to, NULL, 0);
+        if (n < 0 && errno == ENOSYS) n = epoll_wait(q, evs, 256, (int)(wait_ns / 1000000));
 #endif
         for (int i = 0; i < n; i++) {
 #ifdef KQ
@@ -195,7 +251,7 @@ static void *run(void *arg) {
             }
             int got = parse(w, c);
             if (got < 0) { fprintf(stderr, "bad response\n"); exit(1); }
-            if (got) send_reqs(c, got);
+            if (got && rate <= 0) send_reqs(c, got);
         }
     }
     return NULL;
@@ -212,13 +268,14 @@ int main(int argc, char **argv) {
     const char *method = "GET", *body = NULL;
     bool json = false;
     int opt;
-    while ((opt = getopt(argc, argv, "c:t:d:w:P:m:b:j")) != -1) {
+    while ((opt = getopt(argc, argv, "c:t:d:w:P:R:m:b:j")) != -1) {
         switch (opt) {
         case 'c': conns = atoi(optarg); break;
         case 't': threads = atoi(optarg); break;
         case 'd': secs = atof(optarg); break;
         case 'w': warm = atof(optarg); break;
         case 'P': pipeline = atoi(optarg); break;
+        case 'R': rate = atof(optarg); break;
         case 'm': method = optarg; break;
         case 'b': body = optarg; break;
         case 'j': json = true; break;
@@ -249,8 +306,11 @@ int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
 
     worker *ws = calloc((size_t)threads, sizeof *ws);
-    for (int i = 0; i < threads; i++) {
+    total_conns = conns;
+    for (int i = 0, first = 0; i < threads; i++) {
         ws[i].nconns = conns / threads + (i < conns % threads);
+        ws[i].first = first;
+        first += ws[i].nconns;
         ws[i].conns = calloc((size_t)ws[i].nconns, sizeof(conn));
     }
     for (int i = 0; i < threads; i++) pthread_create(&ws[i].th, NULL, run, &ws[i]);
@@ -281,7 +341,8 @@ int main(int argc, char **argv) {
         printf("{\"rps\":%.0f,\"requests\":%llu,\"non2xx\":%llu,\"mb_per_s\":%.2f,\"avg_us\":%.1f,\"p50_us\":%u,\"p90_us\":%u,\"p99_us\":%u,\"p999_us\":%u,\"max_us\":%u}\n", rps,
                (unsigned long long)done, (unsigned long long)non2xx, (double)bytes / elapsed / 1e6, avg, PCT(0.5), PCT(0.9), PCT(0.99), PCT(0.999), nlat ? lat[nlat - 1] : 0);
     } else {
-        printf("%d connections, %d threads, pipeline %d, %.1fs\n", conns, threads, pipeline, elapsed);
+        if (rate > 0) printf("%d connections, %d threads, open loop at %.0f req/s, %.1fs\n", conns, threads, rate, elapsed);
+        else printf("%d connections, %d threads, pipeline %d, %.1fs\n", conns, threads, pipeline, elapsed);
         printf("  requests/s  %.0f   (%llu requests, %llu non-2xx, %.1f MB/s)\n", rps, (unsigned long long)done, (unsigned long long)non2xx, (double)bytes / elapsed / 1e6);
         printf("  latency     avg %.0fus  p50 %uus  p90 %uus  p99 %uus  p99.9 %uus  max %uus\n", avg, PCT(0.5), PCT(0.9), PCT(0.99), PCT(0.999), nlat ? lat[nlat - 1] : 0);
     }

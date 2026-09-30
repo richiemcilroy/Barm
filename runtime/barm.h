@@ -28,6 +28,13 @@ typedef int64_t bm_int;
 
 _Noreturn void bm_trap(const char *msg, const char *loc);
 void *bm_alloc(size_t size);          /* traps on out-of-memory */
+
+/* Small objects (strings, boxes, class instances, closures' cells: up to 512 bytes) come from
+ * per-size-class free lists shared by the runtime and generated code (8-byte classes).
+ * bm_small_refill carves more blocks when a list is empty. Memory is reused, never returned. */
+enum { BM_SMALL_CLASSES = 65 };
+extern void *bm_small_bins[BM_SMALL_CLASSES];
+void *bm_small_refill(size_t c);
 void *bm_realloc(void *p, size_t size);
 void bm_free(void *p);
 

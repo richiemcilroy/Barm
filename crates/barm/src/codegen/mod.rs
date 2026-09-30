@@ -1545,23 +1545,9 @@ typedef uint8_t bm_unit;
  * program can be compiled with strict aliasing. */
 #define BMG_STR_LIT(name, text) static const bm_strbuf name = { -1, sizeof(text) - 1, text }
 #define BMG_LIT(name) ((bm_str){(bm_strbuf *)&(name)})
-/* Small-object allocator for boxes and cells (sizes known at every call site): per-size-class
- * free lists refilled from 64 KiB slabs. Memory is reused, never returned to malloc. */
-/* 8-byte size classes (up to 512 bytes): a 24-byte tree node takes 24 bytes. Everything
- * allocated here needs only 8-byte alignment. */
-enum { BMG_CLASSES = 65 };
-typedef struct bmg_free_node { struct bmg_free_node *next; } bmg_free_node;
-static bmg_free_node *bmg_bins[BMG_CLASSES];
-static __attribute__((noinline)) void *bmg_refill(size_t c) {
-    size_t sz = c * 8, n = 65536 / sz;
-    char *slab = bm_alloc(n * sz);
-    for (size_t i = n - 1; i >= 1; i--) {
-        bmg_free_node *f = (bmg_free_node *)(void *)(slab + i * sz);
-        f->next = bmg_bins[c];
-        bmg_bins[c] = f;
-    }
-    return slab;
-}
+/* Boxes, cells and class instances come from the runtime's small-object free lists (sizes
+ * known at every call site, 8-byte classes, see bm_small_bins). */
+enum { BMG_CLASSES = BM_SMALL_CLASSES };
 #if defined(__SANITIZE_ADDRESS__) || (defined(__has_feature) && __has_feature(address_sanitizer))
 #define BMG_PLAIN_ALLOC 1 /* let AddressSanitizer see every allocation */
 #endif
@@ -1571,9 +1557,9 @@ static inline void *bmg_alloc_small(size_t size) {
 #endif
     size_t c = (size + 7) >> 3;
     if (__builtin_expect(c >= BMG_CLASSES, 0)) return bm_alloc(size);
-    bmg_free_node *f = bmg_bins[c];
-    if (__builtin_expect(f != NULL, 1)) { bmg_bins[c] = f->next; return f; }
-    return bmg_refill(c);
+    void **f = bm_small_bins[c];
+    if (__builtin_expect(f != NULL, 1)) { bm_small_bins[c] = *f; return f; }
+    return bm_small_refill(c);
 }
 /* JSON.stringify indentation: a newline and `lvl` copies of `ind` (nothing when compact). */
 static void bmg_js_nl(bm_sb *sb, bm_str ind, int lvl) {
@@ -1633,9 +1619,8 @@ static inline void bmg_free_small(void *p, size_t size) {
 #endif
     size_t c = (size + 7) >> 3;
     if (__builtin_expect(c >= BMG_CLASSES, 0)) { bm_free(p); return; }
-    bmg_free_node *f = p;
-    f->next = bmg_bins[c];
-    bmg_bins[c] = f;
+    *(void **)p = bm_small_bins[c];
+    bm_small_bins[c] = p;
 }
 /* ---- Cycle collector for `cyclic class` objects (only they pay for it) ----
  * Cyclic objects live in a list, with a 24-byte prefix before the header. A collection counts,
