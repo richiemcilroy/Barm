@@ -106,7 +106,8 @@ impl<'a> Checker<'a> {
             ExprKind::Ident(sym) => self.ident(e, *sym, span),
             ExprKind::Paren(x) => self.expr(*x, exp),
             // Synchronous until real async is on (BARM_ASYNC): `await e` is `e`.
-            ExprKind::Await(x) => self.expr(*x, exp),
+            ExprKind::Await(x) if !crate::async_enabled() => self.expr(*x, exp),
+            ExprKind::Await(x) => self.await_expr(e, *x, exp, span),
             ExprKind::Unary(op, x) => self.unary(*op, *x, exp, span),
             ExprKind::Binary(op, l, r) => self.binary(*op, *l, *r, exp, span),
             ExprKind::Assign(op, t, v) => self.assign(*op, *t, *v, span),
@@ -1679,6 +1680,16 @@ impl<'a> Checker<'a> {
                 })
             })
             .unwrap_or(NEVER);
+        let is_async = f.is_async && crate::async_enabled();
+        // An async arrow's context expects `(...) => Promise<T>`: its body returns `T`, and
+        // whatever it throws rejects the promise.
+        let (exp_fn, exp_throws) = match exp_fn {
+            Some((ps, r)) if is_async => match *self.types.get(r) {
+                Ty::Promise(v, err) => (Some((ps, v)), err),
+                _ => (Some((ps, r)), NEVER),
+            },
+            other => (other, exp_throws),
+        };
         let tscope = self.tscope();
         let mut params = Vec::new();
         for (i, p) in f.params.iter().enumerate() {
@@ -1702,15 +1713,21 @@ impl<'a> Checker<'a> {
             params.push(FnParam { ty, inout: p.inout, optional: p.optional });
         }
         let declared_ret = f.ret.map(|t| self.resolve_type(t, &tscope));
+        let declared_ret = match declared_ret {
+            Some(r) if is_async => Some(self.async_inner(r, self.ast().ty(f.ret.unwrap()).span)),
+            r => r,
+        };
         let exp_ret = exp_fn.as_ref().map(|(_, r)| *r).filter(|&r| r != VOID && !self.types.mentions(r, &self.infer_free));
         let ret = declared_ret.or(exp_ret);
         let fcx = self.fcx.last_mut().unwrap();
         // A test's body can throw (an uncaught error fails the test); other closures only when
         // their function type says so.
         let test_body = fcx.test_body && fcx.frames.is_empty();
-        let can_throw = test_body || exp_throws != NEVER;
+        let can_throw = test_body || exp_throws != NEVER || is_async;
         let decl = if exp_throws != NEVER && exp_throws != ERROR { Some(exp_throws) } else { None };
-        fcx.frames.push(Frame::new(declared_ret, None, can_throw, decl));
+        let mut frame = Frame::new(declared_ret, None, can_throw, decl);
+        frame.is_async = is_async;
+        fcx.frames.push(frame);
         fcx.scopes.push(Vec::new());
         for (p, fp) in f.params.iter().zip(&params) {
             let kind = if p.inout { LocalKind::Inout } else { LocalKind::Param };
@@ -1767,7 +1784,76 @@ impl<'a> Checker<'a> {
         fcx.scopes.pop();
         let frame = fcx.frames.pop().unwrap();
         let thrown = if test_body || frame.thrown.is_empty() { NEVER } else { self.types.union(&frame.thrown) };
+        if is_async {
+            let p = self.types.promise(body_ty, thrown);
+            return self.types.func(params, p);
+        }
         self.types.func_throws(params, body_ty, thrown)
+    }
+
+    /// `await e`: the value of a promise (a rejection throws), or `e` itself if it isn't one.
+    fn await_expr(&mut self, e: ExprId, x: ExprId, exp: Option<TyId>, span: Span) -> TyId {
+        if !self.fcx.last().and_then(|f| f.frames.last()).is_some_and(|f| f.is_async) {
+            self.report(
+                Diagnostic::new("T0851", span, "`await` is only allowed in an async function (or at the top level of a script)")
+                    .note("instead", "mark the enclosing function `async`; it then returns a `Promise`"),
+            );
+        }
+        let exp_p = exp.map(|t| self.types.promise(t, NEVER));
+        let t = self.expr(x, exp_p);
+        let mut values = Vec::new();
+        let mut errors = Vec::new();
+        for m in self.flat_members(t) {
+            match *self.types.get(m) {
+                Ty::Promise(v, err) => {
+                    values.push(v);
+                    if err != NEVER {
+                        errors.push(err);
+                    }
+                }
+                _ => values.push(m),
+            }
+        }
+        if !errors.is_empty() {
+            let err = self.types.union(&errors);
+            let text = format!("await {}", self.src(self.ast().expr(x).span));
+            self.on_throw(err, span, Some(&text), Some(e));
+        }
+        self.types.union(&values)
+    }
+
+    /// `new Promise((resolve, reject) => { ... })`. The value type comes from `new Promise<T>`,
+    /// the expected type, or else is `void` (`await new Promise((r) => setTimeout(r, 10))`). It can
+    /// reject (with an `Error`) only if the executor takes a `reject` parameter.
+    fn new_promise(&mut self, e: ExprId, targs: &[TyId], args: &[Arg], exp: Option<TyId>, span: Span) -> TyId {
+        let from_exp = exp.and_then(|t| {
+            self.flat_members(t).into_iter().find_map(|m| match *self.types.get(m) {
+                Ty::Promise(v, _) => Some(v),
+                _ => None,
+            })
+        });
+        let value = targs.first().copied().or(from_exp).unwrap_or(VOID);
+        let err = self.error_class();
+        let [arg] = args else {
+            self.report(Diagnostic::new("T0201", span, format!("`new Promise` takes 1 argument (the executor), found {}", args.len())).note("example", "`new Promise((resolve) => setTimeout(resolve, 10))`"));
+            for a in args {
+                self.expr(a.expr, None);
+            }
+            return self.types.promise(value, err);
+        };
+        let rejects = match &self.ast().expr(arg.expr).kind {
+            ExprKind::Arrow(f) if f.params.len() < 2 => NEVER,
+            _ => err,
+        };
+        let optional = value == VOID || value == UNDEFINED;
+        let resolve = self.types.func(vec![FnParam { ty: value, inout: false, optional }], VOID);
+        let reject = self.types.func(vec![FnParam { ty: err, inout: false, optional: false }], VOID);
+        let executor = self.types.func(vec![FnParam { ty: resolve, inout: false, optional: false }, FnParam { ty: reject, inout: false, optional: false }], VOID);
+        let t = self.expr(arg.expr, Some(executor));
+        let s = self.ast().expr(arg.expr).span;
+        self.expect_assignable(t, executor, s, Some("the executor".to_string()));
+        self.rec_call(e, Callee::NewPromise);
+        self.types.promise(value, rejects)
     }
 
     fn new_expr(&mut self, e: ExprId, callee: ExprId, type_args: &[crate::ast::TypeId], args: &[Arg], exp: Option<TyId>, span: Span) -> TyId {
@@ -1823,6 +1909,7 @@ impl<'a> Checker<'a> {
                 self.report(Diagnostic::new("X0036", span, "`new Array(...)` is not supported").note("instead", "use an array literal: `const xs: T[] = []`"));
                 ERROR
             }
+            "Promise" if crate::async_enabled() && !self.scopes[self.cur as usize].values.contains_key(&s) => self.new_promise(e, &targs, args, exp, span),
             _ => {
                 if let Some(Decl::Class(c)) = self.scopes[self.cur as usize].values.get(&s).map(|d| d.0) {
                     self.rec_ident(callee, IdentFact::Class(c));

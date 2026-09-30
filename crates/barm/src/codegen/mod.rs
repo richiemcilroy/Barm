@@ -425,7 +425,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// Does this type own heap memory (needs retain/release)?
     pub(crate) fn is_rc(&mut self, t: TyId) -> bool {
         match self.tget(t) {
-            Ty::Str | Ty::Array(_) | Ty::Map(..) | Ty::Set(_) | Ty::Func(..) | Ty::Rec(..) | Ty::Class(..) | Ty::Interface(..) => true,
+            Ty::Str | Ty::Array(_) | Ty::Map(..) | Ty::Set(_) | Ty::Func(..) | Ty::Rec(..) | Ty::Class(..) | Ty::Interface(..) | Ty::Promise(..) => true,
             Ty::Record(fs) => {
                 let fs = self.c.types.fields(fs).to_vec();
                 fs.iter().any(|f| self.is_rc(f.ty))
@@ -462,6 +462,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Str => "bm_str".into(),
             Ty::StrLit(_) | Ty::Undefined | Ty::Void | Ty::Never | Ty::Error | Ty::Unknown => "bm_unit".into(),
             Ty::Array(_) => "bm_arr".into(),
+            Ty::Promise(..) => "bm_promise *".into(),
             Ty::Map(..) | Ty::Set(_) => "bm_map".into(),
             Ty::Func(..) => "bm_fn".into(),
             Ty::Record(_) => {
@@ -650,6 +651,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Array(_) => "BM_EMPTY_ARR".into(),
             Ty::Map(..) | Ty::Set(_) => "BM_EMPTY_MAP".into(),
             Ty::Func(..) => "((bm_fn){NULL, NULL})".into(),
+            Ty::Promise(..) => "NULL".into(),
             Ty::Bool => "false".into(),
             Ty::Class(..) => "NULL".into(),
             Ty::Interface(..) => "((bm_iface){NULL, NULL})".into(),
@@ -872,6 +874,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Array(_) => format!("bm_arr_retain({place})"),
             Ty::Map(..) | Ty::Set(_) => format!("bm_map_retain({place})"),
             Ty::Func(..) => format!("bm_env_retain(({place}).env)"),
+            Ty::Promise(..) => format!("bm_promise_retain({place})"),
             Ty::Class(..) => format!("bmg_obj_retain({place})"),
             Ty::Interface(..) => format!("bm_iface_retain({place})"),
             Ty::Union(_) if self.niche(t).is_some() => format!("bmg_obj_retain({place})"),
@@ -899,6 +902,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 format!("bm_map_release({place}, {kd}, &bm_type_undefined)")
             }
             Ty::Func(..) => format!("bm_env_release(({place}).env)"),
+            Ty::Promise(..) => format!("bm_promise_release({place})"),
             Ty::Class(..) => self.class_release_code(t, place),
             Ty::Interface(..) => format!("bm_iface_release({place})"),
             Ty::Union(ms) if self.niche(t).is_some() => {
@@ -923,7 +927,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 format!("({d})->eq(&({a}), &({b}))")
             }
             Ty::Func(..) => format!("(({a}).fn == ({b}).fn && ({a}).env == ({b}).env)"),
-            Ty::Class(..) => format!("((void *)({a}) == (void *)({b}))"),
+            Ty::Class(..) | Ty::Promise(..) => format!("((void *)({a}) == (void *)({b}))"),
             Ty::Interface(..) => format!("(({a}).p == ({b}).p)"),
             Ty::Union(_) if self.niche(t).is_some() => format!("((void *)({a}) == (void *)({b}))"),
             Ty::Record(_) | Ty::Union(_) | Ty::Rec(..) => {

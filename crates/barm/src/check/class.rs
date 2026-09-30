@@ -1178,7 +1178,7 @@ impl<'a> Checker<'a> {
                     self.class_refs(m, top, direct, nested, depth + 1);
                 }
             }
-            Ty::Array(e) | Ty::Set(e) => self.class_refs(e, false, direct, nested, depth + 1),
+            Ty::Array(e) | Ty::Set(e) | Ty::Promise(e, _) => self.class_refs(e, false, direct, nested, depth + 1),
             Ty::Map(k, v) => {
                 self.class_refs(k, false, direct, nested, depth + 1);
                 self.class_refs(v, false, direct, nested, depth + 1);

@@ -1310,6 +1310,12 @@ impl<'c, 'a> Gen<'c, 'a> {
                     }
                     return self.coerce(v, ty);
                 }
+                if let Some(fact) = self.facts(m).calls.get(&e)
+                    && let Callee::NewPromise = fact.callee
+                {
+                    self.unsupported(span, "`new Promise`");
+                    return Val::plain("0", ty);
+                }
                 let name = match &ast.expr(*callee).kind {
                     ExprKind::Ident(s) => self.sym(*s).to_string(),
                     _ => String::new(),
