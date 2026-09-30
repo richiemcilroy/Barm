@@ -64,6 +64,11 @@ void bm_sb_push_cstr(bm_sb *sb, const char *s);
 void bm_sb_push_char(bm_sb *sb, char c);
 void bm_sb_free(bm_sb *sb);
 
+/* Radix sorts: 64-bit keys (with an optional index permuted alongside, stable), and
+ * xs.sort((a, b) => a - b) (or b - a) on f64[], in place. */
+void bm_radix64(uint64_t *keys, int64_t *idx, bm_int n);
+void bm_sort_f64(double *a, bm_int n, bool desc);
+
 /* ------------------------------------------------------------------ type descriptors */
 
 struct bm_type;
