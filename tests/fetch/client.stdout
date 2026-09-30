@@ -57,6 +57,10 @@ stream: "data: one\n\ndata: two\n\ndata: three\n\n" early head=true first chunk 
 reader: done=false "data: one\n\n" locked=true
 text() while streaming: TypeError ERR_BODY_ALREADY_USED: Body already used
 cancelled
+gzip stream: "data: one\n\ndata: two\n\ndata: three\n\n" first chunk early=true all later=true
+gzip stream cut short: TypeError ZlibError: ZlibError fetching "BASE/stream-gzip-cut". For more information, pass `verbose: true` in the second argument to fetch()
+gzip cut short, text(): TypeError ZlibError: ZlibError fetching "BASE/stream-gzip-cut". For more information, pass `verbose: true` in the second argument to fetch()
+gzip zeros streamed: 25165824 zeros=true
 cut: head 200
 cut: TypeError ECONNRESET: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()
 abort mid-body: head 200

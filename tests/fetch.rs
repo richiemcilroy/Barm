@@ -67,6 +67,27 @@ fn read_req(s: &mut impl Read, buf: &mut Vec<u8>) -> Option<Req> {
     }
 }
 
+/// A deflate stored (uncompressed) block.
+fn stored_block(data: &[u8], last: bool) -> Vec<u8> {
+    let n = data.len() as u16;
+    let mut v = vec![last as u8];
+    v.extend(n.to_le_bytes());
+    v.extend((!n).to_le_bytes());
+    v.extend_from_slice(data);
+    v
+}
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut c = !0u32;
+    for &b in data {
+        c ^= b as u32;
+        for _ in 0..8 {
+            c = if c & 1 != 0 { (c >> 1) ^ 0xEDB8_8320 } else { c >> 1 };
+        }
+    }
+    !c
+}
+
 fn respond(s: &mut impl Write, status: &str, headers: &[(&str, String)], body: &[u8]) {
     let mut out = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\n", body.len()).into_bytes();
     for (k, v) in headers {
@@ -181,6 +202,30 @@ fn handle(s: &mut (impl Read + Write), r: &Req, served: usize, fixtures: &Path, 
             for (i, ev) in ["data: one\n\n", "data: two\n\n", "data: three\n\n"].iter().enumerate() {
                 std::thread::sleep(Duration::from_millis(if i == 0 { 0 } else { 100 }));
                 let _ = s.write_all(format!("{:x}\r\n{ev}\r\n", ev.len()).as_bytes());
+            }
+            let _ = s.write_all(b"0\r\n\r\n");
+        }
+        "/stream-gzip" | "/stream-gzip-cut" => {
+            // the same events gzipped (stored blocks), each sent as it's made; the cut one ends
+            // (cleanly, for HTTP) before the gzip stream does
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n");
+            let mut all = Vec::new();
+            for (i, ev) in ["data: one\n\n", "data: two\n\n", "data: three\n\n"].iter().enumerate() {
+                std::thread::sleep(Duration::from_millis(if i == 0 { 0 } else { 100 }));
+                let mut part = if i == 0 { vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff] } else { Vec::new() };
+                part.extend(stored_block(ev.as_bytes(), false));
+                all.extend_from_slice(ev.as_bytes());
+                let _ = s.write_all(format!("{:x}\r\n", part.len()).as_bytes());
+                let _ = s.write_all(&part);
+                let _ = s.write_all(b"\r\n");
+            }
+            if r.path == "/stream-gzip" {
+                let mut end = stored_block(&[], true);
+                end.extend(crc32(&all).to_le_bytes());
+                end.extend((all.len() as u32).to_le_bytes());
+                let _ = s.write_all(format!("{:x}\r\n", end.len()).as_bytes());
+                let _ = s.write_all(&end);
+                let _ = s.write_all(b"\r\n");
             }
             let _ = s.write_all(b"0\r\n\r\n");
         }

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs"
 // Native-only fetch() behaviour: where Barm follows the Fetch standard and Bun doesn't, bodies
 // as bytes (u8[]), and failures whose wording is Barm's own.
 const base = process.env.BASE ?? "http://127.0.0.1:1"
@@ -119,6 +120,61 @@ for await (const chunk of rb.stream()) {
   streamed += chunk.join(",")
 }
 console.log(`blob stream: ${streamed}`)
+
+// compressed bodies stream decoded, in chunks of at most 4 MiB however well they compress
+async function decodedStream(label: string, url: string): Promise<void> {
+  try {
+    const r = await fetch(url)
+    const decoder = new TextDecoder()
+    let body = ""
+    let most = 0
+    for await (const chunk of r.body!) {
+      most = chunk.length > most ? chunk.length : most
+      body += decoder.decode(chunk, { stream: true })
+    }
+    body += decoder.decode()
+    console.log(`${label}: ${body.byteLength} bytes, chunks <= 4 MiB: ${most <= 4194304}, same as fixture: ${body === fixture}`)
+  } catch (e) {
+    console.log(`${label}: ${e.message}`)
+  }
+}
+const fixture = try readFileSync("tests/fetch/fixture.txt", "utf8")
+await decodedStream("streamed brotli", base + "/br?f=fixture.br")
+await decodedStream("streamed zstd", base + "/zstd?f=fixture.zst")
+await decodedStream("streamed deflate", base + "/deflate?f=fixture.zlib")
+await decodedStream("streamed gzip", base + "/gzip?f=fixture.gz")
+try {
+  const r = await fetch(base + "/gzip?f=fixture-zeros.gz")
+  let total = 0
+  let most = 0
+  for await (const chunk of r.body!) {
+    most = chunk.length > most ? chunk.length : most
+    total += chunk.length
+  }
+  console.log(`streamed zeros: ${total} bytes, chunks <= 4 MiB: ${most <= 4194304}`)
+} catch (e) {
+  console.log(`streamed zeros: ${e.message}`)
+}
+
+// a body that has all arrived but isn't all decoded: read whole later, or dropped
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+try {
+  const r = await fetch(base + "/gzip?f=fixture-zeros.gz")
+  await sleep(100)
+  const t = await r.text()
+  console.log(`zeros read whole later: ${t.byteLength}`)
+  const b = await (await fetch(base + "/gzip?f=fixture-zeros.gz")).bytes()
+  console.log(`zeros bytes(): ${b.length}`)
+  const dropped = await fetch(base + "/gzip?f=fixture-zeros.gz")
+  await sleep(50)
+  console.log(`dropped while decoding: ${dropped.status}`)
+} catch (e) {
+  console.log(`zeros read whole: ${e.message}`)
+}
 
 // a pending AbortSignal.timeout doesn't keep the program running
 const later = AbortSignal.timeout(60000)
