@@ -13,6 +13,8 @@ Languages: `c`, `rust`, `node` and `bun` (both run `main.ts` directly), `scriptc
 | `array_push` | 30M `f64` | Growable-array `push` (amortised growth), then a `for…of` sum and an indexed `xs[i]!` sum. |
 | `map_insert` | 2M keys | String building (`"k" + i`), hashing, and a string → int map: insert all keys, then look every key up again and sum. |
 | `binary_trees` | depth 18 | Benchmarks Game binary-trees (single-threaded): many short-lived recursive allocations plus one long-lived tree. Barm uses a recursive record `{ left: Tree \| undefined, right: Tree \| undefined }`; Rust `Option<Box<Tree>>`; C `malloc`/`free`; TS plain objects. |
+| `class_trees` | depth 18 | Binary-trees again, with a class (`new Tree(left, right)`, `t.check()` method) instead of a record: object allocation, reference counting, method calls. Rust `Box`, C `malloc`, TS classes. |
+| `dispatch` | 50M calls | An array of 1000 shapes of three classes; `area()` called through the base type. Rust `Box<dyn Shape>`, C function-pointer vtables, TS classes. |
 | `nbody` | 10M steps | Benchmarks Game n-body (5 bodies): f64 arithmetic, `sqrt`, in-place mutation of records inside an array (`inout` in Barm). Prints energy before and after to 9 decimals. |
 | `sort` | 3M `f64` | Park–Miller LCG (`state = state * 16807 % 2147483647`, exact in both 64-bit ints and JS doubles), then sort with a comparator. Prints min, max and the sum of every 1000th element. |
 | `strings` | 3M strings | Template literals / formatting, `join(",")`, `split(",")`, `endsWith`, and byte lengths. |
