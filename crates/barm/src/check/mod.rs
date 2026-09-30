@@ -179,9 +179,12 @@ struct FnCtx {
     aliases: Vec<(LocalId, LocalId, u32)>,
     mutations: Vec<(LocalId, Span)>,
     reads: Vec<(LocalId, u32)>,
-    /// Names of locals assigned or changed inside a closure: never narrowed (the closure may run
-    /// between the check and the use).
+    /// Names of locals assigned or changed (through a field, an element or a method call) inside a
+    /// closure: never narrowed (the closure may run between the check and the use)...
     closure_mutated: HashSet<Sym>,
+    /// ...except that a local holding only references (class instances, promises, functions) keeps
+    /// its narrowing unless a closure assigns it: changing an object doesn't change its class.
+    closure_assigned: HashSet<Sym>,
     /// `routes` handlers' request parameters and their route (`"/users/:id"`): `req.params`
     /// is typed from the route.
     route_locals: Vec<(LocalId, Sym)>,
@@ -866,8 +869,8 @@ impl<'a> Checker<'a> {
 
     fn check_test(&mut self, body: ExprId) {
         let expected = self.types.func(Vec::new(), VOID);
-        let closure_mutated = stmt::closure_mutated_expr(self.ast(), body);
-        self.fcx.push(FnCtx { closure_mutated, test_body: true, ..Default::default() });
+        let (closure_mutated, closure_assigned) = stmt::closure_mutated_expr(self.ast(), body);
+        self.fcx.push(FnCtx { closure_mutated, closure_assigned, test_body: true, ..Default::default() });
         self.fcx.last_mut().unwrap().scopes.push(Vec::new());
         let t = self.expr(body, Some(expected));
         self.check_shared_copies();
@@ -1164,7 +1167,7 @@ impl<'a> Checker<'a> {
         for _round in 0..4 {
             self.diags.clear();
             let mut fcx = FnCtx { tscope: tscope.to_vec(), promoted: promoted.clone(), ..Default::default() };
-            fcx.closure_mutated = stmt::closure_mutated_stmt(&self.modules[m as usize].ast, f.body);
+            (fcx.closure_mutated, fcx.closure_assigned) = stmt::closure_mutated_stmt(&self.modules[m as usize].ast, f.body);
             fcx.scopes.push(Vec::new());
             // Without a `throws` clause the body's own `try`/`throw` decide (T0831 covers unmarked calls).
             let decl = if sig.throws == UNKNOWN || (f.throws.is_none() && sig.throws == NEVER) { None } else { Some(sig.throws) };
@@ -1931,11 +1934,19 @@ impl<'a> Checker<'a> {
 
     fn narrow(&mut self, local: LocalId, ty: TyId) {
         let fcx = self.fcx.last_mut().unwrap();
-        let name = fcx.locals[local].name;
-        if fcx.closure_mutated.contains(&name) && ty != fcx.locals[local].ty {
+        let (name, declared) = (fcx.locals[local].name, fcx.locals[local].ty);
+        let changed = fcx.closure_assigned.contains(&name) || fcx.closure_mutated.contains(&name) && !self.references_only(declared);
+        let fcx = self.fcx.last_mut().unwrap();
+        if changed && ty != declared {
             return;
         }
         fcx.scopes.last_mut().unwrap().push((name, local, Some(ty)));
+    }
+
+    /// Only references (class instances, promises, functions, `undefined`): changing what they
+    /// point to never changes which of them a value is.
+    fn references_only(&mut self, ty: TyId) -> bool {
+        self.flat_members(ty).iter().all(|&m| matches!(self.types.get(m), Ty::Class(..) | Ty::Promise(..) | Ty::Func(..) | Ty::Undefined))
     }
 
     /// Narrows (or with `None`, forgets narrowings under) a field path of a local.
