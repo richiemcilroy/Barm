@@ -17,5 +17,5 @@ BARM_CFLAGS= "$barm" "$cmd" "$path" --emit-c "$work/prog.c" -o "$work/native" >/
 [ -s "$work/prog.c" ] || { echo "sanitize: failed to generate C for $path" >&2; exit 2; }
 COPYFILE_DISABLE=1 tar -C "$work" -cf - prog.c | docker run --rm -i gcc:14 sh -c '
   mkdir /w && tar -C /w -xf - 2>/dev/null && cd /w &&
-  gcc -std=gnu11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -w prog.c -lm -o prog &&
+  gcc -std=gnu11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -w prog.c -lm -lpthread -o prog &&
   ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./prog'

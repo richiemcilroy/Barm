@@ -144,6 +144,9 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         cmd.args(extra.split_whitespace()).arg("-o").arg(&tmp).arg(&obj);
     }
     cmd.arg(&rt_obj).arg("-lm");
+    if !cfg!(target_vendor = "apple") && !cfg!(windows) {
+        cmd.arg("-lpthread");
+    }
     // Drop the runtime functions the program doesn't use.
     if cfg!(target_vendor = "apple") {
         cmd.arg("-Wl,-dead_strip");
