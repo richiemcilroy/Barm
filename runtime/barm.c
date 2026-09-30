@@ -89,12 +89,44 @@ static size_t bm_size_mul_add(size_t a, size_t b, size_t c) {
  * bm_str_from_sb can adopt it without copying. sb->data points at the bytes. */
 #define BM_STR_HDR offsetof(bm_strbuf, data)
 
+/* Short builders (most: a number, a header line, a small JSON body) live in the small-object
+ * heap; a buffer's size (so where it lives) follows from its capacity. */
+#if defined(__SANITIZE_ADDRESS__) || (defined(__has_feature) && __has_feature(address_sanitizer))
+#define BM_SB_SMALL(cap) false
+#else
+#define BM_SB_SMALL(cap) (BM_STR_HDR + (cap) + 1 <= (BM_SMALL_CLASSES - 1) * 8)
+#endif
+static inline void bm_sb_release_buf(char *base, size_t cap) {
+    if (BM_SB_SMALL(cap)) {
+        size_t c = (BM_STR_HDR + cap + 1 + 7) >> 3;
+        *(void **)(void *)base = bm_small_bins[c];
+        bm_small_bins[c] = base;
+    } else {
+        free(base);
+    }
+}
+
 void bm_sb_grow(bm_sb *sb, size_t need) {
     size_t cap = sb->cap ? sb->cap * 2 : 32;
     if (cap < need) cap = need;
     if (cap > SIZE_MAX - BM_STR_HDR - 1) bm_trap("string too long", NULL);
-    char *base = sb->data ? sb->data - BM_STR_HDR : NULL;
-    base = (char *)bm_realloc(base, BM_STR_HDR + cap + 1);
+    char *old = sb->data ? sb->data - BM_STR_HDR : NULL;
+    char *base;
+    if (BM_SB_SMALL(cap)) {
+        size_t c = (BM_STR_HDR + cap + 1 + 7) >> 3;
+        void **f = bm_small_bins[c];
+        if (f) bm_small_bins[c] = *f;
+        else f = bm_small_refill(c);
+        base = (char *)f;
+        if (old) memcpy(base + BM_STR_HDR, sb->data, sb->len);
+        if (old) bm_sb_release_buf(old, sb->cap);
+    } else if (old && BM_SB_SMALL(sb->cap)) {
+        base = (char *)bm_alloc(BM_STR_HDR + cap + 1);
+        memcpy(base + BM_STR_HDR, sb->data, sb->len);
+        bm_sb_release_buf(old, sb->cap);
+    } else {
+        base = (char *)bm_realloc(old, BM_STR_HDR + cap + 1);
+    }
     sb->data = base + BM_STR_HDR;
     sb->cap = cap;
 }
@@ -121,7 +153,7 @@ void bm_sb_push_char(bm_sb *sb, char c) {
 }
 
 void bm_sb_free(bm_sb *sb) {
-    if (sb->data) free(sb->data - BM_STR_HDR);
+    if (sb->data) bm_sb_release_buf(sb->data - BM_STR_HDR, sb->cap);
     sb->data = NULL;
     sb->len = sb->cap = 0;
 }
@@ -322,6 +354,15 @@ bm_str bm_str_from_sb(bm_sb *sb) {
         bm_str r = bm_str_from(sb->data, n);
         bm_sb_free(sb);
         return r;
+    }
+    if (BM_SB_SMALL(sb->cap)) { /* the builder's block is in the small-object heap: copy out */
+        bm_strbuf *b = (bm_strbuf *)bm_alloc(BM_STR_HDR + n + 1);
+        memcpy(b->data, sb->data, n);
+        bm_sb_free(sb);
+        b->rc = 1;
+        b->len = (int32_t)n;
+        b->data[n] = 0;
+        return (bm_str){b};
     }
     bm_strbuf *b = (bm_strbuf *)(sb->data - BM_STR_HDR);
     if (sb->cap - n > 64) b = (bm_strbuf *)bm_realloc(b, BM_STR_HDR + n + 1);
@@ -3829,7 +3870,7 @@ static void bm_http_close(bm_http_conn *c) {
 static void bm_http_attach(bm_http_conn *c) {
     if (c->in_len == 0 && !c->in_shared) {
         bm_free(c->in);
-        if (!bm_http_rbuf) bm_http_rbuf = bm_alloc(BM_HTTP_RBUF);
+        if (!bm_http_rbuf) bm_http_rbuf = bm_slab(); /* 64 KiB, never freed: only the pages reads touch are resident */
         c->in = bm_http_rbuf;
         c->in_cap = BM_HTTP_RBUF;
         c->in_shared = true;

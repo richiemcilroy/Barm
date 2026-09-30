@@ -121,12 +121,12 @@ Requests per second on Linux (M4 Max, Docker), 128 keep-alive connections, JSON 
 
 | | Rust (axum) | Bun | **Barm** |
 |---|---:|---:|---:|
-| 1 core | 294k | 254k | **379k** |
-| 4 cores | 1.20M\* | 872k | **1.62M** |
-| p99 latency, 4 cores | 0.31 ms | 1.47 ms | **0.20 ms** |
-| memory | **6 MB** | 177 MB | 12 MB |
+| 1 core | 299k | 259k | **386k** |
+| 4 cores | 1.27M\* | 964k | **1.65M** |
+| p99 at a fixed 600k req/s, 4 cores | 1.91 ms\* | — | **1.30 ms** |
+| memory, 4 cores (PSS) | 5.0 MB\* | 98 MB | **2.5 MB** |
 
-\* Thread-per-core Rust; tokio's default multi-thread runtime reaches 708k. With pipelining, Barm serves 6.9M JSON requests/s on 4 cores (Rust 2.4M). Method, macOS numbers and caveats are in [bench/http/README.md](bench/http/README.md).
+\* Thread-per-core Rust; tokio's default multi-thread runtime reaches 720k. With pipelining, Barm serves 8.1M JSON requests/s on 4 cores (Rust 2.4M). Method, macOS numbers and caveats are in [bench/http/README.md](bench/http/README.md).
 
 ## Development
 
