@@ -1,4 +1,4 @@
-//! Cargo build script: embeds the TLS sources (runtime/tls.c and the vendored mbedTLS) in the
+//! Cargo build script: embeds the TLS sources (runtime/tls.c and the vendored BoringSSL) in the
 //! compiler, so `barm build` can compile them into the TLS archive that fetch() programs link
 //! (see src/build.rs), and hashes them once here (TLS_KEY) rather than on every build.
 
@@ -11,7 +11,7 @@ fn files(dir: &Path, out: &mut Vec<PathBuf>) {
     for p in entries {
         if p.is_dir() {
             files(&p, out);
-        } else if p.extension().is_some_and(|e| e == "c" || e == "h") {
+        } else if p.extension().is_some_and(|e| matches!(e.to_str(), Some("c" | "cc" | "h" | "inc" | "S"))) {
             out.push(p);
         }
     }
@@ -19,7 +19,7 @@ fn files(dir: &Path, out: &mut Vec<PathBuf>) {
 
 fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
-    let vendor = root.join("vendor/mbedtls");
+    let vendor = root.join("vendor/boringssl");
     let mut list = Vec::new();
     files(&vendor, &mut list);
     list.push(root.join("runtime/tls.c"));

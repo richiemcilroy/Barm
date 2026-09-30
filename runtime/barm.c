@@ -5244,7 +5244,8 @@ typedef struct bm_fr {
     bool utf8_bad;
     bm_sb status_text, rheaders, rbody, location;
     bool redirected;
-    const char *code;          /* failure: Bun's error code */
+    const char *code;          /* failure: Bun's error code (points into code_buf) */
+    char code_buf[64];
     bm_sb message;
 } bm_fr;
 
@@ -5350,7 +5351,8 @@ static void bm_fr_settle(bm_fr *r, int result) {
 
 static void bm_fr_fail(bm_fr *r, const char *code, const char *fmt, ...) {
     if (r->result != 1) return;
-    r->code = code;
+    snprintf(r->code_buf, sizeof r->code_buf, "%s", code); /* the TLS layer's codes don't outlive the connection */
+    r->code = r->code_buf;
     char buf[1024];
     va_list ap;
     va_start(ap, fmt);
