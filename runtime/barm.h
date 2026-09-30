@@ -487,6 +487,7 @@ bm_str bm_native_fetchHeaders(bm_int id);
 bm_str bm_native_fetchUrl(bm_int id);
 bool bm_native_fetchRedirected(bm_int id);
 bm_str bm_native_fetchBody(bm_int id);         /* moves the body out */
+bool bm_native_fetchBodyClean(bm_int id);      /* valid UTF-8, no BOM (call before fetchBody) */
 bm_str bm_native_fetchErrorCode(bm_int id);
 bm_str bm_native_fetchErrorMessage(bm_int id);
 void bm_native_fetchAbort(bm_int id);

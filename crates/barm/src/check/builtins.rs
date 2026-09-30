@@ -52,7 +52,7 @@ pub(super) fn native_sig(types: &mut Types, name: &str) -> Option<(Vec<TyId>, Ty
         "fetchWait" => (vec![INT], types.promise(INT, NEVER)),
         "fetchStatus" => (vec![INT], INT),
         "fetchStatusText" | "fetchHeaders" | "fetchUrl" | "fetchBody" | "fetchErrorCode" | "fetchErrorMessage" => (vec![INT], STR),
-        "fetchRedirected" => (vec![INT], BOOL),
+        "fetchRedirected" | "fetchBodyClean" => (vec![INT], BOOL),
         "fetchAbort" | "fetchFree" | "timerUnref" => (vec![INT], VOID),
         "bytesToString" => {
             let bytes = types.array(U8);
