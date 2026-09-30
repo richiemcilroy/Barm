@@ -1,0 +1,73 @@
+// `finally` runs when `return`, `break`, `continue` or an error leaves its `try`, innermost first.
+class Oops extends Error {}
+
+function nested(x: int): string throws Oops {
+  const outer = "outer" + String(x)
+  try {
+    const mid = "mid" + String(x)
+    try {
+      const inner = "inner" + String(x)
+      if (x === 1) {
+        return inner
+      }
+      if (x === 2) {
+        throw new Oops("boom " + mid)
+      }
+    } finally {
+      console.log("inner finally", x)
+    }
+    return mid
+  } finally {
+    console.log("outer finally", x, outer)
+  }
+}
+
+function early(x: int): int {
+  try {
+    return x
+  } finally {
+    if (x > 5) {
+      console.log("finally sees", x)
+    }
+  }
+}
+
+function loops(): string {
+  const out: string[] = []
+  for (let i = 0; i < 4; i++) {
+    const label = "i" + String(i)
+    try {
+      for (let j = 0; j < 3; j++) {
+        try {
+          if (j === 1) {
+            continue
+          }
+          if (i === 2 && j === 2) {
+            break
+          }
+          out.push(label + "j" + String(j))
+        } finally {
+          out.push("f" + String(j))
+        }
+      }
+      if (i === 3) {
+        return out.join(" ")
+      }
+    } finally {
+      out.push("F" + String(i))
+    }
+  }
+  return "unreachable"
+}
+
+function main() {
+  for (const x of [1, 2, 3]) {
+    try {
+      console.log("got", nested(x))
+    } catch (e) {
+      console.log("caught", e.message)
+    }
+  }
+  console.log(early(3), early(9))
+  console.log(loops())
+}
