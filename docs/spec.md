@@ -186,7 +186,23 @@ console.log(`Listening on ${server.url}`)
 - **Errors.** A handler that throws (or whose promise rejects) is logged to stderr and answered by `error(err)` if given, else `500 Something went wrong!`, like Bun in production.
 - **Types.** `Request`: `method`, `url`, `headers`, `text()` (a `Promise<string>`), `json<T>()` (a `Promise<T, SyntaxError>`, parsed against the expected type). `Response(body?, { status?, statusText?, headers? })`, `Response.json(value, init?)`, `Response.redirect(url, status?)`, `status`, `ok`, `headers`, `text()`, `json<T>()` (promises, as on `Request`). `Headers(init?)`: `get`/`has`/`set`/`append`/`delete`/`forEach`/`toJSON`, case-insensitive; CR/LF in names and values are dropped. `URL(input, base?)` (throws `TypeError`): `href`, `protocol`, `host`, `hostname`, `port`, `pathname`, `search`, `hash`, `origin`, `searchParams`; `URL.parse`, `URL.canParse`. `URLSearchParams`: `get`/`getAll`/`has`/`set`/`append`/`delete`/`size`/`toString`.
 - **Protocol.** HTTP/1.1 with keep-alive, pipelining, `Content-Length` and chunked request bodies, `Expect: 100-continue` and `HEAD`; `content-length` and `date` are added, and `content-type: text/plain;charset=utf-8` when a body has none. Malformed or oversized requests get `400`/`413`/`431` and are closed.
-- Not yet: TLS, HTTP/2, WebSockets, streaming bodies, `Bun.file`, `fetch()` (the client).
+- Not yet: TLS, HTTP/2, WebSockets, streaming bodies, `Bun.file`.
+
+## 7d. fetch (Bun's client)
+`fetch(input, init?)` is a global, as in Bun: `input` is a URL string, a `URL` or a `Request`; `init` is `{ method?, headers?, body?, redirect?, signal?, decompress?, keepalive? }`. It returns `Promise<Response, Error>`: it resolves once the whole response has arrived (an HTTP error status still resolves, `ok` is false), and rejects with a `FetchError` (a `TypeError` with Bun's `message` and `code`: `ConnectionRefused`, `ENOTFOUND`, `ECONNRESET`, `TooManyRedirects`, `UnexpectedRedirect`, `Malformed_HTTP_Response`, `ZlibError`, `ERR_INVALID_URL`, ...) or, when its `signal` aborts, with the signal's reason.
+```ts
+type User = { id: number, name: string }
+const res = try await fetch("http://api.local/users/1", { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(5000) })
+if (!res.ok) throw new Error(`HTTP ${res.status}`)
+const user = try (await res.json()) as User
+```
+- **Requests.** Methods are sent upper-cased; every method but `GET`/`HEAD` sends `Content-Length` (a `GET`/`HEAD` with a body is an error). Bodies: `string`, `URLSearchParams` (sent as `application/x-www-form-urlencoded;charset=UTF-8`) or bytes (`u8[]`). The defaults follow the caller's headers, as Bun sends them: `Connection: keep-alive`, `User-Agent`, `Accept: */*`, `Host`, `Accept-Encoding: gzip, deflate`; credentials in the URL become `Authorization: Basic`.
+- **Responses.** `status`, `statusText`, `ok`, `headers`, `url` (after redirects, without the fragment), `redirected`, `type`, `bodyUsed`; `text()` (UTF-8 decoded: a BOM is dropped, invalid bytes become U+FFFD), `json<T>()` (checked against the expected type), `bytes()`/`arrayBuffer()` (`u8[]`), `clone()`. A body is read once: another read rejects with `ERR_BODY_ALREADY_USED`.
+- **Protocol.** HTTP/1.1 on pooled keep-alive connections per origin (a pooled connection the server has closed is replaced and the request retried once); `Content-Length`, chunked (extensions and trailers) and close-delimited bodies, interim `1xx` responses, HTTP/1.0 servers; gzip and deflate bodies are decoded unless `decompress: false`. DNS lookups run on a small thread pool and are cached for 30 s.
+- **Redirects** (`redirect: "follow"`, the default): up to 20, as the Fetch standard says; 303 (and 301/302 after a `POST`) continue as `GET` without the body; a redirect to another origin drops `Authorization`, `Proxy-Authorization` and `Cookie`. `"manual"` returns the 3xx response; `"error"` rejects.
+- **Cancelling.** `AbortController` (`signal`, `abort(reason?)`), `AbortSignal` (`aborted`, `reason`, `throwIfAborted()`, `addEventListener("abort", f)`, `onabort`, `AbortSignal.abort(reason?)`, `AbortSignal.timeout(ms)`, `AbortSignal.any(signals)`) and `DOMException` (`name`, `code`). An aborted request's connection is closed. `AbortSignal.timeout`'s timer doesn't keep the program running by itself.
+- **Headers** (client and server): `get` joins repeated names with `", "`; `getSetCookie()` lists each cookie; `forEach`, `keys()`, `values()` and `toJSON()` see names lower-cased and sorted, repeated names combined.
+- Not yet: `https:` (TLS), streaming bodies (`res.body`, `ReadableStream`), `Blob`/`FormData` bodies, proxies, `unix` sockets.
 
 ## 8. Tests **[M0]**
 ```ts

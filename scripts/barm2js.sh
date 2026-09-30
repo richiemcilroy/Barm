@@ -84,5 +84,17 @@ const mapKeys = Map.prototype.keys, mapValues = Map.prototype.values, setValues 
 Map.prototype.keys = function () { return [...mapKeys.call(this)]; };
 Map.prototype.values = function () { return [...mapValues.call(this)]; };
 Set.prototype.values = function () { return [...setValues.call(this)]; };
+// fetch() errors are Barm FetchErrors (a TypeError with Bun's `code`); Headers.keys()/values()
+// return arrays.
+globalThis.FetchError ??= TypeError;
+if (globalThis.Headers) {
+  const hk = Headers.prototype.keys, hv = Headers.prototype.values;
+  Headers.prototype.keys = function () { return [...hk.call(this)]; };
+  Headers.prototype.values = function () { return [...hv.call(this)]; };
+}
 JS
+# BARM2JS_RUNTIME=bun runs it under Bun (for fetch(), whose reference is Bun's).
+if [ "${BARM2JS_RUNTIME:-node}" = bun ]; then
+  exec bun --preload "$work/prelude.mjs" "$work/prog.ts"
+fi
 exec node --no-warnings --import "$work/prelude.mjs" "$work/prog.ts"

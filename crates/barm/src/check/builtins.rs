@@ -48,6 +48,24 @@ pub(super) fn native_sig(types: &mut Types, name: &str) -> Option<(Vec<TyId>, Ty
         "headerValue" => (vec![STR, INT], STR),
         "headerRemove" => (vec![STR, STR], STR),
         "headerAppend" => (vec![STR, STR, STR], STR),
+        "fetchStart" => (vec![STR, STR, STR, STR, INT, INT], INT),
+        "fetchWait" => (vec![INT], types.promise(INT, NEVER)),
+        "fetchStatus" => (vec![INT], INT),
+        "fetchStatusText" | "fetchHeaders" | "fetchUrl" | "fetchBody" | "fetchErrorCode" | "fetchErrorMessage" => (vec![INT], STR),
+        "fetchRedirected" => (vec![INT], BOOL),
+        "fetchAbort" | "fetchFree" | "timerUnref" => (vec![INT], VOID),
+        "bytesToString" => {
+            let bytes = types.array(U8);
+            (vec![bytes], STR)
+        }
+        "stringToBytes" => {
+            let bytes = types.array(U8);
+            (vec![STR], bytes)
+        }
+        "utf8Clean" => (vec![STR], STR),
+        "headerGet" => (vec![STR, STR], STR),
+        "headerEntries" => (vec![STR], str_arr),
+        "headerValues" => (vec![STR, STR], str_arr),
         _ => return None,
     })
 }
@@ -77,7 +95,6 @@ pub(super) fn removed_global(name: &str) -> Option<String> {
         "eval" | "Function" => format!("`{name}` is not supported: there is no runtime code evaluation"),
         "globalThis" | "window" | "document" | "global" => format!("`{name}` is not available; Barm compiles to native programs"),
         "require" | "module" | "exports" => "CommonJS is not supported; use `import { name } from \"./file\"`".to_string(),
-        "fetch" => "`fetch` is not supported yet".to_string(),
         "Symbol" | "Proxy" | "Reflect" | "WeakMap" | "WeakSet" | "BigInt" => format!("`{name}` is not supported"),
         "Object" => "`Object` is not supported: records have fixed fields; use `Map` for dynamic keys".to_string(),
         "Array" => "`Array.from`/`Array.isArray` are not supported; use array literals and `map`".to_string(),
