@@ -322,7 +322,7 @@ struct TlsArchive {
 
 impl TlsArchive {
     fn new(cc: &str, sysroot: Option<&str>, extra: &str) -> TlsArchive {
-        let mut flags: Vec<String> = ["-O2", "-w", "-fno-stack-protector", "-U_FORTIFY_SOURCE", "-D_FORTIFY_SOURCE=0", "-ffunction-sections", "-fdata-sections", "-fno-strict-aliasing", "-fvisibility=hidden"]
+        let mut flags: Vec<String> = ["-O3", "-DNDEBUG", "-w", "-fno-stack-protector", "-U_FORTIFY_SOURCE", "-D_FORTIFY_SOURCE=0", "-ffunction-sections", "-fdata-sections", "-fno-strict-aliasing", "-fvisibility=hidden"]
             .map(String::from)
             .to_vec();
         if let Some(sdk) = sysroot {
