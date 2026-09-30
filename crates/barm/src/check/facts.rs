@@ -13,6 +13,8 @@ pub enum IdentFact {
     Fn(u32, u32),
     Const(u32, u32),
     Ns(u32),
+    /// A class name (the right side of `instanceof`).
+    Class(u32),
     Builtin,
 }
 
@@ -28,6 +30,15 @@ pub enum Callee {
     Builtin { ns: Option<Sym>, name: Sym },
     /// `expect(subject).name(...)`.
     Matcher(TyId),
+    /// `obj.name(...)` on a class instance; `recv` is the receiver's class type. `sup`: `super.name(...)`
+    /// (the base implementation, called directly).
+    ClassMethod { recv: TyId, name: Sym, sup: bool },
+    /// `C.name(...)`: a static method (class, member).
+    StaticMethod(u32, u32),
+    /// `new C(...)`: the class; the instance type is the call's return type.
+    New(u32),
+    /// `super(...)` in a constructor: the base class type.
+    SuperCtor(TyId),
 }
 
 #[derive(Clone, Debug)]
@@ -48,6 +59,10 @@ pub enum MemberFact {
     NsConst(u32, u32),
     /// `Math.PI` and friends.
     MathConst,
+    /// `C.NAME`: a static readonly field (class, member).
+    StaticField(u32, u32),
+    /// `process.env.NAME` (the variable's name).
+    Env(Sym),
 }
 
 #[derive(Default)]
@@ -56,8 +71,10 @@ pub struct ModuleFacts {
     pub idents: FxMap<ExprId, IdentFact>,
     pub calls: FxMap<ExprId, CallFact>,
     pub members: FxMap<ExprId, MemberFact>,
-    /// Types of `let`/`const` bindings and `for...of` variables.
+    /// Types of `let`/`const` bindings and `for...of` variables (and `catch` variables, keyed by the `try`).
     pub bindings: FxMap<StmtId, TyId>,
+    /// Calls and `new` expressions that can throw (checked for an error right after).
+    pub throwing: crate::hash::FxSet<ExprId>,
 }
 
 impl ModuleFacts {
