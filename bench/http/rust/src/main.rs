@@ -1,4 +1,4 @@
-// axum on tokio — same routes as server.barm. WORKERS=1 is a current-thread runtime,
+// axum on tokio — same routes as server.barm.ts. WORKERS=1 is a current-thread runtime,
 // WORKERS>1 a multi-thread runtime with that many workers (or thread-per-core with MODE=tpc).
 use axum::{http::StatusCode, response::IntoResponse, routing::{get, post}, Json, Router};
 use serde::Serialize;

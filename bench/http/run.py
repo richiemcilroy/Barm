@@ -7,7 +7,7 @@ Builds every server, then for each worker count and route starts one server at a
 drives it with ./load (a wrk-style keep-alive generator in load.c). Prints req/s and latency
 percentiles, and writes bench/results/http-<timestamp>.json.
 """
-import argparse, json, os, socket, subprocess, sys, time
+import argparse, json, os, re, shutil, socket, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
@@ -29,7 +29,7 @@ def build():
     os.makedirs(OUT, exist_ok=True)
     sh(["cc", "-O2", "-o", os.path.join(OUT, "load"), os.path.join(HERE, "load.c"), "-lpthread"])
     sh(["cargo", "build", "--release", "-q", "--manifest-path", os.path.join(ROOT, "Cargo.toml")])
-    sh([os.path.join(ROOT, "target/release/barm"), "build", os.path.join(HERE, "server.barm"), "-o", os.path.join(OUT, "barm-server")], stdout=subprocess.DEVNULL)
+    sh([os.path.join(ROOT, "target/release/barm"), "build", os.path.join(HERE, "server.barm.ts"), "-o", os.path.join(OUT, "barm-server")], stdout=subprocess.DEVNULL)
     sh(["cargo", "build", "--release", "-q", "--offline", "--manifest-path", os.path.join(HERE, "rust/Cargo.toml")])
 
 
@@ -78,6 +78,31 @@ def cpu_seconds(pgid):
     return total
 
 
+def pss_mb(pgid):
+    """Proportional set size of the process group (MB): pages shared between processes (a
+    forked worker's code and libraries) are split between them. Linux only; else RSS."""
+    pids = subprocess.run(["pgrep", "-g", str(pgid)], capture_output=True, text=True).stdout.split()
+    total, ok = 0, False
+    for pid in pids:
+        try:
+            for line in open(f"/proc/{pid}/smaps_rollup"):
+                if line.startswith("Pss:"):
+                    total += int(line.split()[1])
+                    ok = True
+        except OSError:
+            pass
+    if ok:
+        return total / 1024
+    # macOS: the sum of physical footprints (a process's own dirty memory; like PSS, a forked
+    # worker's shared code isn't counted again)
+    if pids and shutil.which("footprint"):
+        out = subprocess.run(["footprint", "-f", "bytes"] + [a for p in pids for a in ("-p", p)], capture_output=True, text=True).stdout
+        fp = [int(m.group(1)) for m in re.finditer(r"Footprint: (\d+) B", out)]
+        if fp:
+            return sum(fp) / (1 << 20)
+    return rss_mb(pgid)
+
+
 def rss_mb(pgid):
     """Resident memory of the server's process group (MB)."""
     pids = subprocess.run(["pgrep", "-g", str(pgid)], capture_output=True, text=True).stdout.split()
@@ -101,9 +126,10 @@ def load(route, conns, threads, secs, pipeline, pgid):
     c0 = cpu_seconds(pgid)
     time.sleep(secs - 0.2)
     c1 = cpu_seconds(pgid)
-    mem = rss_mb(pgid)
+    mem, pss = rss_mb(pgid), pss_mb(pgid)
     r = json.loads(p.communicate()[0])
     r["rss_mb"] = mem
+    r["pss_mb"] = pss
     # CPU the server spent per request (µs), over the (secs - 0.2) sampling window.
     r["cpu_us_per_req"] = (c1 - c0) * 1e6 / max(1.0, r["rps"] * (secs - 0.2))
     r["cpu_cores"] = (c1 - c0) / (secs - 0.2)
@@ -148,7 +174,7 @@ def main():
                     time.sleep(0.5)
             print(f"  [{workers} workers] repetition {rep + 1}/{a.repeat} done", file=sys.stderr, flush=True)
         print(f"\n== {workers} worker{'s' if workers > 1 else ''}, {a.conns} connections, pipeline {a.pipeline} ==")
-        print(f"{'server':<8} {'route':<6} {'req/s':>10} {'avg':>8} {'p50':>8} {'p99':>8} {'p99.9':>8} {'cores':>6} {'cpu/req':>8} {'rss':>7}")
+        print(f"{'server':<8} {'route':<6} {'req/s':>10} {'avg':>8} {'p50':>8} {'p99':>8} {'p99.9':>8} {'cores':>6} {'cpu/req':>8} {'rss':>7} {'mem':>7}")
         for route in routes:
             for name in names:
                 runs = sorted(samples[(name, route[0])], key=lambda x: x["rps"])
@@ -156,7 +182,7 @@ def main():
                 r["rps_all"] = [round(x["rps"]) for x in runs]
                 r.update(server=name, route=route[0], workers=workers, conns=a.conns, pipeline=a.pipeline)
                 results.append(r)
-                print(f"{name:<8} {route[0]:<6} {r['rps']:>10,.0f} {r['avg_us']:>6.0f}us {r['p50_us']:>6}us {r['p99_us']:>6}us {r['p999_us']:>6}us {r['cpu_cores']:>6.2f} {r['cpu_us_per_req']:>6.2f}us {r['rss_mb']:>5.1f}MB", flush=True)
+                print(f"{name:<8} {route[0]:<6} {r['rps']:>10,.0f} {r['avg_us']:>6.0f}us {r['p50_us']:>6}us {r['p99_us']:>6}us {r['p999_us']:>6}us {r['cpu_cores']:>6.2f} {r['cpu_us_per_req']:>6.2f}us {r['rss_mb']:>5.1f}MB {r['pss_mb']:>5.1f}MB", flush=True)
     os.makedirs(os.path.join(HERE, "../results"), exist_ok=True)
     tag = "-linux" if os.uname().sysname == "Linux" else ""
     path = os.path.join(HERE, "../results", time.strftime(f"http{tag}-%Y%m%d-%H%M%S.json"))

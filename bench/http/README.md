@@ -1,6 +1,6 @@
 # HTTP server benchmark
 
-The same three routes served by Barm (`std/http`), Rust (axum on tokio), Bun (`Bun.serve`) and Node (`node:http`), driven by a keep-alive load generator:
+The same three routes served by Barm, Rust (axum on tokio), Bun and Node (`node:http`), driven by a keep-alive load generator. The Barm server is the Bun server's own code — `Bun.serve`, `new URL(req.url).pathname`, `Response.json` — with a `try` added where a call can throw: it measures idiomatic code, not a hand-tuned path.
 
 | route | request | response |
 |---|---|---|
@@ -9,7 +9,7 @@ The same three routes served by Barm (`std/http`), Rust (axum on tokio), Bun (`B
 | `echo` | `POST /echo` with a 75-byte JSON body | the body |
 
 Files:
-- `server.barm` is the Barm server.
+- `server.barm.ts` is the Barm server (`diff server.bun.ts server.barm.ts` shows the edits).
 - `rust/` is the Rust server (axum 0.8, tokio 1, LTO, `panic = "abort"`).
 - `server.bun.ts` is the Bun server, and `server.node.mjs` is the Node server.
 - `load.c` is the load generator.
@@ -18,7 +18,7 @@ Files:
 
 ## Results
 
-Apple M4 Max (12 performance + 4 efficiency cores). The load generator runs on the same machine as the server, with 8 threads and 128 persistent connections, one request in flight per connection. Servers are interleaved across 3 repetitions and the median is shown. `cpu/req` is the server's CPU time per request, and `rss` is its resident memory at the end of the run.
+Apple M4 Max (12 performance + 4 efficiency cores). The load generator runs on the same machine as the server, with 8 threads and 128 persistent connections, one request in flight per connection. Servers are interleaved across 3 repetitions and the median is shown. `cpu/req` is the server's CPU time per request. `mem` is the memory the server costs the machine: the proportional set size (PSS) on Linux and the physical footprint on macOS, summed over its processes, so pages that forked workers share are counted once. `rss` (resident set, summed) is in the JSON results too; it counts shared pages once per process, which inflates multi-process servers.
 
 ### Linux (Docker VM, 16 vCPUs, epoll)
 
@@ -26,11 +26,13 @@ One process or thread:
 
 | route | Barm | Rust (axum) | Bun | Barm p99 | Rust p99 | Bun p99 |
 |---|---:|---:|---:|---:|---:|---:|
-| hello | **423k req/s** | 285k | 255k | 1.15 ms | 1.32 ms | 1.44 ms |
-| json | **400k** | 277k | 234k | 1.18 ms | 1.61 ms | 1.50 ms |
-| echo | **402k** | 254k | 198k | 1.22 ms | 1.23 ms | 1.61 ms |
-| cpu/req (json) | **1.46 µs** | 2.50 µs | 3.01 µs | | | |
-| rss | **3.3 MB** | 5.8 MB | 40 MB | | | |
+| hello | **397k req/s** | 307k | 277k | 1.25 ms | 1.18 ms | 1.10 ms |
+| json | **379k** | 294k | 254k | 1.24 ms | 0.98 ms | 1.30 ms |
+| echo | **389k** | 275k | 190k | 1.20 ms | 0.96 ms | 1.58 ms |
+| cpu/req (json) | **1.62 µs** | 2.23 µs | 2.81 µs | | | |
+| rss | **3.4 MB** | 5.8 MB | 41 MB | | | |
+
+On one core every server is busy with the kernel's share of each request, so p99 is about the same everywhere; Barm spends the least CPU per request.
 
 Four workers. Barm and Bun use 4 processes. For Rust:
 - `rust` is tokio's multi-thread runtime with 4 workers, the axum default.
@@ -38,19 +40,21 @@ Four workers. Barm and Bun use 4 processes. For Rust:
 
 | route | Barm | Rust tpc | Rust | Bun |
 |---|---:|---:|---:|---:|
-| hello | **1.71M req/s** | 1.28M | 671k | 966k |
-| json | **1.63M** | 1.11M | 613k | 790k |
-| echo | **1.66M** | 965k | 716k | 660k |
-| p99 (json) | **0.19 ms** | 1.06 ms | 0.68 ms | 1.42 ms |
-| cpu/req (json) | **2.45 µs** | 3.01 µs | 3.64 µs | 3.83 µs |
-| rss | 9 MB | 6 MB | 8 MB | 178 MB |
+| hello | **1.63M req/s** | 1.34M | 724k | 990k |
+| json | **1.62M** | 1.20M | 708k | 872k |
+| echo | **1.57M** | 1.08M | 757k | 695k |
+| p99 (json) | **0.20 ms** | 0.31 ms | 0.65 ms | 1.47 ms |
+| cpu/req (json) | **2.44 µs** | 3.28 µs | 3.17 µs | 4.01 µs |
+| rss | 12 MB | 6 MB | 7 MB | 177 MB |
 
-Pipelined (16 requests in flight per connection, as in TechEmpower's plaintext test), json route:
+Pipelined (16 requests in flight per connection, as in TechEmpower's plaintext test):
 
 | | Barm | Rust tpc | Rust | Bun |
 |---|---:|---:|---:|---:|
-| 1 worker | **3.1M req/s** | 618k | 569k | 48k |
-| 4 workers | **13.3M** | 2.2M | 1.6M | 194k |
+| hello, 1 worker | **3.1M req/s** | 763k | 716k | 55k |
+| json, 1 worker | **2.3M** | 619k | 638k | 48k |
+| hello, 4 workers | **8.9M** | 2.8M | 2.3M | 211k |
+| json, 4 workers | **6.9M** | 2.4M | 2.4M | 196k |
 
 ### macOS (kqueue)
 
@@ -87,9 +91,11 @@ Pipelined, one worker:
 
 ## How Barm gets there
 
-- **Native core.** The event loop, HTTP/1.1 parser and response writer are C in the runtime (`runtime/barm.c`, `bm_native_http*`). The API is Barm (`crates/barm/src/std/http.barm`): `serve` passes a closure to the loop, which calls it for each request and writes the returned `Response`.
+- **Native core, Barm API.** The event loop, HTTP/1.1 parser and response writer are C in the runtime (`runtime/barm.c`, `bm_native_http*`). Bun's API is Barm code (`crates/barm/src/std/http.barm`): `Bun.serve` compiles the routes, registers a closure with the loop, and the closure routes each request and writes the returned `Response`.
+- **Shared buffers.** Each event loop reads into one 64 KB buffer and writes responses from one shared buffer; a connection keeps buffers of its own only for leftovers (half a request, or output the socket didn't take). An idle keep-alive connection is ~100 bytes, the working set stays in cache, and 1,000 connections add about 0.5 MB.
+- **Cheap URLs.** A `URL` is kept as its normalized href and its parts are sliced when read; an already-normal URL (every request URL) is the input string itself. `new URL(req.url).pathname` costs three small allocations.
 - **Level-triggered events, no wasted syscalls.** When a `read` fills less than the buffer, the socket is known to be drained, so the loop skips the extra `read` that would only return `EAGAIN`. A non-pipelined request costs one `read` and one `write`. With profiling on macOS, over 95% of server time is in those two syscalls.
-- **Batched output.** Every response produced from one read goes out in one `write`, which is why pipelined throughput is 5–7× Rust's. hyper, under axum's defaults, flushes after each response (`pipeline_flush` is off).
+- **Batched output.** Every response produced from one read goes out in one `write`, which is why pipelined throughput is 3–4× Rust's. hyper, under axum's defaults, flushes after each response (`pipeline_flush` is off).
 - **Cheap requests.** A request is a few small strings from the runtime's small-object free lists, a `Request` object and a `Response` object, all reference-counted and freed as soon as the handler returns. No GC, and no per-request futures or tasks. The `date` header is formatted once per second.
 - **Workers are processes.** `fork` after `listen` gives isolated heaps with no locking. A shared-memory table of per-worker connection counts makes each worker accept only while it is among the least loaded, so persistent connections spread evenly (macOS has no `SO_REUSEPORT` balancing).
 - **Backpressure and limits.** A client that pipelines without reading stops being served once 1 MB of output is queued, and its socket stops being read until the output drains. Request limits:
