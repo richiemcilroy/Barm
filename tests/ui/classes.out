@@ -1,0 +1,76 @@
+error[T0812] classes.barm:23:3: field `count` is never assigned in the constructor
+   23 |   count: int
+  why: every field needs a value before the object is used
+  instead: assign `this.count = ...` at the top level of the constructor, give it an initializer, or make it optional (`count?: int`)
+
+error[T0813] classes.barm:34:5: `this` is used before every field is assigned
+   34 |     this.log()
+  unassigned: `b`
+  why: methods (and anything `this` is passed to) could read fields that don't have values yet
+  instead: assign every field first, then call methods or pass `this`
+
+error[T0806] classes.barm:46:7: class `Dog` doesn't implement abstract method `sound`
+   46 | class Dog extends Animal {}
+  fix[maybe]: declare `abstract class Dog`
+
+error[T0807] classes.barm:49:3: `sound` doesn't match the method it overrides
+   49 |   sound(): int {
+  base: sound(): string
+  here: sound(): int
+  rule: an override takes the same parameters (or wider types) and returns the same type (or a narrower one)
+
+error[T0814] classes.barm:60:5: a derived class's constructor must start with `super(...)`
+   60 |     console.log("hi")
+  fix[placeholder]: call the base constructor first
+
+error[T0820] classes.barm:65:3: instances of `ListNode` can reference each other in a cycle, which reference counting alone can't free
+   65 |   next: ListNode | undefined = undefined
+  cycle: ListNode.next → ListNode
+  fix: cycles are real: declare `cyclic class ListNode`: its instances are also checked by the cycle collector
+  fix: a back-reference: mark it `weak next` (a parent pointer, say): it then doesn't keep its target alive
+  fix: set once: make it `readonly next` and set it in the constructor: objects then only point to older objects
+  fix[maybe]: declare `cyclic class ListNode`
+
+error[T0815] classes.barm:75:8: a `weak` field must have type `C | undefined` for a class `C`, found `int`
+   75 |   weak bad: int = 0
+  why: a weak reference doesn't keep its target alive, so it reads as `undefined` once the target is freed
+
+error[T0816] classes.barm:79:10: static field `count` must be `static readonly`
+   79 |   static count = 0
+  why: mutable module-level state is not allowed
+  fix[maybe]: make it `static readonly`
+
+error[T0811] classes.barm:84:5: `x` is `readonly`
+   84 |   p.x = 3
+  why: readonly fields are set once, in the constructor (or by their initializer)
+
+error[T0810] classes.barm:86:5: `balance` is private to `Account`
+   86 |   a.balance = 100
+  why: it can only be used inside `Account`
+
+error[T0107] classes.barm:87:17: `Account` has no field `ballance`
+   87 |   console.log(a.ballance)
+  did you mean: balance
+  available: balance, deposit, owner
+  fix[maybe]: use `balance`
+
+error[T0804] classes.barm:88:13: `Animal` is abstract, so it can't be instantiated
+   88 |   const x = new Animal()
+  instead: create an instance of a concrete subclass
+
+error[T0803] classes.barm:89:13: class `Point` is not a value
+   89 |   const k = Point
+  instead: create an instance with `new Point(...)`, or use its static members (`Point.name`)
+
+error[T0001] classes.barm:90:20: expected `Point`, found `{ x: int, y: int }`
+   90 |   const q: Point = { x: 1, y: 2 }
+  why: `Point` is a class: instances are created with `new Point(...)`, not object literals
+
+error[T0203] classes.barm:91:5: method `deposit` must be called: `deposit(...)`
+   91 |   a.deposit
+  instead: to pass it as a function, wrap it: `(x) => obj.deposit(x)`
+
+error[T0802] classes.barm:92:15: `this` is only available inside class methods and constructors
+   92 |   console.log(this)
+
+16 error(s)

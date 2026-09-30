@@ -1,0 +1,46 @@
+// Error rules: marked calls, declared throws, closures, what can be thrown.
+
+class Timeout extends Error {}
+class Refused extends Error {}
+
+function connect(host: string): int throws Timeout {
+  if (host === "") {
+    throw new Timeout("no host")
+  }
+  return 1
+}
+
+function unmarked(): int {
+  return connect("x")
+}
+
+function narrow(): int throws Refused {
+  return try connect("x")
+}
+
+export function leaky(s: string): int {
+  if (s === "") {
+    throw new Refused("empty")
+  }
+  return 1
+}
+
+function inClosure(xs: string[]): int[] {
+  return xs.map((h) => try connect(h))
+}
+
+function badThrow(): int {
+  throw "just a string"
+}
+
+function ok(): int {
+  try {
+    return connect("x")
+  } catch (e) {
+    return 0
+  }
+}
+
+function main() {
+  console.log(unmarked(), narrow(), ok())
+}

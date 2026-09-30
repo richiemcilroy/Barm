@@ -1,0 +1,93 @@
+// Class rules: construction, visibility, readonly, overrides, abstract, cycles.
+
+class Point {
+  constructor(readonly x: f64, readonly y: f64) {}
+  moved(dx: f64): Point {
+    return new Point(this.x + dx, this.y)
+  }
+}
+
+class Account {
+  private balance = 0
+  owner: string
+  constructor(owner: string) {
+    this.owner = owner
+  }
+  deposit(n: int) {
+    this.balance += n
+  }
+}
+
+class Missing {
+  name: string
+  count: int
+  constructor(name: string) {
+    this.name = name
+  }
+}
+
+class Early {
+  a: int
+  b: int
+  constructor() {
+    this.a = 1
+    this.log()
+    this.b = 2
+  }
+  log() {
+    console.log(this.a, this.b)
+  }
+}
+
+abstract class Animal {
+  abstract sound(): string
+}
+
+class Dog extends Animal {}
+
+class Cat extends Animal {
+  sound(): int {
+    return 1
+  }
+}
+
+class Base {
+  constructor(readonly id: int) {}
+}
+
+class NoSuper extends Base {
+  constructor() {
+    console.log("hi")
+  }
+}
+
+class ListNode {
+  next: ListNode | undefined = undefined
+  constructor(readonly value: int) {}
+}
+
+class Parent {
+  children: Child[] = []
+}
+
+class Child {
+  weak parent: Parent | undefined = undefined
+  weak bad: int = 0
+}
+
+class Counter {
+  static count = 0
+}
+
+function main() {
+  const p = new Point(1, 2)
+  p.x = 3
+  const a = new Account("me")
+  a.balance = 100
+  console.log(a.ballance)
+  const x = new Animal()
+  const k = Point
+  const q: Point = { x: 1, y: 2 }
+  a.deposit
+  console.log(this)
+}
