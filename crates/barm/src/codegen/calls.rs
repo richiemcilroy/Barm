@@ -601,7 +601,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let v = self.coerce(v, et);
                     let code = self.consume(v);
                     if name == "push" {
-                        self.line(format!("BMG_PUSH({ect}, &{lv}, {d}, {code});"));
+                        // A local made unique before the loop: no ownership check per push.
+                        let b = self.b();
+                        let unique = b.unique.iter().any(|k| b.locals.get(k).is_some_and(|l| l.access == lv));
+                        let mac = if unique { "BMG_PUSH_U" } else { "BMG_PUSH" };
+                        self.line(format!("{mac}({ect}, &{lv}, {d}, {code});"));
                     } else {
                         let tmpn = self.fresh("e");
                         self.line(format!("{ect} {tmpn} = {code};"));
