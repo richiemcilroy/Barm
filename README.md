@@ -73,20 +73,20 @@ Median wall time and peak memory on an Apple M4 Max. Every language prints ident
 
 | benchmark | C | Rust | Node | Bun | **Barm** |
 |---|---:|---:|---:|---:|---:|
-| binary_trees | 688 ms · 17.9 MB | 803 ms · 18.1 MB | 478 ms · 202 MB | 389 ms · 164 MB | **266 ms · 17.8 MB** |
-| class_trees | 695 ms · 17.9 MB | 806 ms · 18.1 MB | 471 ms · 440 MB | 379 ms · 218 MB | **271 ms · 17.8 MB** |
-| dispatch (virtual calls) | 83 ms · 1.8 MB | 83 ms · 2.0 MB | 206 ms · 78 MB | 112 ms · 25 MB | **40 ms · 1.9 MB** |
-| map_insert | 464 ms · 225 MB | 504 ms · 297 MB | 882 ms · 282 MB | 711 ms · 564 MB | **250 ms · 166 MB** |
-| nbody | 319 ms · 1.8 MB | 232 ms · 2.0 MB | 551 ms · 77 MB | 511 ms · 22 MB | **213 ms · 1.8 MB** |
-| sort | 281 ms · 24.7 MB | 75 ms · 38.5 MB | 1158 ms · 266 MB | 693 ms · 116 MB | **46 ms** · 25.0 MB |
-| strings | 256 ms · 206 MB | 223 ms · 251 MB | 492 ms · 662 MB | 201 ms · 566 MB | **140 ms · 159 MB** |
-| points | 315 ms · 1.8 MB | 315 ms · 1.9 MB | 1942 ms · 83 MB | 881 ms · 30 MB | **313 ms · 1.8 MB** |
-| array_push | 54 ms · 233 MB | 62 ms · 233 MB | 346 ms · 742 MB | 216 ms · 579 MB | **54 ms · 231 MB** |
-| fib | 504 ms | **459 ms** | 1509 ms | 955 ms | 499 ms\* |
+| binary_trees | 703 ms · 17.9 MB | 801 ms · 18.1 MB | 478 ms · 202 MB | 390 ms · 162 MB | **266 ms · 17.8 MB** |
+| class_trees | 705 ms · 17.9 MB | 812 ms · 18.1 MB | 468 ms · 201 MB | 381 ms · 215 MB | **266 ms · 17.8 MB** |
+| dispatch (virtual calls) | 83 ms · 1.8 MB | 83 ms · 2.0 MB | 211 ms · 81 MB | 113 ms · 25 MB | **39 ms** · 1.9 MB |
+| map_insert | 471 ms · 225 MB | 508 ms · 297 MB | 900 ms · 282 MB | 742 ms · 564 MB | **253 ms · 150 MB** |
+| nbody | 319 ms · 1.8 MB | 229 ms · 2.0 MB | 558 ms · 77 MB | 510 ms · 22 MB | **211 ms · 1.8 MB** |
+| sort | 282 ms · 24.7 MB | 75 ms · 38.5 MB | 1166 ms · 266 MB | 697 ms · 116 MB | **47 ms** · 25.0 MB |
+| strings | 261 ms · 206 MB | 228 ms · 251 MB | 505 ms · 664 MB | 203 ms · 568 MB | **136 ms · 159 MB** |
+| array_push | 54 ms · 233 MB | 64 ms · 233 MB | 360 ms · 742 MB | 221 ms · 579 MB | **49 ms · 231 MB** |
+| fib | 506 ms · 1.8 MB | 454 ms · 1.9 MB | 1505 ms · 75 MB | 970 ms · 18 MB | **425 ms · 1.8 MB** |
+| points | **319 ms** · 1.8 MB | 320 ms · 1.9 MB | 1960 ms · 83 MB | 885 ms · 30 MB | 320 ms · 1.8 MB |
 
-\* Barm checks for integer overflow by default and still matches C, which doesn't. Rust with overflow checks takes 586 ms; `barm build --unchecked` takes 398 ms, the fastest here.
+Barm checks for integer overflow by default (fib above); Rust with overflow checks takes 592 ms on fib. `points` is bound by floating-point add latency in all three compiled languages.
 
-Binaries are 35–37 KB (C's are 33 KB, Rust's about 470 KB), and a build takes 0.05–0.07 s (C 0.05 s, Rust 0.08–0.16 s). Run the benchmarks yourself with `python3 bench/run.py`; the method is in [bench/README.md](bench/README.md).
+Binaries are 34–35 KB (33 KB stripped, the same as C; Rust's are about 470 KB), and a build takes 0.04–0.07 s (C 0.04–0.05 s, Rust 0.08–0.16 s). Run the benchmarks yourself with `python3 bench/run.py`; the method is in [bench/README.md](bench/README.md).
 
 ### HTTP server
 
