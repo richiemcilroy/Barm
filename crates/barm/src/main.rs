@@ -22,7 +22,8 @@ barm's own (`barm run test` runs a \"test\" script). There are no packages yet, 
 and `add` only explain that.
 
 build options: -O0 | -O1 | -O2 | -O3 (default) | -Os, --time,
-               --unchecked (integer overflow wraps instead of trapping, like Rust release builds)
+               --unchecked (integer overflow wraps instead of trapping, like Rust release builds),
+               -g (keep function names and debug info, for debuggers and profilers)
 watch:         --watch (with run, test or build: rebuild when a source file changes, and
                restart the program), --no-clear-screen, --watch-kill-signal=SIGTERM
 scripts:       --silent (don't print each command before running it)
@@ -152,6 +153,7 @@ struct Flags {
     emit_c: Option<PathBuf>,
     opt: String,
     unchecked: bool,
+    symbols: bool,
     time: bool,
     watch: bool,
     clear_screen: bool,
@@ -169,6 +171,7 @@ fn parse_flags(args: &[String], cmd: &BuildCmd) -> Result<Flags, ExitCode> {
         emit_c: None,
         opt: "-O3".to_string(),
         unchecked: false,
+        symbols: false,
         time: false,
         watch: false,
         clear_screen: true,
@@ -193,6 +196,7 @@ fn parse_flags(args: &[String], cmd: &BuildCmd) -> Result<Flags, ExitCode> {
             }
             "--time" => f.time = true,
             "--unchecked" => f.unchecked = true,
+            "-g" => f.symbols = true,
             "--watch" => f.watch = true,
             "--no-clear-screen" => f.clear_screen = false,
             "--silent" => f.silent = true,
@@ -282,7 +286,7 @@ fn execute(f: Flags, cmd: BuildCmd) -> ExitCode {
     }
     let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mode = if cmd == BuildCmd::Test { barm::codegen::Mode::Test } else { barm::codegen::Mode::Run };
-    let opts = barm::build::Options { mode, unchecked: f.unchecked, opt: f.opt, emit_c: f.emit_c };
+    let opts = barm::build::Options { mode, unchecked: f.unchecked, opt: f.opt, emit_c: f.emit_c, symbols: f.symbols };
     let dest = f.out.unwrap_or_else(|| {
         let stem = paths[0].file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "main".into());
         PathBuf::from(if stem == "." || stem.is_empty() { "main".to_string() } else { stem })

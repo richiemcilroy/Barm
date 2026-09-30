@@ -408,7 +408,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         let code = if value == INT { "(int)*(bm_int *)bm_promise_value(mp)" } else { "0" };
         let _ = writeln!(
             out,
-            "    bm_task *t = bm_task_new(sizeof(AF_{cname}), {cname}_task, {desc});\n    bm_promise *mp = t->promise;\n    bm_promise_retain(mp);\n    bm_task_start(t);\n    bm_async_run();\n    if (mp->state == BM_REJECTED) {{ bmg_err = mp->err; bmg_obj_retain(bmg_err); bm_promise_release(mp); bmg_uncaught(); return 1; }}\n    if (mp->state == BM_PENDING) {{ bm_promise_release(mp); bm_out_flush(); fputs(\"warning: the program's top-level await never finished\\n\", stderr); return 13; }}\n    int code = {code};\n    bm_promise_release(mp);\n    bm_out_flush();\n    return code;"
+            "    bm_task *t = bm_task_new(sizeof(AF_{cname}), {cname}_task, {desc});\n    bm_promise *mp = t->promise;\n    bm_promise_retain(mp);\n    bm_task_start(t);\n    bm_async_run();\n    if (mp->state == BM_REJECTED) {{ bmg_err = mp->err; bmg_obj_retain(bmg_err); bm_promise_release(mp); bmg_uncaught(); return 1; }}\n    if (mp->state == BM_PENDING) {{ bm_promise_release(mp); bm_out_flush(); bm_err_cstr(\"warning: the program's top-level await never finished\\n\"); return 13; }}\n    int code = {code};\n    bm_promise_release(mp);\n    bm_out_flush();\n    return code;"
         );
     }
 
@@ -1483,7 +1483,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         };
         let _ = writeln!(self.protos, "static void bmg_uncaught(void);");
         format!(
-            "static void bmg_uncaught(void) {{\n    void *e = bmg_err; bmg_err = NULL;\n    bm_sb sbv = {{0}}; bm_sb *sb = &sbv;\n    bm_sb_push_cstr(sb, \"uncaught \");\n    {text};\n    bm_sb_push_char(sb, '\\0');\n    bm_out_flush();\n    if (bm_test_active()) bm_trap(sbv.data, NULL);\n    fprintf(stderr, \"%s\\n\", sbv.data);\n    fflush(stderr);\n}}\n"
+            "static void bmg_uncaught(void) {{\n    void *e = bmg_err; bmg_err = NULL;\n    bm_sb sbv = {{0}}; bm_sb *sb = &sbv;\n    bm_sb_push_cstr(sb, \"uncaught \");\n    {text};\n    bm_sb_push_char(sb, '\\0');\n    bm_out_flush();\n    if (bm_test_active()) bm_trap(sbv.data, NULL);\n    sbv.data[sbv.len - 1] = '\\n';\n    bm_write_fd(2, sbv.data, sbv.len);\n}}\n"
         )
     }
 

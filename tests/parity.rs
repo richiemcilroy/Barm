@@ -75,7 +75,7 @@ fn main() {
     }
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
     let dir = root.join("tests/parity");
-    let opts = barm::build::Options { mode: barm::codegen::Mode::Run, unchecked: false, opt: "-O2".into(), emit_c: None };
+    let opts = barm::build::Options { mode: barm::codegen::Mode::Run, unchecked: false, opt: "-O2".into(), emit_c: None, symbols: false };
     let built = match barm::build::build(&[dir.join("server.barm.ts")], &root, &opts) {
         Ok(b) => b,
         Err(barm::build::BuildError::Diagnostics(sm, d)) => panic!("build failed\n{}", barm::diag::render_text(&d, &sm)),
