@@ -530,6 +530,7 @@ typedef struct bm_codec_ops {
     bm_decoder *(*open)(int enc);
     int (*step)(bm_decoder *d, const uint8_t *in, size_t n, size_t *used, bm_sb *out, size_t limit);
     void (*close)(bm_decoder *d);
+    bool (*whole)(int enc, const uint8_t *in, size_t n, bm_sb *out); /* all at once; false if corrupt */
 } bm_codec_ops;
 extern const bm_codec_ops *bm_codec;
 extern const bm_codec_ops bm_codecs;

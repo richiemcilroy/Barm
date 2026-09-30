@@ -156,6 +156,9 @@ try {
   console.log(`streamed zeros: ${e.message}`)
 }
 
+// a gzip trailer that claims 4 GiB: rejected, without reserving it
+await show("lying gzip size", fetch(base + "/gzip?f=fixture-lying.gz"))
+
 // a body that has all arrived but isn't all decoded: read whole later, or dropped
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {

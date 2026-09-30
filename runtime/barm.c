@@ -5163,10 +5163,11 @@ typedef struct bm_fr {
     bm_decoder *dec;
     bm_sb raw;
     size_t raw_off;
-    /* Until the body is read whole (text() and the like), at most BM_STREAM_HIGH of it is
-     * decoded ahead of the reader: a small body that decodes to a huge one is decoded as it's
-     * read. A body that has all arrived but isn't all decoded is draining (the request settles
-     * when it's done). */
+    /* A body read in chunks (streaming) is decoded as it arrives, at most BM_STREAM_HIGH ahead of
+     * the reader: a small body that decodes to a huge one is decoded as it's read. A body read
+     * whole is decoded at once when it's all in (faster). Until the program reads it, nothing
+     * is decoded; a body that has all arrived by then is draining (the request settles once
+     * it's decoded). */
     bool whole, draining;
     int64_t remaining;
     /* The body is checked as UTF-8 while it arrives (still in cache): text() then needn't read
@@ -5320,8 +5321,8 @@ static bool bm_fr_decode(bm_fr *r, bool final);
 /* Body bytes arrived: decode them, and a waiting reader gets them. True when the reader is far
  * enough behind that the socket should pause. */
 static bool bm_fr_data(bm_fr *r) {
-    if (bm_fr_decoding(r) && !bm_fr_decode(r, false)) return false;
     if (!r->streaming) return false;
+    if (bm_fr_decoding(r) && !bm_fr_decode(r, false)) return false;
     if (r->read_p && r->rbody.len) bm_fr_resolve(&r->read_p, (bm_int)r->rbody.len);
     return r->rbody.len >= BM_STREAM_HIGH || r->raw_off < r->raw.len;
 }
@@ -5717,9 +5718,19 @@ static bool bm_fr_decode(bm_fr *r, bool final) {
         return false;
     }
     size_t limit = 0;
-    if (!final && !r->whole) {
+    if (!final) {
         if (r->rbody.len >= BM_STREAM_HIGH) return true;
         limit = BM_STREAM_HIGH - r->rbody.len;
+    }
+    if (r->rbody.cap == 0) {
+        /* one buffer for the output, reserved once: 8 times the encoded size when it's known
+         * (pages never written cost nothing), at most what may wait for a reader. Growing it
+         * step by step instead leaves a freed block per step (macOS keeps them cached). */
+        size_t est = r->state == BM_FR_FIXED || r->state == BM_FR_DONE ? (r->raw.len + (size_t)r->remaining) * 8 : 1 << 20;
+        if (limit && est > BM_STREAM_HIGH + (64 << 10)) est = BM_STREAM_HIGH + (64 << 10);
+        if (est < (64 << 10)) est = 64 << 10;
+        if (est > (1 << 30)) est = 1 << 30;
+        bm_sb_grow(&r->rbody, est);
     }
     int st = bm_codec->step(r->dec, (const uint8_t *)r->raw.data, r->raw.len, &r->raw_off, &r->rbody, limit);
     if (st < 0 || (final && st == 0) || r->rbody.len > INT32_MAX) {
@@ -5734,6 +5745,20 @@ static bool bm_fr_decode(bm_fr *r, bool final) {
         r->raw.len -= r->raw_off;
         r->raw_off = 0;
     }
+    bm_fr_check_utf8(r);
+    return true;
+}
+
+/* Decodes an encoded body that has all arrived, at once. False (the request failed) if it's
+ * corrupt or cut short. */
+static bool bm_fr_decode_whole(bm_fr *r) {
+    if (r->dec) return bm_fr_decode(r, true); /* a reader started it in chunks */
+    if (!bm_codec || !bm_codec->whole(r->enc, (const uint8_t *)r->raw.data + r->raw_off, r->raw.len - r->raw_off, &r->rbody) || r->rbody.len > INT32_MAX) {
+        const char *why = r->enc == 3 ? "BrotliDecompressionError" : r->enc == 4 ? "ZstdDecompressionError" : "ZlibError";
+        bm_fr_fail(r, why, "%s fetching \"%s\". %s", why, r->url.p->data, BM_FETCH_VERBOSE);
+        return false;
+    }
+    r->raw.len = r->raw_off = 0;
     bm_fr_check_utf8(r);
     return true;
 }
@@ -6268,15 +6293,17 @@ static void bm_fr_complete(bm_fr *r) {
     }
     if (bm_fr_decoding(r) && (r->dec || r->raw.len)) {
         /* the rest of the body (checked as UTF-8 as it's decoded) */
-        if (!r->whole) {
-            if (!bm_fr_decode(r, false)) return;
-            if (r->raw_off < r->raw.len) {
-                r->draining = true;
+        if (r->whole) {
+            if (!bm_fr_decode_whole(r)) return;
+        } else {
+            if (r->streaming && !bm_fr_decode(r, false)) return;
+            if (!r->streaming || r->raw_off < r->raw.len) {
+                r->draining = true; /* decoded as it's read */
                 if (r->read_p && r->rbody.len) bm_fr_resolve(&r->read_p, (bm_int)r->rbody.len);
                 return;
             }
+            if (!bm_fr_decode(r, true)) return;
         }
-        if (!bm_fr_decode(r, true)) return;
     } else if (r->enc && !bm_fr_decoding(r)) {
         r->utf8_bad = true; /* not decoded (decompress: false): text() checks it */
     }
@@ -6543,9 +6570,13 @@ static bm_promise *bm_fr_promise(bm_promise **slot, bool pending, bm_int now) {
  * read), and settle once it's done. */
 static void bm_fr_drain(bm_fr *r, bool all) {
     if (!r->draining || r->result != 1) return;
-    if (!bm_fr_decode(r, all)) return;
-    if (r->raw_off < r->raw.len) return;
-    if (!all && !bm_fr_decode(r, true)) return; /* complete? */
+    if (all) {
+        if (!bm_fr_decode_whole(r)) return;
+    } else {
+        if (!bm_fr_decode(r, false)) return;
+        if (r->raw_off < r->raw.len) return;
+        if (!bm_fr_decode(r, true)) return; /* complete? */
+    }
     r->draining = false;
     bm_fr_settle(r, 0);
 }
@@ -6560,10 +6591,9 @@ bm_promise *bm_native_fetchWait(bm_int id) {
 bm_promise *bm_native_fetchBodyWait(bm_int id) {
     bm_fr *r = bm_fr_get(id);
     if (r && !r->whole) {
-        /* read whole: decode without holding back */
+        /* read whole: decoded at once when it's all in (now, if it is) */
         r->whole = true;
-        if (r->draining) bm_fr_drain(r, true);
-        else if (r->raw_off < r->raw.len && r->result == 1) bm_fr_decode(r, false);
+        bm_fr_drain(r, true);
     }
     return bm_fr_promise(r ? &r->body_p : NULL, r && r->result == 1, r ? r->result : -1);
 }
@@ -6573,6 +6603,9 @@ bm_promise *bm_native_fetchRead(bm_int id) {
     bm_fr *r = bm_fr_get(id);
     if (!r) return bm_fr_promise(NULL, false, -1);
     r->streaming = true;
+    /* what arrived before reading began */
+    if (!r->rbody.len && r->draining) bm_fr_drain(r, false);
+    else if (!r->rbody.len && r->raw_off < r->raw.len && r->result == 1) bm_fr_decode(r, false);
     if (r->rbody.len) return bm_fr_promise(NULL, false, (bm_int)r->rbody.len);
     return bm_fr_promise(&r->read_p, r->result == 1, r->result);
 }

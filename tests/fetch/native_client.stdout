@@ -28,6 +28,7 @@ streamed zstd: 136863 bytes, chunks <= 4 MiB: true, same as fixture: true
 streamed deflate: 136863 bytes, chunks <= 4 MiB: true, same as fixture: true
 streamed gzip: 136863 bytes, chunks <= 4 MiB: true, same as fixture: true
 streamed zeros: 25165824 bytes, chunks <= 4 MiB: true
+lying gzip size: TypeError ZlibError: ZlibError fetching "BASE/gzip?f=fixture-lying.gz". For more information, pass `verbose: true` in the second argument to fetch()
 zeros read whole later: 25165824
 zeros bytes(): 25165824
 dropped while decoding: 200
