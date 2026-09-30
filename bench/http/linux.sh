@@ -9,7 +9,7 @@ root=$(cd "$here/../.." && pwd)
 bin="$here/out/linux"
 mkdir -p "$bin"
 cargo build --release -q --manifest-path "$root/Cargo.toml"
-"$root/target/release/barm" build "$here/server.barm" --emit-c "$bin/barm-server.c" -o "$here/out/barm-server" > /dev/null
+"$root/target/release/barm" build "$here/server.barm.ts" --emit-c "$bin/barm-server.c" -o "$here/out/barm-server" > /dev/null
 linker="$bin/zig-linker"
 cat > "$linker" <<'PY'
 #!/usr/bin/env python3

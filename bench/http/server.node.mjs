@@ -1,4 +1,4 @@
-// node:http — same routes as server.barm. WORKERS>1 uses node:cluster.
+// node:http — same routes as server.barm.ts. WORKERS>1 uses node:cluster.
 import cluster from "node:cluster"
 import http from "node:http"
 
