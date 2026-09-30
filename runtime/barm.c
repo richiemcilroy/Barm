@@ -16,7 +16,6 @@
 #include <stdlib.h>
 #include <time.h>
 #if defined(__unix__) || defined(__APPLE__)
-#include <sys/mman.h>
 #include <unistd.h>
 #define BM_HAVE_ISATTY 1
 #endif
@@ -35,6 +34,8 @@ int bm_argc;
 char **bm_argv;
 
 static jmp_buf *bm_test_jmp;       /* non-NULL while a test is running */
+/* Unwinds to the running test (set by bm_test_run, so programs without tests don't link longjmp). */
+void (*bm_test_unwind)(void); /* not static: the compiler would call its only value directly */
 static bm_sb bm_test_msg;          /* failure message of the running test */
 static const char *bm_test_loc;
 static int64_t bm_tests_passed, bm_tests_failed;
@@ -54,7 +55,7 @@ _Noreturn void bm_trap(const char *msg, const char *loc) {
         bm_sb_push_cstr(&bm_test_msg, "trap: ");
         bm_sb_push_cstr(&bm_test_msg, msg);
         bm_test_loc = loc;
-        longjmp(*bm_test_jmp, 1);
+        bm_test_unwind();
     }
     bm_out_flush();
     fprintf(stderr, "trap: %s\n", msg);
@@ -251,54 +252,49 @@ enum { BM_SMALL_MAX = 256 };
 #define BM_PLAIN_ALLOC 1
 #endif
 void *bm_small_bins[BM_SMALL_CLASSES];
-static uint8_t bm_small_grow[BM_SMALL_CLASSES];
 
-/* 64 KiB slabs, page-aligned, cut from address space reserved 64 MiB at a time: a page no object
- * has used yet is never touched, so it isn't resident. */
-static char *bm_arena_cur, *bm_arena_end;
-static char *bm_slab(void) {
-#if defined(__unix__) || defined(__APPLE__)
-    if (bm_arena_cur == bm_arena_end) {
-        size_t reserve = (size_t)64 << 20;
-        void *p = mmap(NULL, reserve, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-        if (p == MAP_FAILED) return bm_alloc(65536);
-        bm_arena_cur = p;
-        bm_arena_end = bm_arena_cur + reserve;
-    }
-    char *slab = bm_arena_cur;
-    bm_arena_cur += 65536;
-    return slab;
-#else
-    return bm_alloc(65536);
-#endif
-}
-
-/* A size class's free list (`*bin`) is empty: carve blocks of `sz` bytes into it from memory
- * all classes share, and return one more. Chunks start at 1 KiB and double with each refill
- * (up to 16 KiB), so a class that holds a few objects takes a few hundred bytes, not a page. */
+/* A size class's free list is empty: hand out its next never-used block. Blocks come from a
+ * chunk per class (1 KiB, doubling with each chunk to 16 KiB) and are handed out one by one, so
+ * memory is only touched once an object uses it. The first 64 KiB of chunks come from malloc
+ * one by one (mostly pages already in use: a small program adds none of its own); later ones
+ * are cut from 16 MiB malloc blocks, mapped lazily (untouched pages cost nothing) and able to
+ * reuse memory the program freed, such as a map's outgrown table. */
+typedef struct bm_class_space { char *cur, *lim; uint8_t grow; } bm_class_space;
+enum { BM_ARENA_BLOCK = 16 << 20 };
 static char *bm_bump, *bm_bump_end;
-static void *bm_carve(void **bin, uint8_t *grow, size_t sz) {
-    size_t chunk = (size_t)1024 << *grow;
+static size_t bm_carved;
+static void *bm_carve(bm_class_space *k, size_t sz) {
+    if (BM_LIKELY((size_t)(k->lim - k->cur) >= sz)) {
+        char *p = k->cur;
+        k->cur += sz;
+        return p;
+    }
+    size_t chunk = (size_t)1024 << k->grow;
     if (chunk >= 16384) chunk = 16384;
-    else (*grow)++;
+    else k->grow++;
     size_t n = chunk / sz;
     if (n == 0) n = 1;
     size_t bytes = n * sz;
-    if ((size_t)(bm_bump_end - bm_bump) < bytes) {
-        bm_bump = bm_slab();
-        bm_bump_end = bm_bump + 65536;
+    char *p;
+    if (bm_carved + bytes <= 65536) {
+        p = bm_alloc(bytes);
+        bm_carved += bytes;
+    } else {
+        if ((size_t)(bm_bump_end - bm_bump) < bytes) {
+            bm_bump = bm_alloc(BM_ARENA_BLOCK);
+            bm_bump_end = bm_bump + BM_ARENA_BLOCK;
+        }
+        p = bm_bump;
+        bm_bump += bytes;
     }
-    char *p = bm_bump;
-    bm_bump += bytes;
-    for (char *q = p + bytes - sz; q > p; q -= sz) {
-        *(void **)(void *)q = *bin;
-        *bin = q;
-    }
+    k->cur = p + sz;
+    k->lim = p + bytes;
     return p;
 }
 
+static bm_class_space bm_small_space[BM_SMALL_CLASSES];
 __attribute__((noinline)) void *bm_small_refill(size_t c) {
-    return bm_carve(&bm_small_bins[c], &bm_small_grow[c], c * 8);
+    return bm_carve(&bm_small_space[c], c * 8);
 }
 static inline void *bm_small_alloc(size_t size) {
 #ifdef BM_PLAIN_ALLOC
@@ -2059,9 +2055,14 @@ const bm_type bm_type_undefined = {0, NULL, NULL, bm_undef_eq, bm_undef_hash, bm
 
 /* ================================================================== output */
 
-#define BM_OUT_CAP 65536
-static char bm_out_buf[BM_OUT_CAP];
+/* Output is buffered in 8 KiB inside the runtime's globals (a program that prints a little
+ * touches one page for all of them), moving to 64 KiB once a program fills that. */
+enum { BM_OUT_SMALL = 8192, BM_OUT_BIG = 65536 };
+static char bm_out_small[BM_OUT_SMALL];
+static char *bm_out_big; /* (a pointer initialized to bm_out_small would put a page of data in every binary) */
 static size_t bm_out_len;
+#define bm_out_buf (bm_out_big ? bm_out_big : bm_out_small)
+#define bm_out_cap ((size_t)(bm_out_big ? BM_OUT_BIG : BM_OUT_SMALL))
 static bool bm_out_tty; /* stdout is a terminal: flush after every line */
 
 void bm_out_flush(void) {
@@ -2074,9 +2075,10 @@ void bm_out_flush(void) {
 
 void bm_out_write(const char *s, size_t n) {
     if (!n) return;
-    if (n > BM_OUT_CAP - bm_out_len) {
+    if (n > bm_out_cap - bm_out_len) {
         bm_out_flush();
-        if (n >= BM_OUT_CAP) {
+        if (!bm_out_big) bm_out_big = bm_alloc(BM_OUT_BIG);
+        if (n >= bm_out_cap) {
             fwrite(s, 1, n, stdout);
             return;
         }
@@ -2127,7 +2129,24 @@ static void bm_random_seed(uint64_t seed) {
     bm_rng_state = (x ? x : BM_RNG_DEFAULT) ^ BM_RNG_DEFAULT;
 }
 
+/* Seeded on first use (BARM_SEED: a number, or any other value for a random seed), so programs
+ * that never draw a random number don't link getenv, time and clock. */
+static bool bm_rng_ready;
+static __attribute__((noinline, cold)) void bm_random_init(void) {
+    bm_rng_ready = true;
+    const char *seed = getenv("BARM_SEED");
+    if (seed) {
+        char *end;
+        unsigned long long v = strtoull(seed, &end, 0);
+        if (end != seed && *end == 0) bm_random_seed(v);
+        else bm_random_seed((uint64_t)time(NULL) ^ ((uint64_t)clock() << 32) ^ (uint64_t)(uintptr_t)&seed);
+    } else {
+        bm_random_seed(0);
+    }
+}
+
 double bm_random(void) { /* xorshift64* */
+    if (BM_UNLIKELY(!bm_rng_ready)) bm_random_init();
     uint64_t x = bm_rng_state ^ BM_RNG_DEFAULT;
     x ^= x >> 12;
     x ^= x << 25;
@@ -2147,9 +2166,12 @@ void bm_env_release_slow(bm_env *e) {
 
 bool bm_test_active(void) { return bm_test_jmp != NULL; }
 
+static void bm_test_longjmp(void) { longjmp(*bm_test_jmp, 1); }
+
 void bm_test_run(const char *name, void (*fn)(void)) {
     jmp_buf jb;
     bm_test_jmp = &jb;
+    bm_test_unwind = bm_test_longjmp;
     bm_sb sb = {0};
     if (setjmp(jb) == 0) {
         fn();
@@ -2185,7 +2207,7 @@ _Noreturn void bm_expect_fail(bm_sb *message, const char *loc) {
         bm_sb_free(&bm_test_msg);
         bm_test_msg = msg;
         bm_test_loc = loc;
-        longjmp(*bm_test_jmp, 1);
+        bm_test_unwind();
     }
     bm_sb_push_char(&msg, 0);
     bm_trap(msg.data, loc);
@@ -2213,15 +2235,6 @@ void bm_init(int argc, char **argv) {
 #ifdef BM_HAVE_ISATTY
     bm_out_tty = isatty(1) != 0;
 #endif
-    const char *seed = getenv("BARM_SEED");
-    if (seed) {
-        char *end;
-        unsigned long long v = strtoull(seed, &end, 0);
-        if (end != seed && *end == 0) bm_random_seed(v);
-        else bm_random_seed((uint64_t)time(NULL) ^ ((uint64_t)clock() << 32) ^ (uint64_t)(uintptr_t)&seed);
-    } else {
-        bm_random_seed(0);
-    }
 }
 
 /* ================================================================== system */
@@ -2739,7 +2752,7 @@ static void (*bm_err_release)(void *);
  * (32-byte classes up to 2 KiB) refilled from 64 KiB slabs; bigger ones from malloc. */
 enum { BM_ASYNC_STEP = 32, BM_ASYNC_MAX = 2048, BM_ASYNC_CLASSES = BM_ASYNC_MAX / BM_ASYNC_STEP + 1 };
 static void *bm_async_bins[BM_ASYNC_CLASSES];
-static uint8_t bm_async_grow[BM_ASYNC_CLASSES];
+static bm_class_space bm_async_space[BM_ASYNC_CLASSES];
 
 static void *bm_async_alloc(size_t size) {
 #ifdef BM_PLAIN_ALLOC
@@ -2752,7 +2765,7 @@ static void *bm_async_alloc(size_t size) {
         bm_async_bins[c] = *f;
         return f;
     }
-    return bm_carve(&bm_async_bins[c], &bm_async_grow[c], c * BM_ASYNC_STEP);
+    return bm_carve(&bm_async_space[c], c * BM_ASYNC_STEP);
 }
 
 static void bm_async_free(void *p, size_t size) {
@@ -3870,7 +3883,7 @@ static void bm_http_close(bm_http_conn *c) {
 static void bm_http_attach(bm_http_conn *c) {
     if (c->in_len == 0 && !c->in_shared) {
         bm_free(c->in);
-        if (!bm_http_rbuf) bm_http_rbuf = bm_slab(); /* 64 KiB, never freed: only the pages reads touch are resident */
+        if (!bm_http_rbuf) bm_http_rbuf = bm_alloc(BM_HTTP_RBUF); /* only the pages reads touch are resident */
         c->in = bm_http_rbuf;
         c->in_cap = BM_HTTP_RBUF;
         c->in_shared = true;

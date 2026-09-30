@@ -113,8 +113,15 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     // No FMA contraction: `a * b + c` rounds twice, exactly as in JavaScript (and it's faster on
     // latency-bound loops, where a fused multiply-add lengthens the dependency chain).
     let mut flags: Vec<&str> = vec![opts.opt.as_str(), "-std=gnu11", "-w", "-ffp-contract=off"];
+    // Barm code is bounds-checked, so C's stack canaries and fortified memcpy only add checks
+    // (and imports: each costs about 50 bytes of binary).
+    flags.extend(["-fno-stack-protector", "-U_FORTIFY_SOURCE", "-D_FORTIFY_SOURCE=0"]);
     if opts.unchecked {
         flags.push("-DBARM_UNCHECKED=1");
+    }
+    // The program links with a big main stack (below), so main needn't check for one.
+    if cfg!(target_vendor = "apple") && !extra.contains("-fsanitize") {
+        flags.push("-DBMG_MAIN_STACK=1");
     }
     flags.extend(extra.split_whitespace());
     let flag_text = flags.join(" ");
@@ -182,7 +189,8 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     // Drop the runtime functions the program doesn't use. On macOS the program runs on the main
     // thread with a 512 MiB stack (the most arm64 allows) instead of a thread of its own.
     if cfg!(target_vendor = "apple") {
-        cmd.arg("-Wl,-dead_strip");
+        // Only `main` is exported: the runtime's functions needn't be in the export table.
+        cmd.arg("-Wl,-dead_strip").arg("-Wl,-exported_symbol,_main");
         // (Sanitizers can't lay out their shadow memory around a large main stack.)
         if !extra.contains("-fsanitize") {
             cmd.arg(LINK_STACK);
@@ -201,7 +209,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
 /// macOS: the main thread's stack size (the most arm64 allows).
 const LINK_STACK: &str = "-Wl,-stack_size,0x20000000";
 /// Everything that changes how programs are linked, for the binary cache key.
-const LINK_FLAGS: &str = "dead-strip; sanitizers link without -stack_size; -Wl,-stack_size,0x20000000";
+const LINK_FLAGS: &str = "dead-strip; exported: _main; sanitizers link without -stack_size; -Wl,-stack_size,0x20000000";
 
 /// The precompiled fixed prefix (`pre-<key>.h`, with its `.pch`/`.gch` beside it) to pass as
 /// `-include`, built on first use; `None` if the compiler can't precompile it (then programs
