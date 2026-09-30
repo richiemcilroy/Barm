@@ -2649,6 +2649,10 @@ bm_str bm_jp_error(bm_jp *p) {
 /* ================================================================== async
  * Tasks, promises, the microtask queue and timers (see barm.h). */
 
+#if defined(__APPLE__) || defined(__FreeBSD__)
+#include <sys/event.h>
+#endif
+
 bm_task *bm_cur_task;
 static void (*bm_err_release)(void *);
 static void (*bm_err_report)(void *);
@@ -2866,10 +2870,12 @@ bm_env *bm_promise_resolver(bm_promise *p) {
 
 /* ---------------------------------------------------------------- timers (a min-heap by due time, then creation) */
 
+/* As libuv (so as Node): the loop's clock is in whole milliseconds, read when the loop wakes up;
+ * a timer is due at that time plus its delay, and due timers fire in the order they were set. */
 typedef struct {
-    uint64_t when;    /* due, in ns of CLOCK_MONOTONIC */
+    uint64_t when;    /* due, in ms of the loop's clock */
     uint64_t seq;
-    uint64_t every;   /* setInterval: period in ns (0: once) */
+    uint64_t every;   /* setInterval: period in ms (0: once) */
     bm_int id;
     bm_fn cb;         /* fn NULL: cleared */
 } bm_timer;
@@ -2883,6 +2889,34 @@ static uint64_t bm_mono_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+}
+
+static uint64_t bm_loop_ms;   /* the loop's clock (0: not read yet) */
+
+static uint64_t bm_loop_update(void) { return bm_loop_ms = bm_mono_ns() / 1000000u; }
+static uint64_t bm_loop_now(void) { return bm_loop_ms ? bm_loop_ms : bm_loop_update(); }
+
+/* Sleeps until the loop's clock reads `ms`, precisely: a plain nanosleep wakes ~2 ms late on
+ * macOS; a kqueue timer marked critical, ~0.1 ms. */
+static void bm_sleep_until(uint64_t ms) {
+    uint64_t deadline = ms * 1000000u;
+    uint64_t now = bm_mono_ns();
+    if (deadline <= now) return;
+#if defined(__APPLE__) || defined(__FreeBSD__)
+    static int kq = -1;
+    if (kq < 0) kq = kqueue();
+    if (kq >= 0) {
+        struct kevent ch, ev;
+        EV_SET(&ch, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT, NOTE_NSECONDS | NOTE_CRITICAL, (int64_t)(deadline - now), 0);
+        while (kevent(kq, &ch, 1, &ev, 1, NULL) < 0 && errno == EINTR) {}
+        return;
+    }
+    struct timespec ts = {(time_t)((deadline - now) / 1000000000u), (long)((deadline - now) % 1000000000u)};
+    while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {}
+#else
+    struct timespec ts = {(time_t)(deadline / 1000000000u), (long)(deadline % 1000000000u)};
+    while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR) {}
+#endif
 }
 
 static bool bm_timer_before(const bm_timer *a, const bm_timer *b) { return a->when < b->when || (a->when == b->when && a->seq < b->seq); }
@@ -2922,9 +2956,9 @@ static bm_timer bm_timer_pop(void) {
 bm_int bm_set_timer(bm_fn cb, double ms, bool repeat) {
     /* As Node: delays below 1 ms (or not a number, or too large) are 1 ms; fractions are dropped. */
     if (!(ms >= 1 && ms <= 2147483647.0)) ms = 1;
-    uint64_t delay = (uint64_t)ms * 1000000u;
+    uint64_t delay = (uint64_t)ms;
     bm_env_retain(cb.env);
-    bm_timer t = {bm_mono_ns() + delay, ++bm_timer_seq, repeat ? delay : 0, ++bm_timer_ids, cb};
+    bm_timer t = {bm_loop_now() + delay, ++bm_timer_seq, repeat ? delay : 0, ++bm_timer_ids, cb};
     bm_timer_push(t);
     bm_live_timers++;
     return t.id;
@@ -2943,7 +2977,7 @@ void bm_clear_timer(bm_int id) {
 
 /* Fires every timer that is due, each followed by the microtasks it queued (as Node). */
 static void bm_fire_timers(void) {
-    uint64_t now = bm_mono_ns();
+    uint64_t now = bm_loop_update();
     while (bm_ntimers && bm_timers[0].when <= now) {
         bm_timer t = bm_timer_pop();
         if (!t.cb.fn) continue;
@@ -2969,12 +3003,7 @@ void bm_async_run(void) {
         bm_run_microtasks();
         while (bm_ntimers && !bm_timers[0].cb.fn) (void)bm_timer_pop();
         if (!bm_live_timers) return;
-        uint64_t now = bm_mono_ns();
-        if (bm_timers[0].when > now) {
-            uint64_t wait = bm_timers[0].when - now;
-            struct timespec ts = {(time_t)(wait / 1000000000u), (long)(wait % 1000000000u)};
-            while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {}
-        }
+        if (bm_timers[0].when > bm_loop_update()) bm_sleep_until(bm_timers[0].when);
         bm_fire_timers();
     }
 }
