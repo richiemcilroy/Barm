@@ -5167,6 +5167,35 @@ static void bm_dns_queue(bm_dns *d) {
     pthread_mutex_unlock(&bm_dns_mu);
 }
 
+/* ---- UTF-8 validation */
+
+/* Validates UTF-8 from *pos up to n: false at the first invalid sequence; otherwise *pos stops at
+ * the end, or at a sequence cut off by the end (more bytes may complete it). ASCII runs go 16
+ * bytes at a time. */
+static bool bm_utf8_scan(const uint8_t *p, size_t n, size_t *pos) {
+    size_t i = *pos;
+    while (i < n) {
+        if (n - i >= 16) {
+            uint64_t a, b;
+            memcpy(&a, p + i, 8);
+            memcpy(&b, p + i + 8, 8);
+            if (!((a | b) & 0x8080808080808080ull)) { i += 16; continue; }
+        }
+        uint8_t c = p[i];
+        if (c < 0x80) { i++; continue; }
+        size_t need = c >= 0xC2 && c <= 0xDF ? 1 : c >= 0xE0 && c <= 0xEF ? 2 : c >= 0xF0 && c <= 0xF4 ? 3 : 0;
+        if (!need) { *pos = i; return false; }
+        if (n - i <= need) break;
+        uint8_t lo = c == 0xE0 ? 0xA0 : c == 0xF0 ? 0x90 : 0x80, hi = c == 0xED ? 0x9F : c == 0xF4 ? 0x8F : 0xBF;
+        if (p[i + 1] < lo || p[i + 1] > hi) { *pos = i; return false; }
+        for (size_t k = 2; k <= need; k++)
+            if ((p[i + k] & 0xC0) != 0x80) { *pos = i; return false; }
+        i += need + 1;
+    }
+    *pos = i;
+    return true;
+}
+
 /* ---- requests and connections */
 
 typedef struct bm_fc bm_fc;
@@ -5202,6 +5231,11 @@ typedef struct bm_fr {
     bool keep, discard, head_only, got_any;
     int enc;                   /* 1 gzip, 2 deflate */
     int64_t remaining;
+    /* The body is checked as UTF-8 while it arrives (still in cache): text() then needn't read
+     * it again. A second pass over a big body right after it arrived also slows the next
+     * transfer (it evicts what the kernel's copy needs). */
+    size_t utf8_pos;
+    bool utf8_bad;
     bm_sb status_text, rheaders, rbody, location;
     bool redirected;
     const char *code;          /* failure: Bun's error code */
@@ -5556,8 +5590,14 @@ static bool bm_fr_head(bm_fr *r, const char *p, size_t n) {
     return true;
 }
 
+static void bm_fr_check_utf8(bm_fr *r) {
+    if (!r->utf8_bad && !r->enc) r->utf8_bad = !bm_utf8_scan((const uint8_t *)r->rbody.data, r->rbody.len, &r->utf8_pos);
+}
+
 static void bm_fr_take(bm_fr *r, const char *p, size_t n) {
-    if (!r->discard) bm_sb_push(&r->rbody, p, n);
+    if (r->discard) return;
+    bm_sb_push(&r->rbody, p, n);
+    bm_fr_check_utf8(r);
 }
 
 /* Consumes what it can of the connection's input. 1: the response is complete, 0: needs more,
@@ -5856,6 +5896,8 @@ static void bm_fr_reset_response(bm_fr *r) {
     r->status = 0;
     r->rbody.len = 0;
     r->discard = false;
+    r->utf8_pos = 0;
+    r->utf8_bad = false;
 }
 
 /* The whole response is in: follow a redirect, or decode the body and settle. */
@@ -5929,6 +5971,11 @@ static void bm_fr_complete(bm_fr *r) {
         }
         bm_sb_free(&r->rbody);
         r->rbody = out;
+        /* decoded output: check it now, while it's in cache */
+        r->utf8_pos = 0;
+        r->utf8_bad = !bm_utf8_scan((const uint8_t *)r->rbody.data, r->rbody.len, &r->utf8_pos);
+    } else if (r->enc) {
+        r->utf8_bad = true; /* not decoded (decompress: false): text() checks it */
     }
     bm_fr_settle(r, 0);
 }
@@ -6000,6 +6047,7 @@ static void bm_fc_ready(bm_io *h, bool readable, bool writable, bool broken) {
                 r->got_any = true;
                 r->rbody.len += (size_t)n;
                 r->remaining -= n;
+                bm_fr_check_utf8(r);
                 if (r->remaining == 0) { r->state = BM_FR_DONE; break; }
                 if ((size_t)n == want) continue;
                 break;
@@ -6172,6 +6220,14 @@ bm_str bm_native_fetchUrl(bm_int id) {
     return r->url;
 }
 bool bm_native_fetchRedirected(bm_int id) { bm_fr *r = bm_fr_get(id); return r && r->redirected; }
+/* The body is valid UTF-8 without a BOM: text() can return it as it is. */
+bool bm_native_fetchBodyClean(bm_int id) {
+    bm_fr *r = bm_fr_get(id);
+    if (!r || r->utf8_bad || r->utf8_pos != r->rbody.len) return false;
+    const uint8_t *p = (const uint8_t *)r->rbody.data;
+    return !(r->rbody.len >= 3 && p[0] == 0xEF && p[1] == 0xBB && p[2] == 0xBF);
+}
+
 bm_str bm_native_fetchBody(bm_int id) {
     bm_fr *r = bm_fr_get(id);
     return r ? bm_str_from_sb(&r->rbody) : BM_EMPTY_STR;
@@ -6251,24 +6307,7 @@ bm_str bm_native_utf8Clean(bm_str s) {
     if (bom) i = 3;
     /* validate first: most bodies are fine */
     size_t j = i;
-    bool valid = true;
-    while (j < n) {
-        if (j + 8 <= n) {
-            uint64_t w;
-            memcpy(&w, p + j, 8);
-            if (!(w & 0x8080808080808080ull)) { j += 8; continue; }
-        }
-        uint8_t b = p[j];
-        if (b < 0x80) { j++; continue; }
-        size_t need = b >= 0xC2 && b <= 0xDF ? 1 : b >= 0xE0 && b <= 0xEF ? 2 : b >= 0xF0 && b <= 0xF4 ? 3 : 0;
-        if (!need || j + need >= n) { valid = false; break; }
-        uint8_t lo = b == 0xE0 ? 0xA0 : b == 0xF0 ? 0x90 : 0x80, hi = b == 0xED ? 0x9F : b == 0xF4 ? 0x8F : 0xBF;
-        if (p[j + 1] < lo || p[j + 1] > hi) { valid = false; break; }
-        size_t k = 2;
-        for (; k <= need; k++) if (p[j + k] < 0x80 || p[j + k] > 0xBF) break;
-        if (k <= need) { valid = false; break; }
-        j += need + 1;
-    }
+    bool valid = bm_utf8_scan(p, n, &j) && j == n;
     if (valid) {
         if (!bom) { bm_str_retain(s); return s; }
         return bm_str_from((const char *)p + 3, n - 3);

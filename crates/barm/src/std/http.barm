@@ -442,6 +442,8 @@ export class Response {
   private used: bool
   private finalUrl: string
   private wasRedirected: bool
+  // the body is valid UTF-8 without a BOM: text() returns it as it is
+  private clean: bool
 
   constructor(body?: BodyInit, init?: ResponseInit) {
     this.bodyText = body === undefined ? "" : bodyText(body)
@@ -457,11 +459,15 @@ export class Response {
     this.used = false
     this.finalUrl = ""
     this.wasRedirected = false
+    this.clean = (body === undefined || typeof body === "string" || body instanceof URLSearchParams) && !this.bodyText.startsWith("\uFEFF")
   }
 
   // Internal: the response to fetch() request `id`.
   static fetched(id: int): Response {
+    // (checked while the body arrived; asked before fetchBody moves the body out)
+    const clean = __native.fetchBodyClean(id)
     const r = new Response(__native.fetchBody(id), { status: __native.fetchStatus(id), statusText: __native.fetchStatusText(id) })
+    r.clean = clean
     r.rawHeaders = __native.fetchHeaders(id)
     r.finalUrl = __native.fetchUrl(id)
     r.wasRedirected = __native.fetchRedirected(id)
@@ -500,7 +506,7 @@ export class Response {
       return Promise.reject(new FetchError("Body already used", "ERR_BODY_ALREADY_USED"))
     }
     this.used = true
-    return Promise.resolve(__native.utf8Clean(this.bodyText))
+    return Promise.resolve(this.clean ? this.bodyText : __native.utf8Clean(this.bodyText))
   }
 
   // The body parsed as JSON, checked against the type the context expects.
@@ -510,7 +516,7 @@ export class Response {
     }
     this.used = true
     try {
-      const value: T = JSON.parse(__native.utf8Clean(this.bodyText))
+      const value: T = JSON.parse(this.clean ? this.bodyText : __native.utf8Clean(this.bodyText))
       return Promise.resolve(value)
     } catch (e) {
       return Promise.reject(e)
@@ -540,6 +546,7 @@ export class Response {
     r.hasBody = this.hasBody
     r.finalUrl = this.finalUrl
     r.wasRedirected = this.wasRedirected
+    r.clean = this.clean
     return r
   }
 
