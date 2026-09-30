@@ -5234,6 +5234,12 @@ typedef struct bm_fr {
     bool https, insecure;      /* TLS; without certificate checks (tls.rejectUnauthorized: false) */
     bm_str ca;                 /* extra trusted certificates (PEM), for tls.ca */
     bm_str unix_path;          /* Bun's `unix`: connect to this socket instead ("" for TCP) */
+    bm_str proxy;              /* the `proxy` option ("": HTTP_PROXY/HTTPS_PROXY, unless NO_PROXY) */
+    /* where to connect: the host itself, or the proxy (then `via_proxy`) */
+    char *dial_host;
+    int dial_port;
+    bool via_proxy;
+    char *proxy_auth;          /* "Basic ..." for the proxy, or NULL */
     char *host;                /* hostname (IPv6 in brackets) */
     char *key;                 /* the pool key: scheme, host, port and TLS options */
     int port;
@@ -5273,6 +5279,10 @@ struct bm_fc {
     int port;
     bm_tls *tls;               /* https: the TLS session (NULL for http) */
     bool handshaking;
+    bool tunneling;            /* waiting for a proxy's answer to CONNECT */
+    bool no_reuse;             /* a proxy refused the tunnel: its connection isn't ours to keep */
+    bm_sb ctl;                 /* the CONNECT request, while it's being sent */
+    size_t ctl_off;
     char *in;
     size_t in_off, in_len, in_cap;
 };
@@ -5293,6 +5303,7 @@ static void bm_fc_reap(void) {
     while (bm_fc_graveyard) {
         bm_fc *c = bm_fc_graveyard;
         bm_fc_graveyard = c->next;
+        bm_sb_free(&c->ctl);
         bm_free(c->in);
         bm_free(c);
     }
@@ -5424,6 +5435,87 @@ static void bm_base64(bm_sb *sb, const char *s, size_t n) {
     }
 }
 
+/* NO_PROXY: "*", or comma-separated hosts, domains ("example.com" also covers its subdomains,
+ * as does ".example.com") and host:port pairs. */
+static bool bm_no_proxy(const char *host, int port) {
+    const char *list = getenv("no_proxy");
+    if (!list || !*list) list = getenv("NO_PROXY");
+    if (!list) return false;
+    size_t hl = strlen(host);
+    for (const char *p = list; *p;) {
+        while (*p == ',' || *p == ' ') p++;
+        const char *e = p;
+        while (*e && *e != ',') e++;
+        const char *te = e;
+        while (te > p && te[-1] == ' ') te--;
+        size_t n = (size_t)(te - p);
+        if (n == 1 && *p == '*') return true;
+        const char *colon = memchr(p, ':', n);
+        if (colon && !memchr(p, '[', n)) {
+            if (atoi(colon + 1) != port) { p = e; continue; }
+            n = (size_t)(colon - p);
+        }
+        const char *d = p;
+        if (n && *d == '.') { d++; n--; }
+        if (n && (hl == n || (hl > n && host[hl - n - 1] == '.')) && strncasecmp(host + hl - n, d, n) == 0) return true;
+        p = e;
+    }
+    return false;
+}
+
+/* Where r connects: its host, or (the `proxy` option, else HTTP_PROXY/HTTPS_PROXY unless
+ * NO_PROXY) a proxy. Unix sockets never go through a proxy. */
+static bool bm_fr_choose_proxy(bm_fr *r, bool https) {
+    bm_free(r->dial_host);
+    bm_free(r->proxy_auth);
+    r->dial_host = NULL;
+    r->proxy_auth = NULL;
+    r->via_proxy = false;
+    const char *spec = r->proxy.p->len ? r->proxy.p->data : NULL;
+    if (!spec && !r->unix_path.p->len && !bm_no_proxy(r->host, r->port)) {
+        spec = https ? getenv("https_proxy") : getenv("http_proxy");
+        if (!spec || !*spec) spec = https ? getenv("HTTPS_PROXY") : getenv("HTTP_PROXY");
+        if (spec && !*spec) spec = NULL;
+    }
+    if (!spec || r->unix_path.p->len) {
+        size_t hl = strlen(r->host);
+        r->dial_host = bm_alloc(hl + 1);
+        memcpy(r->dial_host, r->host, hl + 1);
+        r->dial_port = r->port;
+        return true;
+    }
+    /* [http://][user:pass@]host[:port] */
+    const char *p = spec;
+    if (strncmp(p, "http://", 7) == 0) p += 7;
+    else if (strstr(p, "://")) { bm_fr_fail(r, "UnsupportedProxyProtocol", "Only http: proxies are supported: %s", spec); return false; }
+    const char *end = p + strcspn(p, "/?#");
+    const char *at = NULL;
+    for (const char *x = p; x < end; x++) if (*x == '@') at = x;
+    if (at) {
+        bm_str ui = bm_native_urlDecode(bm_str_from(p, (size_t)(at - p)), false);
+        bm_sb auth = {0};
+        bm_sb_push(&auth, "Basic ", 6);
+        bm_base64(&auth, ui.p->data, (size_t)ui.p->len);
+        bm_sb_push_char(&auth, 0);
+        r->proxy_auth = bm_alloc(auth.len);
+        memcpy(r->proxy_auth, auth.data, auth.len);
+        bm_sb_free(&auth);
+        bm_str_release(ui);
+        p = at + 1;
+    }
+    const char *hend = p;
+    if (*hend == '[') { while (hend < end && *hend != ']') hend++; if (hend < end) hend++; }
+    while (hend < end && *hend != ':') hend++;
+    size_t hl = (size_t)(hend - p);
+    if (hl == 0) { bm_fr_fail(r, "InvalidProxyURL", "The proxy URL is invalid: %s", spec); return false; }
+    r->dial_host = bm_alloc(hl + 1);
+    memcpy(r->dial_host, p, hl);
+    r->dial_host[hl] = 0;
+    r->dial_port = hend < end ? atoi(hend + 1) : 80;
+    r->via_proxy = true;
+    return true;
+}
+
 /* Splits r->url (a normalized href) into host, port and target and writes the request head.
  * False (after failing r) if it isn't an http URL. */
 static bool bm_fr_prepare(bm_fr *r) {
@@ -5465,11 +5557,16 @@ static bool bm_fr_prepare(bm_fr *r) {
     }
     const char *target = auth_end, *hash = memchr(target, '#', (size_t)(end - target));
     if (!hash) hash = end;
+    if (!bm_fr_choose_proxy(r, https)) return false;
     bm_sb *h = &r->head;
     h->len = 0;
     r->merged = false;
     bm_sb_push(h, r->method.p->data, (size_t)r->method.p->len);
     bm_sb_push_char(h, ' ');
+    if (r->via_proxy && !https) {
+        /* through a proxy, plain HTTP names the whole URL (absolute form) */
+        bm_sb_push(h, s, (size_t)(auth_end - s));
+    }
     if (target == hash || *target != '/') bm_sb_push_char(h, '/');
     bm_sb_push(h, target, (size_t)(hash - target));
     bm_sb_push(h, " HTTP/1.1\r\n", 11);
@@ -5488,6 +5585,11 @@ static bool bm_fr_prepare(bm_fr *r) {
         if (bm_decode_brotli) bm_sb_push(h, "Accept-Encoding: gzip, deflate, br, zstd\r\n", 42);
         else bm_sb_push(h, "Accept-Encoding: gzip, deflate\r\n", 32);
     }
+    if (r->via_proxy && !https && r->proxy_auth && !bm_hdr_has(r->headers, "proxy-authorization")) {
+        bm_sb_push(h, "Proxy-Authorization: ", 21);
+        bm_sb_push(h, r->proxy_auth, strlen(r->proxy_auth));
+        bm_sb_push(h, "\r\n", 2);
+    }
     if (userinfo && !bm_hdr_has(r->headers, "authorization")) {
         bm_str ui = bm_native_urlDecode(bm_str_from(userinfo, (size_t)(userinfo_end - userinfo)), false);
         bm_sb_push(h, "Authorization: Basic ", 21);
@@ -5505,6 +5607,11 @@ static bool bm_fr_prepare(bm_fr *r) {
     }
     bm_sb_push(h, "\r\n", 2);
     r->head_only = strcmp(m, "HEAD") == 0;
+    if (r->via_proxy) { /* pooled per proxy too */
+        size_t used = strlen(r->key), kl = used + strlen(r->dial_host) + 32;
+        r->key = bm_realloc(r->key, kl);
+        snprintf(r->key + used, kl - used, "|proxy:%s:%d", r->dial_host, r->dial_port);
+    }
     return true;
 }
 
@@ -5775,7 +5882,7 @@ static int bm_fr_parse(bm_fr *r, bm_fc *c) {
 
 static void bm_fc_release(bm_fc *c, bool reusable) {
     c->r = NULL;
-    if (!reusable || c->dead) { bm_fc_close(c); return; }
+    if (!reusable || c->dead || c->no_reuse) { bm_fc_close(c); return; }
     bm_origin *o = c->origin;
     if (o->nidle >= 256) { bm_fc_close(c); return; }
     c->reused = true;
@@ -5871,10 +5978,96 @@ static void bm_fc_handshake(bm_fc *c) {
     bm_fr_fail(r, code, "%s", msg);
 }
 
-/* The TCP connection is up: start TLS (https), or send the request. */
+static void bm_fc_start_tls(bm_fc *c);
+static void bm_fr_complete(bm_fr *r);
+
+/* Sends what's left of the CONNECT request; true once it's all out. */
+static bool bm_fc_send_ctl(bm_fc *c) {
+    while (c->ctl_off < c->ctl.len) {
+#ifdef MSG_NOSIGNAL
+        ssize_t w = send(c->fd, c->ctl.data + c->ctl_off, c->ctl.len - c->ctl_off, MSG_NOSIGNAL);
+#else
+        ssize_t w = send(c->fd, c->ctl.data + c->ctl_off, c->ctl.len - c->ctl_off, 0);
+#endif
+        if (w > 0) { c->ctl_off += (size_t)w; continue; }
+        if (w < 0 && errno == EINTR) continue;
+        if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) { bm_fc_interest(c, true, true); return false; }
+        return false;
+    }
+    bm_fc_interest(c, true, false);
+    return true;
+}
+
+/* The proxy's answer to CONNECT: 200 starts TLS through the tunnel; anything else is the
+ * response (a 407, say), as Bun gives it. */
+static void bm_fc_tunnel(bm_fc *c, bool readable, bool writable) {
+    bm_fr *r = c->r;
+    if (writable && c->ctl_off < c->ctl.len && !bm_fc_send_ctl(c) && c->ctl_off < c->ctl.len) return;
+    if (!readable) return;
+    for (;;) {
+        if (c->in_cap - c->in_len < 4096) {
+            size_t cap = c->in_cap ? c->in_cap * 2 : 16384;
+            c->in = bm_realloc(c->in, cap);
+            c->in_cap = cap;
+        }
+        ssize_t n = read(c->fd, c->in + c->in_len, c->in_cap - c->in_len);
+        if (n > 0) { c->in_len += (size_t)n; continue; }
+        if (n == 0) { bm_fr_fail(r, "ECONNRESET", "The socket connection was closed unexpectedly. %s", BM_FETCH_VERBOSE); return; }
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+        bm_fr_fail(r, "ECONNRESET", "The socket connection was closed unexpectedly. %s", BM_FETCH_VERBOSE);
+        return;
+    }
+    const char *e = NULL;
+    for (size_t i = 3; i < c->in_len; i++) if (memcmp(c->in + i - 3, "\r\n\r\n", 4) == 0) { e = c->in + i + 1; break; }
+    if (!e) return; /* more to come */
+    c->tunneling = false;
+    if (c->in_len >= 12 && memcmp(c->in, "HTTP/1.", 7) == 0 && memcmp(c->in + 9, "200", 3) == 0) {
+        c->in_off = c->in_len = 0; /* the tunnel is open */
+        bm_fc_start_tls(c);
+        return;
+    }
+    /* refused: parse the proxy's response as the answer */
+    c->no_reuse = true;
+    r->https = false;
+    r->state = BM_FR_HEAD;
+    r->got_any = true;
+    int st = bm_fr_parse(r, c);
+    if (st < 0) { bm_fr_fail(r, "Malformed_HTTP_Response", "Malformed_HTTP_Response fetching \"%s\". %s", r->url.p->data, BM_FETCH_VERBOSE); return; }
+    r->keep = false;
+    if (st > 0) {
+        r->c = NULL;
+        bm_fc_release(c, false);
+        bm_fr_complete(r);
+    }
+}
+
+/* The TCP connection is up: tunnel through the proxy (https), start TLS, or send the request. */
 static void bm_fc_connected(bm_fc *c) {
     bm_fr *r = c->r;
     if (!r->https) { bm_fr_send(r, c); return; }
+    if (r->via_proxy) {
+        bm_sb *h = &c->ctl;
+        h->len = 0;
+        c->ctl_off = 0;
+        char line[600];
+        int n = snprintf(line, sizeof line, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n", r->host, r->port, r->host, r->port);
+        bm_sb_push(h, line, (size_t)n);
+        if (r->proxy_auth) {
+            bm_sb_push(h, "Proxy-Authorization: ", 21);
+            bm_sb_push(h, r->proxy_auth, strlen(r->proxy_auth));
+            bm_sb_push(h, "\r\n", 2);
+        }
+        bm_sb_push(h, "\r\n", 2);
+        c->tunneling = true;
+        bm_fc_send_ctl(c);
+        return;
+    }
+    bm_fc_start_tls(c);
+}
+
+static void bm_fc_start_tls(bm_fc *c) {
+    bm_fr *r = c->r;
     c->tls = bm_tls_impl->open(c->fd, r->host, r->key, !r->insecure, r->ca.p->data, (size_t)r->ca.p->len);
     if (!c->tls) { bm_fr_fail(r, "ERR_SSL", "TLS setup failed"); return; }
     c->handshaking = true;
@@ -5888,7 +6081,7 @@ static void bm_fr_connect(bm_fr *r, const bm_addrs *addrs) {
     c->io.ready = bm_fc_ready;
     c->fd = -1;
     c->addrs = *addrs;
-    c->port = r->port;
+    c->port = r->dial_port;
     c->origin = bm_origin_get(r->key);
     c->err = ECONNREFUSED;
     if (!bm_fc_open(c)) {
@@ -5910,7 +6103,7 @@ static void bm_dns_resolved(bm_dns *d) {
         bm_fr *next = w->dns_next;
         w->dns_next = NULL;
         if (w->result == 1) {
-            if (d->err) bm_fr_fail(w, "ENOTFOUND", "getaddrinfo ENOTFOUND %s", w->host);
+            if (d->err) bm_fr_fail(w, "ENOTFOUND", "getaddrinfo ENOTFOUND %s", w->dial_host);
             else bm_fr_connect(w, &d->addrs);
         }
         w = next;
@@ -6000,21 +6193,21 @@ static void bm_fr_step(bm_fr *r) {
         bm_fr_connect(r, &addrs);
         return;
     }
-    if (bm_numeric_host(r->host, &addrs)) { bm_fr_connect(r, &addrs); return; }
-    uint32_t b = bm_hash_cstr(r->host) % BM_DNS_BUCKETS;
+    if (bm_numeric_host(r->dial_host, &addrs)) { bm_fr_connect(r, &addrs); return; }
+    uint32_t b = bm_hash_cstr(r->dial_host) % BM_DNS_BUCKETS;
     bm_dns *d = bm_dns_cache[b];
-    while (d && strcmp(d->host, r->host) != 0) d = d->next;
+    while (d && strcmp(d->host, r->dial_host) != 0) d = d->next;
     if (d && !d->resolving && d->expires > bm_loop_update()) {
-        if (d->err) bm_fr_fail(r, "ENOTFOUND", "getaddrinfo ENOTFOUND %s", r->host);
+        if (d->err) bm_fr_fail(r, "ENOTFOUND", "getaddrinfo ENOTFOUND %s", r->dial_host);
         else bm_fr_connect(r, &d->addrs);
         return;
     }
     if (!d) {
         d = bm_alloc(sizeof *d);
         memset(d, 0, sizeof *d);
-        size_t hl = strlen(r->host);
+        size_t hl = strlen(r->dial_host);
         d->host = bm_alloc(hl + 1);
-        memcpy(d->host, r->host, hl + 1);
+        memcpy(d->host, r->dial_host, hl + 1);
         d->next = bm_dns_cache[b];
         bm_dns_cache[b] = d;
     }
@@ -6169,6 +6362,11 @@ static void bm_fc_ready(bm_io *h, bool readable, bool writable, bool broken) {
         bm_fc_connected(c);
         return;
     }
+    if (c->tunneling) {
+        if (broken) { bm_fr_fail(r, "ECONNRESET", "The socket connection was closed unexpectedly. %s", BM_FETCH_VERBOSE); return; }
+        bm_fc_tunnel(c, readable, writable);
+        return;
+    }
     if (c->handshaking) {
         if (readable || writable || broken) bm_fc_handshake(c);
         return;
@@ -6303,7 +6501,7 @@ static bm_fr *bm_fr_get(bm_int id) {
     return r && r->id == id ? r : NULL;
 }
 
-bm_int bm_native_fetchStart(bm_str method, bm_str url, bm_str headers, bm_str body, bm_int redirect, bm_int flags, bm_str ca, bm_str unix_path) {
+bm_int bm_native_fetchStart(bm_str method, bm_str url, bm_str headers, bm_str body, bm_int redirect, bm_int flags, bm_str ca, bm_str unix_path, bm_str proxy) {
     bm_io_after_batch = bm_fc_reap;
     bm_io_after_fork = bm_fetch_after_fork;
     signal(SIGPIPE, SIG_IGN);
@@ -6335,6 +6533,8 @@ bm_int bm_native_fetchStart(bm_str method, bm_str url, bm_str headers, bm_str bo
     r->ca = ca;
     bm_str_retain(unix_path);
     r->unix_path = unix_path;
+    bm_str_retain(proxy);
+    r->proxy = proxy;
     r->url = bm_native_urlNormalize(url, BM_EMPTY_STR);
     if (r->url.p->len == 0) {
         bm_fr_fail(r, "ERR_INVALID_URL", "fetch() URL is invalid");
@@ -6494,6 +6694,9 @@ void bm_native_fetchFree(bm_int id) {
     bm_str_release(r->url);
     bm_str_release(r->ca);
     bm_str_release(r->unix_path);
+    bm_str_release(r->proxy);
+    bm_free(r->dial_host);
+    bm_free(r->proxy_auth);
     bm_free(r->host);
     bm_free(r->key);
     bm_sb_free(&r->head);

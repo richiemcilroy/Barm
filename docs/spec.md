@@ -189,7 +189,7 @@ console.log(`Listening on ${server.url}`)
 - Not yet: TLS, HTTP/2, WebSockets, streaming bodies, `Bun.file`.
 
 ## 7d. fetch (Bun's client)
-`fetch(input, init?)` is a global, as in Bun: `input` is a URL string, a `URL` or a `Request`; `init` is `{ method?, headers?, body?, redirect?, signal?, decompress?, tls?, unix?, keepalive? }`. It returns `Promise<Response, Error>`: it resolves once the response's head has arrived (an HTTP error status still resolves, `ok` is false) and the body follows, and rejects with a `FetchError` (a `TypeError` with Bun's `message` and `code`: `ConnectionRefused`, `ENOTFOUND`, `ECONNRESET`, `TooManyRedirects`, `UnexpectedRedirect`, `Malformed_HTTP_Response`, `ZlibError`, `BrotliDecompressionError`, `ZstdDecompressionError`, `ERR_INVALID_URL`, ...) or, when its `signal` aborts, with the signal's reason.
+`fetch(input, init?)` is a global, as in Bun: `input` is a URL string, a `URL` or a `Request`; `init` is `{ method?, headers?, body?, redirect?, signal?, decompress?, tls?, unix?, proxy?, keepalive? }`. It returns `Promise<Response, Error>`: it resolves once the response's head has arrived (an HTTP error status still resolves, `ok` is false) and the body follows, and rejects with a `FetchError` (a `TypeError` with Bun's `message` and `code`: `ConnectionRefused`, `ENOTFOUND`, `ECONNRESET`, `TooManyRedirects`, `UnexpectedRedirect`, `Malformed_HTTP_Response`, `ZlibError`, `BrotliDecompressionError`, `ZstdDecompressionError`, `ERR_INVALID_URL`, ...) or, when its `signal` aborts, with the signal's reason.
 ```ts
 type User = { id: number, name: string }
 const res = try await fetch("http://api.local/users/1", { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(5000) })
@@ -205,7 +205,8 @@ const user = try (await res.json()) as User
 - **Cancelling.** `AbortController` (`signal`, `abort(reason?)`), `AbortSignal` (`aborted`, `reason`, `throwIfAborted()`, `addEventListener("abort", f)`, `onabort`, `AbortSignal.abort(reason?)`, `AbortSignal.timeout(ms)`, `AbortSignal.any(signals)`) and `DOMException` (`name`, `code`). An aborted request's connection is closed. `AbortSignal.timeout`'s timer doesn't keep the program running by itself.
 - **Headers** (client and server): `get` joins repeated names with `", "`; `getSetCookie()` lists each cookie; `forEach`, `keys()`, `values()` and `toJSON()` see names lower-cased and sorted, repeated names combined.
 - **Unix sockets** (Bun's `unix: "/path/to.sock"`): the request goes over that socket; the URL still gives the path and `Host` (`http://localhost/v1/info` for the Docker API). A socket that can't be opened rejects with `FailedToOpenSocket`.
-- Not yet: `Blob`/`FormData` bodies, request bodies as streams, client certificates, proxies.
+- **Proxies** (Bun's `proxy: "http://user:pass@host:port"`, else `HTTP_PROXY`/`HTTPS_PROXY` (or lower case) unless `NO_PROXY` names the host): plain HTTP goes to the proxy in absolute form; HTTPS through a `CONNECT` tunnel, with TLS and certificate checks end to end. Credentials in the proxy URL become `Proxy-Authorization`. A proxy that refuses the tunnel (`407`) answers the request, as in Bun.
+- Not yet: `Blob`/`FormData` bodies, request bodies as streams, client certificates, `https:` proxies.
 
 ## 8. Tests **[M0]**
 ```ts

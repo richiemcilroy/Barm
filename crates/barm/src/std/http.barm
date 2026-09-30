@@ -326,6 +326,9 @@ export type RequestInit = {
   tls?: TLSOptions
   // fetch() (Bun): send the request over this Unix socket (the URL still gives Host and path)
   unix?: string
+  // fetch() (Bun): an http: proxy ("http://user:pass@host:port"); without it HTTP_PROXY and
+  // HTTPS_PROXY apply (NO_PROXY excepts hosts)
+  proxy?: string
   // accepted for compatibility; connections are always pooled
   keepalive?: bool
 }
@@ -1248,6 +1251,7 @@ export async function fetch(input: string | URL | Request, init?: RequestInit): 
   let flags = 1
   let ca = ""
   let unix = ""
+  let proxy = ""
   let signal: AbortSignal | undefined = undefined
   if (init !== undefined) {
     const m = init.method
@@ -1279,6 +1283,7 @@ export async function fetch(input: string | URL | Request, init?: RequestInit): 
       ca = tls.ca ?? ""
     }
     unix = init.unix ?? ""
+    proxy = init.proxy ?? ""
     signal = init.signal
   }
   if ((method === "GET" || method === "HEAD") && body !== "") {
@@ -1287,7 +1292,7 @@ export async function fetch(input: string | URL | Request, init?: RequestInit): 
   if (signal !== undefined) {
     try signal.throwIfAborted()
   }
-  const id = __native.fetchStart(method, url, headers, body, redirect, flags, ca, unix)
+  const id = __native.fetchStart(method, url, headers, body, redirect, flags, ca, unix, proxy)
   if (signal !== undefined) {
     signal.watch(id)
   }

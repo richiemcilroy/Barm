@@ -1,0 +1,31 @@
+// Proxies (Bun's `proxy` option): plain HTTP is sent to the proxy in absolute form; HTTPS goes
+// through a CONNECT tunnel, with TLS (and certificate checks) end to end.
+import { readFileSync } from "node:fs"
+
+const base = process.env.BASE ?? "http://127.0.0.1:1"
+const proxy = process.env.PROXY ?? "http://127.0.0.1:1"
+const authProxy = process.env.PROXY_AUTH ?? "127.0.0.1:1"
+const good = process.env.TLS_GOOD ?? "0"
+const ca = try readFileSync("tests/fetch/tls/ca.pem", "utf8")
+
+function clean(s: string): string {
+  return s.replaceAll(base, "BASE").replaceAll(base.slice(7), "HOST").replaceAll(good, "GOOD").replaceAll(authProxy, "AUTHPROXY")
+}
+
+async function show(label: string, p: Promise<Response, Error>): Promise<void> {
+  try {
+    const r = await p
+    console.log(`${label}: ${r.status} ${clean(r.url)} | ${clean(await r.text())}`)
+  } catch (e) {
+    console.log(`${label}: ${e instanceof FetchError ? e.code : e.name}: ${clean(e.message)}`)
+  }
+}
+
+await show("http via proxy", fetch(base + "/text?a=1", { proxy }))
+await show("https via proxy", fetch(`https://localhost:${good}/text`, { proxy, tls: { ca } }))
+await show("https via proxy, unknown CA", fetch(`https://localhost:${good}/text`, { proxy }))
+await show("no credentials (http)", fetch(base + "/text", { proxy: `http://${authProxy}` }))
+await show("no credentials (https)", fetch(`https://localhost:${good}/text`, { proxy: `http://${authProxy}`, tls: { ca } }))
+await show("credentials (http)", fetch(base + "/text", { proxy: `http://user:pass@${authProxy}` }))
+await show("credentials (https)", fetch(`https://localhost:${good}/text`, { proxy: `http://user:pass@${authProxy}`, tls: { ca } }))
+await show("proxy down", fetch(base + "/text", { proxy: "http://127.0.0.1:1" }))

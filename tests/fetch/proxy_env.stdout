@@ -1,0 +1,3 @@
+through HTTP_PROXY: 200 | proxied GET http://example.test/x?y=1 host=example.test auth=false
+NO_PROXY host: 200 | hello
+an explicit proxy wins: 200 | proxied GET http://example.test/z host=example.test auth=false
