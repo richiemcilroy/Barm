@@ -26,11 +26,11 @@ One process or thread:
 
 | route | Barm | Rust (axum) | Bun |
 |---|---:|---:|---:|
-| hello | **408k req/s** | 314k | 277k |
-| json | **386k** | 299k | 259k |
-| echo | **388k** | 279k | 211k |
-| cpu/req (json) | **1.57 µs** | 2.14 µs | 2.67 µs |
-| mem (json) | **1.1 MB** | 4.9 MB | 39 MB |
+| hello | **385k req/s** | 311k | 278k |
+| json | **371k** | 294k | 257k |
+| echo | **372k** | 275k | 212k |
+| cpu/req (json) | **1.63 µs** | 2.19 µs | 2.70 µs |
+| mem (json) | **0.7 MB** | 4.9 MB | 39 MB |
 
 Four workers. Barm and Bun use 4 processes. For Rust:
 - `rust` is tokio's multi-thread runtime with 4 workers, the axum default.
@@ -38,11 +38,11 @@ Four workers. Barm and Bun use 4 processes. For Rust:
 
 | route | Barm | Rust tpc | Rust | Bun |
 |---|---:|---:|---:|---:|
-| hello | **1.69M req/s** | 1.38M | 727k | 1.07M |
-| json | **1.65M** | 1.27M | 720k | 964k |
-| echo | **1.67M** | 1.13M | 772k | 759k |
-| cpu/req (json) | **2.35 µs** | 2.91 µs | 3.19 µs | 3.61 µs |
-| mem (json) | **2.5 MB** | 5.0 MB | 6.3 MB | 98 MB |
+| hello | **1.65M req/s** | 1.38M | 731k | 1.05M |
+| json | **1.61M** | 1.30M | 729k | 958k |
+| echo | **1.60M** | 1.13M | 780k | 758k |
+| cpu/req (json) | **2.44 µs** | 2.86 µs | 3.14 µs | 3.58 µs |
+| mem (json) | **1.6 MB** | 5.1 MB | 6.3 MB | 97 MB |
 
 Pipelined (16 requests in flight per connection, as in TechEmpower's plaintext test):
 
@@ -68,29 +68,30 @@ At a fixed partial load Barm uses a little more CPU per request than Rust (2.70 
 
 ### macOS (kqueue)
 
-Here every server runs into the loopback cap of about 200k round trips/s (see Caveats), so req/s mostly shows who reaches the cap first. CPU per request is the better comparison. macOS has no PSS, and its per-process footprint counts pages that forked workers share once per process, so memory here is plain RSS summed over processes.
+Here every server runs into the loopback cap of about 200k round trips/s (see Caveats), so req/s mostly shows who reaches the cap first. CPU per request is the better comparison. Memory is the physical footprint summed over the server's processes.
 
 One process or thread:
 
 | route | Barm | Rust (axum) | Bun | Node |
 |---|---:|---:|---:|---:|
-| hello | **202k · 4.9 µs** | 200k · 5.0 µs | 169k · 6.1 µs | 113k · 9.0 µs |
-| json | **211k · 4.8 µs** | 195k · 5.2 µs | 164k · 6.3 µs | 111k · 9.1 µs |
-| echo | **207k · 4.9 µs** | 176k · 5.7 µs | 150k · 6.8 µs | 97k · 10.5 µs |
-| rss (json) | **2.7 MB** | 7.7 MB | 38 MB | 101 MB |
+| hello | 196k · 5.07 µs | **203k · 4.96 µs** | 174k · 5.91 µs | 112k · 9.02 µs |
+| json | **200k · 5.01 µs** | 195k · 5.15 µs | 164k · 6.30 µs | 108k · 9.33 µs |
+| echo | **200k · 5.01 µs** | 177k · 5.65 µs | 147k · 7.01 µs | 94k · 10.8 µs |
+| mem (json) | **1.6 MB** | 6.8 MB | 17 MB | 66 MB |
 
 Four workers:
 
 | route | Barm | Rust (axum) | Bun | Node |
 |---|---:|---:|---:|---:|
-| hello | **189k · 7.6 µs** | 171k · 11.9 µs | 171k · 6.1 µs | 169k · 15.4 µs |
-| json | **189k · 7.9 µs** | 172k · 12.0 µs | 168k · 6.2 µs | 170k · 15.4 µs |
-| echo | **189k · 8.0 µs** | 167k · 14.4 µs | 149k · 6.9 µs | 163k · 17.0 µs |
-| rss (json) | 10.7 MB | **8.8 MB** | 94 MB | 394 MB |
+| hello | **178k · 8.35 µs** | 164k · 12.6 µs | 171k · 6.06 µs | 160k · 16.1 µs |
+| json | **176k · 8.51 µs** | 163k · 12.8 µs | 166k · 6.27 µs | 158k · 16.3 µs |
+| echo | **176k · 8.56 µs** | 160k · 15.1 µs | 148k · 6.95 µs | 154k · 17.8 µs |
+| mem (json) | **7.3 MB** | 7.9 MB | 42 MB | 209 MB |
 
-Two rows Barm doesn't win here, both from running workers as processes:
-- Bun's `cpu/req` is low because its extra processes get no connections on macOS (no `SO_REUSEPORT` balancing): it is really one process, with bigger event batches. Barm at one worker (4.8 µs) beats it.
-- Four worker processes plus a supervisor cost about 2 MB of RSS each, more than one multithreaded Rust process. On Linux, where PSS counts shared pages once, Barm is lowest (2.5 MB vs 5.0 MB).
+Rows Barm doesn't win here:
+- Bun's four-worker `cpu/req` is low because its extra processes get no connections on macOS (no `SO_REUSEPORT` balancing): it is really one process, with bigger event batches. Barm at one worker (5.0 µs) beats it.
+- One-worker `hello` is within noise of Rust (±2% between runs); Barm wins `json` and `echo`.
+- Four worker processes plus a supervisor are each about 1.4 MB, most of it what macOS charges any process (an idle C program is 1.2 MB). That still comes in under one multithreaded Rust process.
 
 Pipelined, one worker:
 
@@ -103,11 +104,11 @@ Pipelined, one worker:
 ## How Barm gets there
 
 - **Native core, Barm API.** The event loop, HTTP/1.1 parser and response writer are C in the runtime (`runtime/barm.c`, `bm_native_http*`). Bun's API is Barm code (`crates/barm/src/std/http.barm`): `Bun.serve` compiles the routes, registers a closure with the loop, and the closure routes each request and writes the returned `Response`.
-- **Shared buffers.** Each event loop reads into one 64 KB buffer and writes responses from one shared buffer; a connection keeps buffers of its own only for leftovers (half a request, or output the socket didn't take). An idle keep-alive connection is ~100 bytes, the working set stays in cache, and 1,000 connections add about 0.5 MB.
+- **Shared buffers.** Each event loop reads into one 64 KB buffer (only the pages a read touches are resident) and writes responses from one shared buffer; a connection keeps buffers of its own only for leftovers (half a request, or output the socket didn't take). An idle keep-alive connection is ~100 bytes, the working set stays in cache, and 1,000 connections add about 0.5 MB.
 - **Cheap URLs.** A `URL` is kept as its normalized href and its parts are sliced when read; an already-normal URL (every request URL) is the input string itself. `new URL(req.url).pathname` costs three small allocations.
 - **Level-triggered events, no wasted syscalls.** When a `read` fills less than the buffer, the socket is known to be drained, so the loop skips the extra `read` that would only return `EAGAIN`. A non-pipelined request costs one `read` and one `write`. With profiling on macOS, over 95% of server time is in those two syscalls.
 - **Batched output.** Every response produced from one read goes out in one `write`, which is why pipelined throughput is 3–5× Rust's. hyper, under axum's defaults, flushes after each response (`pipeline_flush` is off).
-- **Cheap requests.** A request is a few small strings from the runtime's small-object free lists, a `Request` object and a `Response` object, all reference-counted and freed as soon as the handler returns. No GC, and no per-request futures or tasks. The `date` header is formatted once per second.
+- **Cheap requests.** A request is a few small strings (and the builders that make its response) from the runtime's small-object free lists, a `Request` object and a `Response` object, all reference-counted and freed as soon as the handler returns. No GC, and no per-request futures or tasks. The `date` header is formatted once per second.
 - **Workers are processes.** `fork` after `listen` gives isolated heaps with no locking. A shared-memory table of per-worker connection counts makes each worker accept only while it is among the least loaded, so persistent connections spread evenly (macOS has no `SO_REUSEPORT` balancing).
 - **Backpressure and limits.** A client that pipelines without reading stops being served once 1 MB of output is queued, and its socket stops being read until the output drains. Request limits:
   - headers: 64 KB (`431`)
