@@ -1,0 +1,20 @@
+// JSON.stringify of class instances inside unions, records and arrays (a class member is a
+// pointer: its writer is called through a cast that GCC checks).
+class Point {
+  x: number
+  y: number
+  constructor(x: number, y: number) {
+    this.x = x
+    this.y = y
+  }
+}
+
+type Holder = { p: Point, name: string }
+
+const u: string | Point = new Point(1, 2)
+const s: string | Point = "text"
+const h: Holder = { p: new Point(3, 4), name: "h" }
+const arr: (string | Point)[] = ["a", new Point(5, 6)]
+console.log(JSON.stringify(u), JSON.stringify(s))
+console.log(JSON.stringify(h))
+console.log(JSON.stringify(arr, undefined, 2))
