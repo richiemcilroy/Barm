@@ -13,6 +13,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+/// runtime/tls.c and the vendored mbedTLS, embedded by the Cargo build script (../build.rs).
+mod tls_files {
+    include!(concat!(env!("OUT_DIR"), "/tls_files.rs"));
+}
+
 pub enum BuildError {
     Diagnostics(SourceMap, Vec<Diagnostic>),
     Message(String),
@@ -167,8 +172,11 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     flags.extend(extra.split_whitespace());
     let flag_text = flags.join(" ");
     let rt_key = hash_hex(&[codegen::RUNTIME_H.as_bytes(), codegen::RUNTIME_C.as_bytes(), cc.as_bytes(), flag_text.as_bytes(), env!("CARGO_PKG_VERSION").as_bytes()]);
+    // A program that fetches links TLS (its code calls bm_tls_install).
+    let tls = c_src.contains("bm_tls_install();").then(|| TlsArchive::new(&cc, sysroot.as_deref(), &extra));
     // Link flags (see below) are part of what a cached binary was built with.
-    let key = hash_hex(&[c_src.as_bytes(), rt_key.as_bytes(), LINK_FLAGS.as_bytes()]);
+    let tls_key = tls.as_ref().map(|t| t.key.clone()).unwrap_or_default();
+    let key = hash_hex(&[c_src.as_bytes(), rt_key.as_bytes(), LINK_FLAGS.as_bytes(), tls_key.as_bytes()]);
     let dir = cache_dir();
     let bin_dir = dir.join("bin");
     let binary = bin_dir.join(&key);
@@ -223,7 +231,11 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         run_cc(compile, &cc, &c_path)?;
         cmd.args(extra.split_whitespace()).arg("-o").arg(&tmp).arg(&obj);
     }
-    cmd.arg(&rt_obj).arg("-lm");
+    cmd.arg(&rt_obj);
+    if let Some(t) = &tls {
+        cmd.arg(t.build(&cc, &c_dir)?);
+    }
+    cmd.arg("-lm");
     if !cfg!(target_vendor = "apple") && !cfg!(windows) {
         cmd.arg("-lpthread");
     }
@@ -292,6 +304,83 @@ fn run_cc(mut cmd: Command, cc: &str, c_path: &Path) -> Result<(), BuildError> {
         )));
     }
     Ok(())
+}
+
+/// The TLS archive: runtime/tls.c and mbedTLS (vendor/mbedtls), compiled once per compiler,
+/// SDK and sanitizer flags. Its flags are fixed (-O2 whatever the program's -O, and no
+/// --unchecked), so other builds share it; only fetch() programs link it.
+struct TlsArchive {
+    key: String,
+    flags: Vec<String>,
+}
+
+impl TlsArchive {
+    fn new(cc: &str, sysroot: Option<&str>, extra: &str) -> TlsArchive {
+        let mut flags: Vec<String> = ["-O2", "-std=gnu11", "-w", "-fno-stack-protector", "-U_FORTIFY_SOURCE", "-D_FORTIFY_SOURCE=0", "-ffunction-sections", "-fdata-sections"].map(String::from).to_vec();
+        if let Some(sdk) = sysroot {
+            flags.push("-isysroot".into());
+            flags.push(sdk.into());
+        }
+        if extra.contains("-fsanitize") {
+            flags.extend(extra.split_whitespace().map(String::from));
+        }
+        let key = hash_hex(&[tls_files::TLS_KEY.as_bytes(), codegen::RUNTIME_H.as_bytes(), cc.as_bytes(), flags.join(" ").as_bytes()]);
+        TlsArchive { key, flags }
+    }
+
+    /// The archive, compiling it first if it isn't cached.
+    fn build(&self, cc: &str, c_dir: &Path) -> Result<PathBuf, BuildError> {
+        let archive = c_dir.join(format!("tls-{}.a", self.key));
+        if archive.is_file() {
+            return Ok(archive);
+        }
+        let fail = |what: String| BuildError::Message(format!("can't build the TLS library: {what}"));
+        let dir = c_dir.join(format!("tls-{}.tmp{}", self.key, std::process::id()));
+        for (rel, bytes) in tls_files::TLS_FILES.iter().copied().chain([("runtime/barm.h", codegen::RUNTIME_H.as_bytes())]) {
+            let path = dir.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| fail(format!("{e}")))?;
+            std::fs::write(&path, bytes).map_err(|e| fail(format!("{e}")))?;
+        }
+        let sources: Vec<&str> = tls_files::TLS_FILES.iter().map(|f| f.0).filter(|p| p.ends_with(".c")).collect();
+        let mut args: Vec<String> = self.flags.clone();
+        for inc in ["vendor/mbedtls/include", "vendor/mbedtls/library", "vendor/mbedtls", "runtime"] {
+            args.push(format!("-I{}", dir.join(inc).display()));
+        }
+        args.push("-DMBEDTLS_CONFIG_FILE=\"barm_config.h\"".into());
+        // compile in parallel: ~70 files, once
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(sources.len());
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let errors = std::sync::Mutex::new(Vec::new());
+        std::thread::scope(|s| {
+            for _ in 0..threads {
+                s.spawn(|| loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(src) = sources.get(i) else { break };
+                    let out = Command::new(cc).args(&args).arg("-c").arg(dir.join(src)).arg("-o").arg(dir.join(format!("{i}.o"))).output();
+                    match out {
+                        Ok(o) if o.status.success() => {}
+                        Ok(o) => errors.lock().unwrap().push(format!("{src}: {}", String::from_utf8_lossy(&o.stderr).lines().take(5).collect::<Vec<_>>().join("\n"))),
+                        Err(e) => errors.lock().unwrap().push(format!("{src}: can't run `{cc}`: {e}")),
+                    }
+                });
+            }
+        });
+        if let Some(e) = errors.into_inner().unwrap().first() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(fail(e.clone()));
+        }
+        // the toolchain's own archiver (next to the compiler we picked), else the one on PATH
+        let ar = Path::new(cc).parent().map(|d| d.join("ar")).filter(|p| p.is_file()).map_or("ar".to_string(), |p| p.to_string_lossy().into_owned());
+        let tmp = c_dir.join(format!("tls-{}.tmp{}.a", self.key, std::process::id()));
+        let objs: Vec<PathBuf> = (0..sources.len()).map(|i| dir.join(format!("{i}.o"))).collect();
+        let out = Command::new(&ar).arg("rcs").arg(&tmp).args(&objs).output().map_err(|e| fail(format!("can't run `{ar}`: {e}")))?;
+        let _ = std::fs::remove_dir_all(&dir);
+        if !out.status.success() {
+            return Err(fail(format!("`{ar}` failed: {}", String::from_utf8_lossy(&out.stderr))));
+        }
+        std::fs::rename(&tmp, &archive).map_err(|e| fail(format!("can't move it into the cache: {e}")))?;
+        Ok(archive)
+    }
 }
 
 /// A 128-bit content hash (two independent 64-bit lanes), hex-encoded. For cache keys, not security.

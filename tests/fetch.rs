@@ -184,6 +184,31 @@ fn handle(s: &mut TcpStream, r: &Req, served: usize, fixtures: &Path, alt: &str)
     true
 }
 
+/// The HTTPS test servers (python3 tests/fetch/tls/server.py): ports for the good, expired and
+/// self-signed certificates.
+struct TlsServer {
+    child: std::process::Child,
+    ports: [u16; 3],
+}
+
+impl TlsServer {
+    fn start(script: &Path) -> Option<TlsServer> {
+        let mut child = Command::new("python3").arg(script).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().ok()?;
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(child.stdout.take()?), &mut line).ok()?;
+        let ports: Vec<u16> = line.split_whitespace().skip(1).filter_map(|p| p.parse().ok()).collect();
+        let ports: [u16; 3] = ports.try_into().ok()?;
+        Some(TlsServer { child, ports })
+    }
+}
+
+impl Drop for TlsServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 fn serve(listener: TcpListener, fixtures: PathBuf, alt: String, stop: Arc<AtomicBool>) {
     for conn in listener.incoming() {
         if stop.load(Ordering::Relaxed) {
@@ -230,11 +255,22 @@ fn main() {
     cases.sort();
     let mut failed = Vec::new();
     let bun = Command::new("bun").arg("--version").output().is_ok_and(|o| o.status.success());
+    // HTTPS: tests/fetch/tls/server.py (tls.barm needs it; skipped without python3)
+    let tls = TlsServer::start(&dir.join("tls/server.py"));
+    let mut skipped = 0;
     for case in &cases {
         let name = case.file_stem().unwrap().to_string_lossy().into_owned();
+        let mut env: Vec<(&str, String)> = vec![("BASE", base.clone()), ("ALT", alt.clone())];
+        if name == "tls" {
+            let Some(t) = &tls else {
+                skipped += 1;
+                continue;
+            };
+            env.extend([("TLS_GOOD", t.ports[0].to_string()), ("TLS_EXPIRED", t.ports[1].to_string()), ("TLS_SELF", t.ports[2].to_string())]);
+        }
         let expected = std::fs::read_to_string(case.with_extension("stdout")).unwrap_or_default();
         if bun && !name.starts_with("native_") {
-            let out = Command::new("sh").arg(root.join("scripts/barm2js.sh")).arg(case).current_dir(&root).env("BARM2JS_RUNTIME", "bun").env("BASE", &base).env("ALT", &alt).output().expect("run bun");
+            let out = Command::new("sh").arg(root.join("scripts/barm2js.sh")).arg(case).current_dir(&root).env("BARM2JS_RUNTIME", "bun").envs(env.iter().map(|(k, v)| (*k, v.as_str()))).output().expect("run bun");
             let js = String::from_utf8_lossy(&out.stdout);
             if js != expected {
                 failed.push(format!("{name}: the expectation differs from Bun's output\n--- expected\n{expected}--- bun\n{js}{}", String::from_utf8_lossy(&out.stderr)));
@@ -244,7 +280,7 @@ fn main() {
         match barm::build::build(std::slice::from_ref(case), &root, &opts) {
             Ok(built) => {
                 let started = std::time::Instant::now();
-                let out = Command::new(&built.binary).current_dir(&root).env("BASE", &base).env("ALT", &alt).output().expect("run binary");
+                let out = Command::new(&built.binary).current_dir(&root).envs(env.iter().map(|(k, v)| (*k, v.as_str()))).output().expect("run binary");
                 let actual = String::from_utf8_lossy(&out.stdout).into_owned();
                 // nothing here waits long: a slow exit means something kept the loop alive
                 if started.elapsed() > Duration::from_secs(20) {
@@ -263,7 +299,9 @@ fn main() {
     for f in &failed {
         eprintln!("{f}\n");
     }
-    println!("fetch: {} programs{}, {} failed", cases.len(), if bun { " (checked against Bun)" } else { "" }, failed.len());
+    drop(tls);
+    let skip_note = if skipped > 0 { format!(", {skipped} skipped (no python3 for the HTTPS server)") } else { String::new() };
+    println!("fetch: {} programs{}{skip_note}, {} failed", cases.len() - skipped, if bun { " (checked against Bun)" } else { "" }, failed.len());
     if !failed.is_empty() {
         std::process::exit(1);
     }

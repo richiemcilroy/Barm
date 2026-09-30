@@ -1,0 +1,71 @@
+// https: against tests/fetch/tls/server.py (a certificate signed by the test CA, an
+// expired one and a self-signed one), plus redirects between it and the plain server.
+import { readFileSync } from "node:fs"
+
+const base = process.env.BASE ?? "http://127.0.0.1:1"
+const good = process.env.TLS_GOOD ?? "0"
+const expired = process.env.TLS_EXPIRED ?? "0"
+const selfSigned = process.env.TLS_SELF ?? "0"
+const ca = try readFileSync("tests/fetch/tls/ca.pem", "utf8")
+
+function clean(s: string): string {
+  return s.replaceAll(base, "BASE").replaceAll(good, "GOOD").replaceAll(expired, "EXPIRED").replaceAll(selfSigned, "SELF")
+}
+
+function describe(e: Error): string {
+  if (e instanceof FetchError) {
+    return `${e.code}: ${clean(e.message)}`
+  }
+  return `${e.name}: ${e.message}`
+}
+
+async function show(label: string, p: Promise<Response, Error>): Promise<void> {
+  try {
+    const r = await p
+    const body = await r.text()
+    console.log(`${label}: ${r.status} ${clean(r.url)} | ${body.byteLength > 200 ? `${body.byteLength} bytes` : body}`)
+  } catch (e) {
+    console.log(`${label}: ${describe(e)}`)
+  }
+}
+
+const secure = `https://localhost:${good}`
+// trust
+await show("unknown CA", fetch(`${secure}/text`))
+await show("with tls.ca", fetch(`${secure}/text`, { tls: { ca } }))
+await show("IP address", fetch(`https://127.0.0.1:${good}/text`, { tls: { ca } }))
+await show("expired", fetch(`https://localhost:${expired}/text`, { tls: { ca } }))
+await show("self-signed", fetch(`https://localhost:${selfSigned}/text`))
+await show("rejectUnauthorized: false", fetch(`https://localhost:${selfSigned}/text`, { tls: { rejectUnauthorized: false } }))
+await show("plain HTTP to a TLS port", fetch(`http://localhost:${good}/text`))
+
+// requests and bodies over TLS
+async function served(): Promise<number> throws Error {
+  const text = try await (try await fetch(`${secure}/conn`, { tls: { ca } })).text()
+  return parseInt(text.split(" ")[1] ?? "0") ?? 0
+}
+try {
+  const first = await served()
+  const second = await served()
+  console.log(`keep-alive: reused=${second === first + 1}`)
+} catch (e) {
+  console.log(`keep-alive: ${describe(e)}`)
+}
+await show("POST", fetch(`${secure}/echo`, { method: "POST", body: "over TLS", tls: { ca } }))
+await show("POST 100 KB", fetch(`${secure}/echo`, { method: "POST", body: "x".repeat(100000), tls: { ca } }))
+await show("3 MB body", fetch(`${secure}/big?n=3000000`, { tls: { ca } }))
+await show("chunked", fetch(`${secure}/chunked`, { tls: { ca } }))
+try {
+  const all = await Promise.all([1, 2, 3, 4, 5, 6, 7, 8].map((i) => fetch(`${secure}/text`, { tls: { ca } })))
+  const statuses: number[] = []
+  for (const r of all) {
+    statuses.push(r.status)
+  }
+  console.log(`concurrent: ${statuses.join(",")}`)
+} catch (e) {
+  console.log(`concurrent: ${describe(e)}`)
+}
+
+// redirects between http and https
+await show("http → https", fetch(`${base}/redirect?to=https%3A%2F%2Flocalhost:${good}/text`, { tls: { ca } }))
+await show("https → http", fetch(`${secure}/redirect?to=${base}/text`, { tls: { ca } }))

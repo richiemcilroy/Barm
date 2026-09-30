@@ -479,7 +479,7 @@ void bm_http_run(void);   /* after the program: serves registered servers until 
 bm_str bm_native_headerRemove(bm_str block, bm_str name);  /* the block without `name` lines */
 bm_str bm_native_headerAppend(bm_str block, bm_str name, bm_str value);
 /* fetch(): see the HTTP client section of barm.c */
-bm_int bm_native_fetchStart(bm_str method, bm_str url, bm_str headers, bm_str body, bm_int redirect, bm_int flags);
+bm_int bm_native_fetchStart(bm_str method, bm_str url, bm_str headers, bm_str body, bm_int redirect, bm_int flags, bm_str ca);
 bm_promise *bm_native_fetchWait(bm_int id);    /* Promise<int>: 0 done, -1 failed, -2 aborted */
 bm_int bm_native_fetchStatus(bm_int id);
 bm_str bm_native_fetchStatusText(bm_int id);
@@ -493,6 +493,23 @@ bm_str bm_native_fetchErrorMessage(bm_int id);
 void bm_native_fetchAbort(bm_int id);
 void bm_native_fetchFree(bm_int id);
 void bm_native_timerUnref(bm_int id);
+
+/* TLS for fetch(): runtime/tls.c, compiled with the vendored mbedTLS into an archive that only
+ * programs calling fetch() link. Their code calls bm_tls_install(), which sets bm_tls_impl;
+ * until then (or in other programs) it is NULL. */
+typedef struct bm_tls bm_tls;
+typedef struct bm_tls_ops {
+    /* A client for `host` on connected socket fd; `key` names the origin (sessions resume per key). */
+    bm_tls *(*open)(int fd, const char *host, const char *key, bool verify, const char *ca, size_t ca_len);
+    int (*handshake)(bm_tls *t);                          /* 0 done, 1 wants read, 2 wants write, -1 failed */
+    long (*read)(bm_tls *t, void *buf, size_t n);         /* > 0 bytes, 0 ended, -1 wants read, -2 write, -3 failed */
+    long (*write)(bm_tls *t, const void *buf, size_t n);  /* as read */
+    size_t (*pending)(bm_tls *t);                         /* decrypted bytes waiting to be read */
+    void (*why)(bm_tls *t, const char *url, const char **code, char *msg, size_t n);
+    void (*close)(bm_tls *t, bool notify);
+} bm_tls_ops;
+extern const bm_tls_ops *bm_tls_impl;
+void bm_tls_install(void);
 bm_str bm_native_bytesToString(bm_arr bytes);
 bm_arr bm_native_stringToBytes(bm_str s);
 bm_str bm_native_utf8Clean(bm_str s);
