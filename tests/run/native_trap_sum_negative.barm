@@ -1,0 +1,12 @@
+// Native-only: every term is negative and the total drops below the smallest int.
+const TERMS: int[] = [-4611686018427387904, -4611686018427387904]
+
+function sum(i: int): int {
+  if (i === TERMS.length) return -1
+  return TERMS[i]! + sum(i + 1)
+}
+
+function main() {
+  console.log("start")
+  console.log(sum(0))
+}

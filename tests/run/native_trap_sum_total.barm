@@ -1,0 +1,13 @@
+// Native-only: every term is non-negative and the total overflows, so the recursion's
+// outermost addition traps.
+const TERMS: int[] = [4611686018427387904, 0, 4611686018427387903]
+
+function sum(i: int): int {
+  if (i === TERMS.length) return 1
+  return TERMS[i]! + sum(i + 1)
+}
+
+function main() {
+  console.log("start")
+  console.log(sum(0))
+}

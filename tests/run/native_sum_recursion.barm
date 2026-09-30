@@ -1,0 +1,36 @@
+// Native-only: `return a + f(...)` recursions run as loops, and must return what the recursion
+// would, trapping exactly when one of its additions overflows.
+const MAX: int = 9223372036854775807
+const MIN: int = -9223372036854775807 - 1
+
+function fib(n: int): int {
+  if (n < 2) return n
+  return fib(n - 1) + fib(n - 2)
+}
+
+
+const CASES: int[][] = [
+  [],
+  [1, 2, 3],
+  [MAX - 10, 4, 6],
+  [-1, -2, -3],
+  [MIN + 10, -4, -6],
+  [-5, MAX, 10],
+  [MAX, MIN, MAX, MIN],
+  [5, -3, MAX - 1, -7],
+  [0, 0, MAX],
+]
+const BASES: int[] = [7, 0, -1, 0, 0, -20, 3, 4, 0]
+
+// Case `c`'s terms from `i`, plus its base, added right to left as the recursion does.
+function sum(c: int, i: int): int {
+  if (i === CASES[c]!.length) return BASES[c]!
+  return CASES[c]![i]! + sum(c, i + 1)
+}
+
+function main() {
+  console.log(fib(30), fib(1), fib(0), fib(-4))
+  for (let c = 0; c < CASES.length; c++) {
+    console.log(sum(c, 0))
+  }
+}

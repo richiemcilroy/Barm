@@ -1,0 +1,13 @@
+// Native-only: the total (9223372036854775802) fits, but the recursion first adds
+// 9223372036854775807 + 5, which overflows and must trap.
+const TERMS: int[] = [-10, 9223372036854775807, 5]
+
+function sum(i: int): int {
+  if (i === TERMS.length) return 0
+  return TERMS[i]! + sum(i + 1)
+}
+
+function main() {
+  console.log("start")
+  console.log(sum(0))
+}
