@@ -8,7 +8,12 @@
  * SSL_CERT_FILE, else the first of the usual locations; NODE_EXTRA_CA_CERTS adds more, and a
  * request's own `tls.ca` more still. NODE_TLS_REJECT_UNAUTHORIZED=0 turns verification off, as
  * in Node and Bun. Sessions are remembered per origin, so pooled and later connections resume
- * (TLS 1.3 tickets, TLS 1.2 tickets or IDs) instead of repeating the full handshake. */
+ * (TLS 1.3 tickets, TLS 1.2 tickets or IDs) instead of repeating the full handshake.
+ *
+ * Key exchange is BoringSSL's default: the post-quantum hybrid X25519+ML-KEM-768 first, as in
+ * Chrome, Firefox and Node, so recorded traffic stays safe from future quantum decryption. It
+ * costs ~40 us per new connection over plain X25519 (which Bun offers); pooled connections don't
+ * pay it again. */
 
 #include "barm.h"
 

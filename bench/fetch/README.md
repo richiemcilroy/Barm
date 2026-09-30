@@ -62,6 +62,8 @@ HTTPS: the server is the same axum app behind rustls, using a certificate from `
 | cpu/request | **2,419 µs** | 3,657 µs | 10,039 µs | 4,947 µs | 5,604 µs |
 | peak RSS | **13.2 MB** | 136 MB | 217 MB | 67.7 MB | 43.1 MB |
 
+In `tls-new-1`, Barm offers the post-quantum X25519+ML-KEM-768 key exchange, as Chrome, Firefox and Node do; Bun offers plain X25519. With the same X25519 exchange, Barm makes 2,000 new connections in 396 ms against Bun's 429 ms. With the post-quantum exchange it takes 474 ms: about 40 µs more per new connection, which pooled connections don't pay.
+
 Binary size: a Barm program that calls `fetch()` is 1.7 MB, TLS included (hello-world is 35 KB: programs that don't fetch don't link TLS). The Rust client with reqwest and rustls is 2.4 MB, and Bun is 64 MB.
 
 In `big-8`, Barm and Bun reach the same throughput; Barm uses about half the CPU and a third of the memory. Bun spreads work over several threads (its CPU time exceeds its wall time).
