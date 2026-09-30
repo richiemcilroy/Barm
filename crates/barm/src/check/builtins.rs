@@ -48,7 +48,7 @@ pub(super) fn native_sig(types: &mut Types, name: &str) -> Option<(Vec<TyId>, Ty
         "headerValue" => (vec![STR, INT], STR),
         "headerRemove" => (vec![STR, STR], STR),
         "headerAppend" => (vec![STR, STR, STR], STR),
-        "fetchStart" => (vec![STR, STR, STR, STR, INT, INT, STR], INT),
+        "fetchStart" => (vec![STR, STR, STR, STR, INT, INT, STR, STR], INT),
         "fetchWait" | "fetchBodyWait" | "fetchRead" | "fetchHandle" => (vec![INT], types.promise(INT, NEVER)),
         "fetchTake" => {
             let bytes = types.array(U8);

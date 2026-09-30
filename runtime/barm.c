@@ -4745,6 +4745,7 @@ bm_str bm_native_urlPart(bm_str href, bm_int k) {
 #include <pthread.h>
 #include <stdarg.h>
 #include <sys/uio.h>
+#include <sys/un.h>
 
 /* ---- inflate (RFC 1951) with gzip (RFC 1952) and zlib (RFC 1950) wrappers */
 
@@ -5232,6 +5233,7 @@ typedef struct bm_fr {
     bool decompress;
     bool https, insecure;      /* TLS; without certificate checks (tls.rejectUnauthorized: false) */
     bm_str ca;                 /* extra trusted certificates (PEM), for tls.ca */
+    bm_str unix_path;          /* Bun's `unix`: connect to this socket instead ("" for TCP) */
     char *host;                /* hostname (IPv6 in brackets) */
     char *key;                 /* the pool key: scheme, host, port and TLS options */
     int port;
@@ -5457,6 +5459,10 @@ static bool bm_fr_prepare(bm_fr *r) {
     r->key = bm_alloc(kl);
     if (https) snprintf(r->key, kl, "https://%s:%d%s|%08x", r->host, port, r->insecure ? "|insecure" : "", r->ca.p->len ? bm_hash_cstr(r->ca.p->data) : 0);
     else snprintf(r->key, kl, "http://%s:%d", r->host, port);
+    if (r->unix_path.p->len) { /* pooled per socket too */
+        size_t used = strlen(r->key);
+        snprintf(r->key + used, kl - used, "|unix:%08x", bm_hash_cstr(r->unix_path.p->data));
+    }
     const char *target = auth_end, *hash = memchr(target, '#', (size_t)(end - target));
     if (!hash) hash = end;
     bm_sb *h = &r->head;
@@ -5797,7 +5803,7 @@ static bool bm_fc_open(bm_fc *c) {
     for (; c->ai < c->addrs.n; c->ai++) {
         struct sockaddr_storage *sa = &c->addrs.a[c->ai];
         if (sa->ss_family == AF_INET) ((struct sockaddr_in *)sa)->sin_port = htons((uint16_t)c->port);
-        else ((struct sockaddr_in6 *)sa)->sin6_port = htons((uint16_t)c->port);
+        else if (sa->ss_family == AF_INET6) ((struct sockaddr_in6 *)sa)->sin6_port = htons((uint16_t)c->port);
         int fd = socket(sa->ss_family, SOCK_STREAM, 0);
         if (fd < 0) continue;
         fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
@@ -5824,6 +5830,7 @@ static bool bm_fc_open(bm_fc *c) {
 }
 
 static void bm_fr_connect_failed(bm_fr *r, int err) {
+    if (r->unix_path.p->len) { bm_fr_fail(r, "FailedToOpenSocket", "Was there a typo in the url or port?"); return; }
     if (err == ECONNREFUSED) bm_fr_fail(r, "ConnectionRefused", "Unable to connect. Is the computer able to access the url?");
     else if (err == ETIMEDOUT) bm_fr_fail(r, "ConnectionTimeout", "Unable to connect. Is the computer able to access the url?");
     else bm_fr_fail(r, "ConnectionRefused", "Unable to connect. Is the computer able to access the url?");
@@ -5981,6 +5988,18 @@ static void bm_fr_step(bm_fr *r) {
         return;
     }
     bm_addrs addrs;
+    if (r->unix_path.p->len) {
+        /* Bun's `unix`: the socket, whatever the URL's host */
+        struct sockaddr_un *un = (struct sockaddr_un *)&addrs.a[0];
+        memset(un, 0, sizeof *un);
+        un->sun_family = AF_UNIX;
+        if ((size_t)r->unix_path.p->len >= sizeof un->sun_path) { bm_fr_fail(r, "ENAMETOOLONG", "The socket path is too long: %s", r->unix_path.p->data); return; }
+        memcpy(un->sun_path, r->unix_path.p->data, (size_t)r->unix_path.p->len);
+        addrs.len[0] = (socklen_t)sizeof *un;
+        addrs.n = 1;
+        bm_fr_connect(r, &addrs);
+        return;
+    }
     if (bm_numeric_host(r->host, &addrs)) { bm_fr_connect(r, &addrs); return; }
     uint32_t b = bm_hash_cstr(r->host) % BM_DNS_BUCKETS;
     bm_dns *d = bm_dns_cache[b];
@@ -6284,7 +6303,7 @@ static bm_fr *bm_fr_get(bm_int id) {
     return r && r->id == id ? r : NULL;
 }
 
-bm_int bm_native_fetchStart(bm_str method, bm_str url, bm_str headers, bm_str body, bm_int redirect, bm_int flags, bm_str ca) {
+bm_int bm_native_fetchStart(bm_str method, bm_str url, bm_str headers, bm_str body, bm_int redirect, bm_int flags, bm_str ca, bm_str unix_path) {
     bm_io_after_batch = bm_fc_reap;
     bm_io_after_fork = bm_fetch_after_fork;
     signal(SIGPIPE, SIG_IGN);
@@ -6314,6 +6333,8 @@ bm_int bm_native_fetchStart(bm_str method, bm_str url, bm_str headers, bm_str bo
     r->insecure = (flags & BM_FETCH_INSECURE) != 0;
     bm_str_retain(ca);
     r->ca = ca;
+    bm_str_retain(unix_path);
+    r->unix_path = unix_path;
     r->url = bm_native_urlNormalize(url, BM_EMPTY_STR);
     if (r->url.p->len == 0) {
         bm_fr_fail(r, "ERR_INVALID_URL", "fetch() URL is invalid");
@@ -6472,6 +6493,7 @@ void bm_native_fetchFree(bm_int id) {
     bm_str_release(r->body);
     bm_str_release(r->url);
     bm_str_release(r->ca);
+    bm_str_release(r->unix_path);
     bm_free(r->host);
     bm_free(r->key);
     bm_sb_free(&r->head);

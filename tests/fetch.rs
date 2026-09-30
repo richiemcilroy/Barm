@@ -31,7 +31,7 @@ impl Req {
     }
 }
 
-fn read_req(s: &mut TcpStream, buf: &mut Vec<u8>) -> Option<Req> {
+fn read_req(s: &mut impl Read, buf: &mut Vec<u8>) -> Option<Req> {
     loop {
         if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
             let head = String::from_utf8_lossy(&buf[..end]).into_owned();
@@ -67,7 +67,7 @@ fn read_req(s: &mut TcpStream, buf: &mut Vec<u8>) -> Option<Req> {
     }
 }
 
-fn respond(s: &mut TcpStream, status: &str, headers: &[(&str, String)], body: &[u8]) {
+fn respond(s: &mut impl Write, status: &str, headers: &[(&str, String)], body: &[u8]) {
     let mut out = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\n", body.len()).into_bytes();
     for (k, v) in headers {
         out.extend_from_slice(format!("{k}: {v}\r\n").as_bytes());
@@ -78,7 +78,7 @@ fn respond(s: &mut TcpStream, status: &str, headers: &[(&str, String)], body: &[
 }
 
 /// Serves one connection; returns false when it should be closed.
-fn handle(s: &mut TcpStream, r: &Req, served: usize, fixtures: &Path, alt: &str) -> bool {
+fn handle(s: &mut (impl Read + Write), r: &Req, served: usize, fixtures: &Path, alt: &str) -> bool {
     let fixture = |name: &str| std::fs::read(fixtures.join(name)).unwrap();
     match r.path.as_str() {
         "/text" => respond(s, "200 OK", &[("Content-Type", "text/plain".into())], b"hello"),
@@ -230,6 +230,24 @@ impl Drop for TlsServer {
     }
 }
 
+/// The same routes on a Unix socket (Bun's `unix` option).
+fn serve_unix(listener: std::os::unix::net::UnixListener, fixtures: PathBuf) {
+    for conn in listener.incoming() {
+        let Ok(mut s) = conn else { continue };
+        let fixtures = fixtures.clone();
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let mut served = 0;
+            while let Some(r) = read_req(&mut s, &mut buf) {
+                if !handle(&mut s, &r, served, &fixtures, "") {
+                    break;
+                }
+                served += 1;
+            }
+        });
+    }
+}
+
 fn serve(listener: TcpListener, fixtures: PathBuf, alt: String, stop: Arc<AtomicBool>) {
     for conn in listener.incoming() {
         if stop.load(Ordering::Relaxed) {
@@ -271,6 +289,12 @@ fn main() {
         let (dir, alt, stop) = (dir.clone(), alt.clone(), stop.clone());
         std::thread::spawn(move || serve(listener, dir, alt, stop));
     }
+    let unix_path = std::env::temp_dir().join(format!("barm-fetch-{}.sock", std::process::id()));
+    {
+        let listener = std::os::unix::net::UnixListener::bind(&unix_path).expect("bind a unix socket");
+        let dir = dir.clone();
+        std::thread::spawn(move || serve_unix(listener, dir));
+    }
     // Every tests/fetch/<name>.barm; the ones not named native_* are also checked against Bun.
     let mut cases: Vec<PathBuf> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "barm")).collect();
     cases.sort();
@@ -281,7 +305,7 @@ fn main() {
     let mut skipped = 0;
     for case in &cases {
         let name = case.file_stem().unwrap().to_string_lossy().into_owned();
-        let mut env: Vec<(&str, String)> = vec![("BASE", base.clone()), ("ALT", alt.clone())];
+        let mut env: Vec<(&str, String)> = vec![("BASE", base.clone()), ("ALT", alt.clone()), ("UNIX", unix_path.to_string_lossy().into_owned())];
         if name == "tls" {
             let Some(t) = &tls else {
                 skipped += 1;
@@ -328,6 +352,7 @@ fn main() {
         Err(_) => failed.push("hello-world didn't build".into()),
     }
     let _ = std::fs::remove_file(&hello);
+    let _ = std::fs::remove_file(&unix_path);
     stop.store(true, Ordering::Relaxed);
     let _ = TcpStream::connect(("127.0.0.1", port));
     for f in &failed {
