@@ -1,0 +1,33 @@
+// Built-in declarations visible in every module (unless a module declares the same name).
+
+export class Error {
+  message: string
+  name: string = "Error"
+  constructor(message?: string) {
+    this.message = message ?? ""
+  }
+  toString(): string {
+    return this.message === "" ? this.name : `${this.name}: ${this.message}`
+  }
+}
+
+export class TypeError extends Error {
+  constructor(message?: string) {
+    super(message)
+    this.name = "TypeError"
+  }
+}
+
+export class RangeError extends Error {
+  constructor(message?: string) {
+    super(message)
+    this.name = "RangeError"
+  }
+}
+
+export class SyntaxError extends Error {
+  constructor(message?: string) {
+    super(message)
+    this.name = "SyntaxError"
+  }
+}
