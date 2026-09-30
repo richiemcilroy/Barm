@@ -993,15 +993,27 @@ impl<'c, 'a> Gen<'c, 'a> {
             ExprKind::Int(v) => Some(format!("INT64_C({v})")),
             _ => None,
         };
-        let pushed: Vec<u32> = ss.iter().filter_map(|&x| {
-            let StmtKind::Expr(e) = &ast.stmt(x).kind else { return None };
-            let ExprKind::Call { callee, args, .. } = &ast.expr(*e).kind else { return None };
-            let ExprKind::Member { obj, name, optional: false, .. } = &ast.expr(*callee).kind else { return None };
-            if self.sym(*name) != "push" || args.len() != 1 {
-                return None;
+        // The array a statement pushes onto on every path through it: `xs.push(v)`, or an
+        // if/else (chain) whose every branch does (e.g. one push per kind of element).
+        fn always_pushes(g: &Gen, ast: &ast::Ast, local: &dyn Fn(ExprId) -> Option<u32>, s: StmtId) -> Option<u32> {
+            match &ast.stmt(s).kind {
+                StmtKind::Expr(e) => {
+                    let ExprKind::Call { callee, args, .. } = &ast.expr(*e).kind else { return None };
+                    let ExprKind::Member { obj, name, optional: false, .. } = &ast.expr(*callee).kind else { return None };
+                    if g.sym(*name) != "push" || args.len() != 1 {
+                        return None;
+                    }
+                    local(*obj)
+                }
+                StmtKind::If(_, t, Some(e)) => {
+                    let a = always_pushes(g, ast, local, *t)?;
+                    (always_pushes(g, ast, local, *e)? == a).then_some(a)
+                }
+                StmtKind::Block(xs) => xs.iter().find_map(|&x| always_pushes(g, ast, local, x)),
+                _ => None,
             }
-            local(*obj)
-        }).collect();
+        }
+        let pushed: Vec<u32> = ss.iter().filter_map(|&x| always_pushes(self, ast, &local, x)).collect();
         let mut push_counts: FxMap<u32, usize> = FxMap::default();
         for &e in &all {
             if let ExprKind::Call { callee, .. } = &ast.expr(e).kind
