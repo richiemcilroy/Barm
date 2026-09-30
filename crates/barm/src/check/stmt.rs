@@ -70,6 +70,8 @@ impl<'a> Checker<'a> {
                 }
             }
             StmtKind::Block(stmts) => {
+                let fx = if self.always_jumps(s) { Effects::default() } else { effects_of_stmts(ast, stmts) };
+                let entry = self.fcx().locals.len();
                 self.push_scope();
                 let mut reported_unreachable = false;
                 for (i, &st) in stmts.iter().enumerate() {
@@ -80,32 +82,65 @@ impl<'a> Checker<'a> {
                     }
                     self.stmt(st);
                 }
+                let ends = self.end_types(&fx.assigned, entry);
                 self.pop_scope();
+                self.apply_effects(&fx, entry, &ends);
             }
             StmtKind::If(c, then, els) => {
                 self.cond(*c);
                 let pos = self.narrowings(*c, true);
                 let neg = self.narrowings(*c, false);
+                let then_jumps = self.always_jumps(*then);
+                let else_jumps = els.map(|e| self.always_jumps(e)).unwrap_or(false);
+                // Effects of the branches that fall through reach the code after the `if`.
+                let mut fx = Effects::default();
+                if !then_jumps {
+                    fx.extend(effects_of_stmt(ast, *then));
+                }
+                if let Some(e) = els
+                    && !else_jumps
+                {
+                    fx.extend(effects_of_stmt(ast, *e));
+                }
+                let entry = self.fcx().locals.len();
+                let mut branch_ends: Vec<Vec<(LocalId, TyId)>> = Vec::new();
                 self.push_scope();
                 self.apply(&pos);
                 self.stmt(*then);
-                self.pop_scope();
-                if let Some(e) = els {
-                    self.push_scope();
-                    self.apply(&neg);
-                    self.stmt(*e);
-                    self.pop_scope();
+                if !then_jumps {
+                    branch_ends.push(self.end_types(&fx.assigned, entry));
                 }
+                self.pop_scope();
+                self.push_scope();
+                self.apply(&neg);
+                if let Some(e) = els {
+                    self.stmt(*e);
+                }
+                if !else_jumps {
+                    branch_ends.push(self.end_types(&fx.assigned, entry));
+                }
+                self.pop_scope();
                 // Early exits narrow the rest of the enclosing block.
-                let then_jumps = self.always_jumps(*then);
-                let else_jumps = els.map(|e| self.always_jumps(e)).unwrap_or(false);
                 if then_jumps && !else_jumps {
                     self.apply(&neg);
                 } else if else_jumps && !then_jumps {
                     self.apply(&pos);
                 }
+                // Join: a local assigned in a branch has the union of its types at the branch ends.
+                let mut joined: Vec<(LocalId, TyId)> = Vec::new();
+                for ends in &branch_ends {
+                    for &(id, t) in ends {
+                        match joined.iter_mut().find(|(j, _)| *j == id) {
+                            Some(entry) => entry.1 = self.types.union(&[entry.1, t]),
+                            None => joined.push((id, t)),
+                        }
+                    }
+                }
+                self.apply_effects(&fx, entry, &joined);
             }
             StmtKind::While(c, body) => {
+                let fx = effects_of_stmt(ast, *body).with(effects_of_expr(ast, *c));
+                let entry = self.fcx().locals.len();
                 self.push_scope();
                 self.reset_assigned(*body);
                 self.cond(*c);
@@ -113,15 +148,24 @@ impl<'a> Checker<'a> {
                 self.apply(&pos);
                 self.loop_body(*body);
                 self.pop_scope();
+                self.apply_effects(&fx, entry, &[]);
             }
             StmtKind::DoWhile(body, c) => {
+                let fx = effects_of_stmt(ast, *body).with(effects_of_expr(ast, *c));
+                let entry = self.fcx().locals.len();
                 self.push_scope();
                 self.reset_assigned(*body);
                 self.loop_body(*body);
                 self.cond(*c);
                 self.pop_scope();
+                self.apply_effects(&fx, entry, &[]);
             }
             StmtKind::For { init, cond, step, body } => {
+                let mut fx = effects_of_stmt(ast, *body);
+                for e in [cond, step].into_iter().flatten() {
+                    fx.extend(effects_of_expr(ast, *e));
+                }
+                let entry = self.fcx().locals.len();
                 self.push_scope();
                 if let Some(i) = init {
                     self.stmt(*i);
@@ -140,6 +184,7 @@ impl<'a> Checker<'a> {
                     self.expr(*st, None);
                 }
                 self.pop_scope();
+                self.apply_effects(&fx, entry, &[]);
             }
             StmtKind::ForOf { mutable, name, name_span, iter, body } => {
                 let t = self.expr(*iter, None);
@@ -170,6 +215,8 @@ impl<'a> Checker<'a> {
                         ERROR
                     }
                 };
+                let fx = effects_of_stmt(ast, *body);
+                let entry = self.fcx().locals.len();
                 self.push_scope();
                 let kind = if *mutable { LocalKind::Let } else { LocalKind::LoopVar };
                 self.rec_binding(s, elem);
@@ -177,8 +224,17 @@ impl<'a> Checker<'a> {
                 self.reset_assigned(*body);
                 self.loop_body(*body);
                 self.pop_scope();
+                self.apply_effects(&fx, entry, &[]);
             }
-            StmtKind::Switch(disc, cases) => self.switch(s, *disc, cases, span),
+            StmtKind::Switch(disc, cases) => {
+                let mut fx = Effects::default();
+                for c in cases {
+                    fx.extend(effects_of_stmts(ast, &c.body));
+                }
+                let entry = self.fcx().locals.len();
+                self.switch(s, *disc, cases, span);
+                self.apply_effects(&fx, entry, &[]);
+            }
             StmtKind::Return(v) => {
                 let frame_idx = self.fcx.last().unwrap().frames.len() - 1;
                 let (ret, fname) = {
@@ -215,6 +271,65 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            StmtKind::Throw(x) => {
+                let t = self.expr(*x, None);
+                let err = self.error_class();
+                if t != ERROR && err != ERROR && !self.assignable(t, err) {
+                    let shown = self.show(t);
+                    let xs = self.ast().expr(*x).span;
+                    let text = self.src(xs).to_string();
+                    let repl = if self.types.is_string(t) { format!("new Error({text})") } else { format!("new Error(String({text}))") };
+                    self.report(
+                        Diagnostic::new("T0834", xs, format!("can only throw `Error` objects, found `{shown}`"))
+                            .fix(Applicability::Maybe, format!("throw an Error: `{repl}`"), xs, repl.clone()),
+                    );
+                } else if t != ERROR {
+                    let t = self.types.without_undefined(t);
+                    self.on_throw(t, span, None, None);
+                }
+            }
+            StmtKind::Try { body, catch, finally } => {
+                let mut fx = effects_of_stmt(ast, *body);
+                if let Some(c) = catch {
+                    fx.extend(effects_of_stmt(ast, c.body));
+                }
+                if let Some(f) = finally {
+                    fx.extend(effects_of_stmt(ast, *f));
+                }
+                let entry = self.fcx().locals.len();
+                if catch.is_some() {
+                    self.cur_frame().try_frames.push(Vec::new());
+                }
+                self.stmt(*body);
+                if let Some(c) = catch {
+                    let caught = self.cur_frame().try_frames.pop().unwrap_or_default();
+                    let ety = self.catch_type(&caught);
+                    self.push_scope();
+                    if let Some((name, nspan, te)) = &c.param {
+                        let ety = match te {
+                            Some(te) => {
+                                let tscope = self.tscope();
+                                let declared = self.resolve_type(*te, &tscope);
+                                if declared != UNKNOWN && !self.assignable(ety, declared) {
+                                    let (a, b) = (self.show(ety), self.show(declared));
+                                    self.report(Diagnostic::new("T0001", *nspan, format!("this `catch` receives `{a}`, which isn't `{b}`")));
+                                }
+                                declared
+                            }
+                            None => ety,
+                        };
+                        self.rec_binding(s, ety);
+                        self.declare(*name, ety, LocalKind::Const, *nspan, None, false);
+                    }
+                    self.stmt(c.body);
+                    self.pop_scope();
+                }
+                if let Some(f) = finally {
+                    self.stmt(*f);
+                }
+                // Any part of the `try` may have run: forget what it changed.
+                self.apply_effects(&fx, entry, &[]);
+            }
             StmtKind::Break => {
                 let f = self.fcx.last().unwrap().frames.last().unwrap();
                 if f.loops == 0 && f.switches == 0 {
@@ -228,6 +343,80 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+    }
+
+    /// Current types of the outer locals (declared before `entry`) named in `assigned`.
+    pub(super) fn end_types(&self, assigned: &[Sym], entry: usize) -> Vec<(LocalId, TyId)> {
+        let mut out = Vec::new();
+        for &n in assigned {
+            if let Some((id, t)) = self.lookup(n)
+                && id < entry
+                && !out.iter().any(|(x, _)| *x == id)
+            {
+                out.push((id, t));
+            }
+        }
+        out
+    }
+
+    /// After a construct with its own scope: what it did to outer locals reaches the enclosing
+    /// scope. Assigned locals get their type from `ends` (or their declared type), changed values
+    /// forget their field-path narrowings, and a call forgets narrowings through class instances.
+    pub(super) fn apply_effects(&mut self, fx: &Effects, entry: usize, ends: &[(LocalId, TyId)]) {
+        for &n in &fx.assigned {
+            if let Some((id, _)) = self.lookup(n)
+                && id < entry
+            {
+                let t = ends.iter().find(|(x, _)| *x == id).map(|(_, t)| *t).unwrap_or(self.local(id).ty);
+                self.narrow(id, t);
+                self.narrow_path(id, Vec::new(), None);
+            }
+        }
+        for &n in &fx.roots {
+            if let Some((id, _)) = self.lookup(n)
+                && id < entry
+            {
+                self.narrow_path(id, Vec::new(), None);
+            }
+        }
+        if fx.call {
+            self.invalidate_heap();
+        }
+    }
+
+    /// Forgets every narrowing of a path through a class instance.
+    pub(super) fn invalidate_heap(&mut self) {
+        let paths = std::mem::take(&mut self.fcx().heap_paths);
+        for (l, p) in paths {
+            self.narrow_path(l, p, None);
+        }
+    }
+
+    /// The type of a `catch` variable: the most specific class covering everything the `try`
+    /// block can throw (`Error` if nothing, or unrelated classes).
+    fn catch_type(&mut self, caught: &[TyId]) -> TyId {
+        let err = self.error_class();
+        let mut classes: Vec<TyId> = Vec::new();
+        for &t in caught {
+            for m in self.flat_members(t) {
+                if !classes.contains(&m) {
+                    classes.push(m);
+                }
+            }
+        }
+        let Some(&first) = classes.first() else { return err };
+        let mut cur = Some(first);
+        while let Some(c) = cur {
+            if classes.iter().all(|&o| self.assignable(o, c)) {
+                return c;
+            }
+            cur = self.class_of(c).and_then(|(d, args)| {
+                let base = self.classes[d as usize].base?;
+                let map: HashMap<u32, TyId> = self.classes[d as usize].params.iter().copied().zip(args).collect();
+                Some(self.types.subst(base, &map))
+            });
+        }
+        err
     }
 
     fn loop_body(&mut self, body: StmtId) {
@@ -436,7 +625,7 @@ impl<'a> Checker<'a> {
     /// Control never reaches the statement after `s`.
     pub(super) fn always_jumps(&self, s: StmtId) -> bool {
         match &self.ast().stmt(s).kind {
-            StmtKind::Return(_) | StmtKind::Break | StmtKind::Continue => true,
+            StmtKind::Return(_) | StmtKind::Break | StmtKind::Continue | StmtKind::Throw(_) => true,
             StmtKind::Block(ss) => ss.iter().any(|&x| self.always_jumps(x)),
             StmtKind::If(_, t, Some(e)) => self.always_jumps(*t) && self.always_jumps(*e),
             _ => self.always_returns(s),
@@ -488,6 +677,12 @@ impl<'a> Checker<'a> {
             StmtKind::For { cond: None, body, .. } => !has_break(ast, *body),
             StmtKind::For { cond: Some(c), body, .. } => self.is_true(*c) && !has_break(ast, *body),
             StmtKind::DoWhile(body, _) => self.always_returns(*body),
+            // `throw` never falls through (for "missing return" it ends the function).
+            StmtKind::Throw(_) => true,
+            StmtKind::Try { body, catch, finally } => {
+                finally.map(|f| self.always_returns(f)).unwrap_or(false)
+                    || (self.always_returns(*body) && catch.as_ref().map(|c| self.always_returns(c.body)).unwrap_or(true))
+            }
             _ => false,
         }
     }
@@ -592,6 +787,233 @@ fn collect_assigned_expr(ast: &Ast, e: ExprId, out: &mut Vec<Sym>) {
             ArrowBody::Expr(x) => collect_assigned_expr(ast, *x, out),
             ArrowBody::Block(b) => collect_assigned_stmt(ast, *b, out),
         },
+        _ => {}
+    }
+}
+
+/// What a construct may do to the locals around it.
+#[derive(Default)]
+pub(super) struct Effects {
+    /// Locals assigned (`x = ...`, `x++`).
+    pub assigned: Vec<Sym>,
+    /// Locals changed in place (`x.f = ...`, `x[i] = ...`, `&x`, method calls on `x...`).
+    pub roots: Vec<Sym>,
+    /// Contains a call (which may change class instances).
+    pub call: bool,
+}
+
+impl Effects {
+    pub(super) fn extend(&mut self, o: Effects) {
+        self.assigned.extend(o.assigned);
+        self.roots.extend(o.roots);
+        self.call |= o.call;
+    }
+
+    pub(super) fn with(mut self, o: Effects) -> Effects {
+        self.extend(o);
+        self
+    }
+}
+
+pub(super) fn effects_of_stmts(ast: &Ast, ss: &[StmtId]) -> Effects {
+    let mut fx = Effects::default();
+    for &s in ss {
+        fx.extend(effects_of_stmt(ast, s));
+    }
+    fx
+}
+
+pub(super) fn effects_of_stmt(ast: &Ast, s: StmtId) -> Effects {
+    let mut fx = Effects::default();
+    let mut exprs = Vec::new();
+    stmt_exprs(ast, s, &mut exprs);
+    for e in exprs {
+        effects_into(ast, e, &mut fx);
+    }
+    fx
+}
+
+pub(super) fn effects_of_expr(ast: &Ast, e: ExprId) -> Effects {
+    let mut fx = Effects::default();
+    effects_into(ast, e, &mut fx);
+    fx
+}
+
+fn root_sym(ast: &Ast, mut e: ExprId) -> Option<Sym> {
+    loop {
+        match &ast.expr(e).kind {
+            ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Member { obj: x, .. } | ExprKind::Index { obj: x, .. } => e = *x,
+            ExprKind::Ident(s) => return Some(*s),
+            ExprKind::This => return Some(super::THIS_SYM),
+            _ => return None,
+        }
+    }
+}
+
+/// Effects of evaluating `e` (arrow bodies don't run when the arrow is created).
+fn effects_into(ast: &Ast, e: ExprId, fx: &mut Effects) {
+    match &ast.expr(e).kind {
+        ExprKind::Assign(_, t, v) => {
+            match &ast.expr(*t).kind {
+                ExprKind::Ident(s) => fx.assigned.push(*s),
+                _ => fx.roots.extend(root_sym(ast, *t)),
+            }
+            effects_into(ast, *t, fx);
+            effects_into(ast, *v, fx);
+        }
+        ExprKind::Update { target, .. } => {
+            match &ast.expr(*target).kind {
+                ExprKind::Ident(s) => fx.assigned.push(*s),
+                _ => fx.roots.extend(root_sym(ast, *target)),
+            }
+            effects_into(ast, *target, fx);
+        }
+        ExprKind::Call { callee, args, .. } => {
+            fx.call = true;
+            if let ExprKind::Member { obj, .. } = &ast.expr(*callee).kind {
+                fx.roots.extend(root_sym(ast, *obj));
+            }
+            effects_into(ast, *callee, fx);
+            for a in args {
+                if a.by_ref.is_some() {
+                    match &ast.expr(a.expr).kind {
+                        ExprKind::Ident(s) => fx.assigned.push(*s),
+                        _ => fx.roots.extend(root_sym(ast, a.expr)),
+                    }
+                }
+                effects_into(ast, a.expr, fx);
+            }
+        }
+        ExprKind::New { args, .. } => {
+            fx.call = true;
+            for a in args {
+                effects_into(ast, a.expr, fx);
+            }
+        }
+        // A getter is a call; any member access through a class may run one.
+        ExprKind::Member { obj, .. } => {
+            fx.call = true;
+            effects_into(ast, *obj, fx);
+        }
+        ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::As(x, _) => effects_into(ast, *x, fx),
+        ExprKind::Binary(_, l, r) => {
+            effects_into(ast, *l, fx);
+            effects_into(ast, *r, fx);
+        }
+        ExprKind::Index { obj, index, .. } => {
+            effects_into(ast, *obj, fx);
+            effects_into(ast, *index, fx);
+        }
+        ExprKind::Cond(a, b, c) => {
+            for x in [a, b, c] {
+                effects_into(ast, *x, fx);
+            }
+        }
+        ExprKind::Array(xs) | ExprKind::Template(_, xs) => xs.iter().for_each(|&x| effects_into(ast, x, fx)),
+        ExprKind::Object(fs) => fs.iter().for_each(|f| effects_into(ast, f.value, fx)),
+        _ => {}
+    }
+}
+
+/// The expressions a statement evaluates directly or in nested statements (not inside arrows).
+fn stmt_exprs(ast: &Ast, s: StmtId, out: &mut Vec<ExprId>) {
+    match &ast.stmt(s).kind {
+        StmtKind::Expr(e) | StmtKind::Return(Some(e)) => out.push(*e),
+        StmtKind::Let { init: Some(e), .. } => out.push(*e),
+        StmtKind::If(c, t, e) => {
+            out.push(*c);
+            stmt_exprs(ast, *t, out);
+            if let Some(e) = e {
+                stmt_exprs(ast, *e, out);
+            }
+        }
+        StmtKind::While(c, b) | StmtKind::DoWhile(b, c) => {
+            out.push(*c);
+            stmt_exprs(ast, *b, out);
+        }
+        StmtKind::For { init, cond, step, body } => {
+            if let Some(i) = init {
+                stmt_exprs(ast, *i, out);
+            }
+            out.extend([cond, step].into_iter().flatten().copied());
+            stmt_exprs(ast, *body, out);
+        }
+        StmtKind::ForOf { iter, body, .. } => {
+            out.push(*iter);
+            stmt_exprs(ast, *body, out);
+        }
+        StmtKind::Switch(d, cases) => {
+            out.push(*d);
+            for c in cases {
+                out.extend(c.test);
+                for &x in &c.body {
+                    stmt_exprs(ast, x, out);
+                }
+            }
+        }
+        StmtKind::Block(ss) => ss.iter().for_each(|&x| stmt_exprs(ast, x, out)),
+        _ => {}
+    }
+}
+
+/// Locals assigned or changed inside closures anywhere in a function body.
+pub(super) fn closure_mutated_stmt(ast: &Ast, s: StmtId) -> HashSet<Sym> {
+    let mut exprs = Vec::new();
+    stmt_exprs(ast, s, &mut exprs);
+    let mut out = HashSet::default();
+    for e in exprs {
+        closure_mutated_into(ast, e, false, &mut out);
+    }
+    out
+}
+
+pub(super) fn closure_mutated_expr(ast: &Ast, e: ExprId) -> HashSet<Sym> {
+    let mut out = HashSet::default();
+    closure_mutated_into(ast, e, false, &mut out);
+    out
+}
+
+fn closure_mutated_into(ast: &Ast, e: ExprId, inside: bool, out: &mut HashSet<Sym>) {
+    let mut kids: Vec<ExprId> = Vec::new();
+    match &ast.expr(e).kind {
+        ExprKind::Arrow(f) => {
+            let mut exprs = Vec::new();
+            match &f.body {
+                ArrowBody::Expr(x) => exprs.push(*x),
+                ArrowBody::Block(b) => stmt_exprs(ast, *b, &mut exprs),
+            }
+            for x in exprs {
+                closure_mutated_into(ast, x, true, out);
+            }
+            return;
+        }
+        _ if inside => {
+            let fx = effects_of_expr(ast, e);
+            out.extend(fx.assigned);
+            out.extend(fx.roots);
+        }
+        _ => {}
+    }
+    collect_children(ast, e, &mut kids);
+    for k in kids {
+        closure_mutated_into(ast, k, inside, out);
+    }
+}
+
+fn collect_children(ast: &Ast, e: ExprId, out: &mut Vec<ExprId>) {
+    match &ast.expr(e).kind {
+        ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::As(x, _) => out.push(*x),
+        ExprKind::Binary(_, l, r) | ExprKind::Assign(_, l, r) => out.extend([*l, *r]),
+        ExprKind::Update { target, .. } => out.push(*target),
+        ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args, .. } => {
+            out.push(*callee);
+            out.extend(args.iter().map(|a| a.expr));
+        }
+        ExprKind::Member { obj, .. } => out.push(*obj),
+        ExprKind::Index { obj, index, .. } => out.extend([*obj, *index]),
+        ExprKind::Cond(a, b, c) => out.extend([*a, *b, *c]),
+        ExprKind::Array(xs) | ExprKind::Template(_, xs) => out.extend(xs.iter().copied()),
+        ExprKind::Object(fs) => out.extend(fs.iter().map(|f| f.value)),
         _ => {}
     }
 }
