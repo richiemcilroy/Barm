@@ -4938,290 +4938,6 @@ bm_str bm_native_urlPart(bm_str href, bm_int k) {
 #include <sys/uio.h>
 #include <sys/un.h>
 
-/* ---- inflate (RFC 1951) with gzip (RFC 1952) and zlib (RFC 1950) wrappers */
-
-#define BM_ZFAST 10
-typedef struct {
-    uint16_t fast[1 << BM_ZFAST];   /* (length << 9) | symbol for codes of <= BM_ZFAST bits */
-    uint16_t firstcode[16];
-    int32_t maxcode[17];
-    uint16_t firstsym[16];
-    uint8_t size[288];
-    uint16_t value[288];
-} bm_zhuff;
-
-typedef struct {
-    const uint8_t *p, *end;
-    uint64_t bits;
-    int nbits;
-    int pad;             /* zero bytes fed past the end (reading them means the input was cut short) */
-    bm_sb *out;
-    bm_zhuff len, dist;
-} bm_z;
-
-static int bm_zrev(int v, int bits) {
-    v = ((v & 0xAAAA) >> 1) | ((v & 0x5555) << 1);
-    v = ((v & 0xCCCC) >> 2) | ((v & 0x3333) << 2);
-    v = ((v & 0xF0F0) >> 4) | ((v & 0x0F0F) << 4);
-    v = ((v & 0xFF00) >> 8) | ((v & 0x00FF) << 8);
-    return v >> (16 - bits);
-}
-
-static bool bm_zbuild(bm_zhuff *z, const uint8_t *sizes_of, int num) {
-    int sizes[17] = {0}, next[16];
-    memset(z->fast, 0, sizeof z->fast);
-    for (int i = 0; i < num; i++) sizes[sizes_of[i]]++;
-    sizes[0] = 0;
-    for (int i = 1; i < 16; i++) if (sizes[i] > (1 << i)) return false;
-    int code = 0, k = 0;
-    for (int i = 1; i < 16; i++) {
-        next[i] = code;
-        z->firstcode[i] = (uint16_t)code;
-        z->firstsym[i] = (uint16_t)k;
-        code += sizes[i];
-        if (sizes[i] && code - 1 >= (1 << i)) return false;
-        z->maxcode[i] = code << (16 - i);
-        code <<= 1;
-        k += sizes[i];
-    }
-    z->maxcode[16] = 0x10000;
-    for (int i = 0; i < num; i++) {
-        int s = sizes_of[i];
-        if (!s) continue;
-        int c = next[s] - z->firstcode[s] + z->firstsym[s];
-        z->size[c] = (uint8_t)s;
-        z->value[c] = (uint16_t)i;
-        if (s <= BM_ZFAST) {
-            uint16_t f = (uint16_t)((s << 9) | i);
-            for (int j = bm_zrev(next[s], s); j < (1 << BM_ZFAST); j += 1 << s) z->fast[j] = f;
-        }
-        next[s]++;
-    }
-    return true;
-}
-
-/* At least 56 bits in the buffer afterwards (zeros past the end, counted in `pad`). */
-static inline void bm_zrefill(bm_z *z) {
-    if (z->end - z->p >= 8) {
-        uint64_t v;
-        memcpy(&v, z->p, 8);
-#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-        v = __builtin_bswap64(v);
-#endif
-        z->bits |= v << z->nbits;
-        z->p += (63 - z->nbits) >> 3;
-        z->nbits |= 56;
-        return;
-    }
-    while (z->nbits <= 56) {
-        if (z->p < z->end) z->bits |= (uint64_t)*z->p++ << z->nbits;
-        else z->pad++;
-        z->nbits += 8;
-    }
-}
-
-static inline uint32_t bm_zbits(bm_z *z, int n) {
-    uint32_t v = (uint32_t)(z->bits & ((1ull << n) - 1));
-    z->bits >>= n;
-    z->nbits -= n;
-    return v;
-}
-
-static inline int bm_zdecode(bm_z *z, const bm_zhuff *h) {
-    int f = h->fast[z->bits & ((1 << BM_ZFAST) - 1)];
-    if (f) {
-        int s = f >> 9;
-        z->bits >>= s;
-        z->nbits -= s;
-        return f & 511;
-    }
-    int k = bm_zrev((int)(z->bits & 0xffff), 16), s;
-    for (s = BM_ZFAST + 1; s < 16; s++) if (k < h->maxcode[s]) break;
-    if (s >= 16) return -1;
-    int b = (k >> (16 - s)) - h->firstcode[s] + h->firstsym[s];
-    if (b >= 288 || h->size[b] != s) return -1;
-    z->bits >>= s;
-    z->nbits -= s;
-    return h->value[b];
-}
-
-static const uint16_t bm_zlen_base[29] = {3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258};
-static const uint8_t bm_zlen_extra[29] = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0};
-static const uint16_t bm_zdist_base[30] = {1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577};
-static const uint8_t bm_zdist_extra[30] = {0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13};
-
-static bool bm_zblock(bm_z *z) {
-    bm_sb *o = z->out;
-    for (;;) {
-        bm_zrefill(z);
-        int sym = bm_zdecode(z, &z->len);
-        if (sym < 256) {
-            if (sym < 0) return false;
-            if (__builtin_expect(o->len == o->cap, 0)) bm_sb_grow(o, o->len + 1);
-            o->data[o->len++] = (char)sym;
-            continue;
-        }
-        if (sym == 256) return true;
-        sym -= 257;
-        if (sym >= 29) return false;
-        size_t len = bm_zlen_base[sym] + bm_zbits(z, bm_zlen_extra[sym]);
-        int ds = bm_zdecode(z, &z->dist);
-        if (ds < 0 || ds >= 30) return false;
-        size_t dist = bm_zdist_base[ds] + bm_zbits(z, bm_zdist_extra[ds]);
-        if (dist > o->len) return false;
-        if (o->cap - o->len < len) bm_sb_grow(o, o->len + len);
-        char *d = o->data + o->len, *s = d - dist;
-        if (dist >= len) memcpy(d, s, len);
-        else if (dist == 1) memset(d, *s, len);
-        else for (size_t i = 0; i < len; i++) d[i] = s[i];
-        o->len += len;
-    }
-}
-
-static bool bm_zdynamic(bm_z *z) {
-    static const uint8_t order[19] = {16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15};
-    bm_zrefill(z);
-    int hlit = (int)bm_zbits(z, 5) + 257, hdist = (int)bm_zbits(z, 5) + 1, hclen = (int)bm_zbits(z, 4) + 4;
-    uint8_t cl[19] = {0}, lens[286 + 32];
-    for (int i = 0; i < hclen; i++) {
-        bm_zrefill(z);
-        cl[order[i]] = (uint8_t)bm_zbits(z, 3);
-    }
-    bm_zhuff h;
-    if (!bm_zbuild(&h, cl, 19)) return false;
-    int n = 0;
-    while (n < hlit + hdist) {
-        bm_zrefill(z);
-        int c = bm_zdecode(z, &h);
-        if (c < 0 || c >= 19) return false;
-        if (c < 16) { lens[n++] = (uint8_t)c; continue; }
-        int rep, v = 0;
-        if (c == 16) {
-            if (n == 0) return false;
-            rep = 3 + (int)bm_zbits(z, 2);
-            v = lens[n - 1];
-        } else if (c == 17) {
-            rep = 3 + (int)bm_zbits(z, 3);
-        } else {
-            rep = 11 + (int)bm_zbits(z, 7);
-        }
-        if (n + rep > hlit + hdist) return false;
-        memset(lens + n, v, (size_t)rep);
-        n += rep;
-    }
-    return bm_zbuild(&z->len, lens, hlit) && bm_zbuild(&z->dist, lens + hlit, hdist);
-}
-
-/* Inflates a raw deflate stream starting at p, appending to out; *used = bytes consumed. */
-static bool bm_inflate(const uint8_t *p, size_t n, bm_sb *out, size_t *used) {
-    bm_z z;
-    memset(&z, 0, sizeof z);
-    z.p = p;
-    z.end = p + n;
-    z.out = out;
-    static bm_zhuff fixed_len, fixed_dist;
-    static bool fixed_ready;
-    int final;
-    do {
-        bm_zrefill(&z);
-        final = (int)bm_zbits(&z, 1);
-        int type = (int)bm_zbits(&z, 2);
-        if (type == 0) {
-            bm_zbits(&z, z.nbits & 7);
-            /* give back the whole bytes still in the bit buffer, then copy the block */
-            int back = z.nbits / 8 - z.pad;
-            if (back < 0) return false;
-            z.p -= back;
-            z.bits = 0;
-            z.nbits = 0;
-            z.pad = 0;
-            if (z.end - z.p < 4) return false;
-            size_t len = (size_t)z.p[0] | (size_t)z.p[1] << 8, nlen = (size_t)z.p[2] | (size_t)z.p[3] << 8;
-            if ((len ^ 0xffff) != nlen || (size_t)(z.end - z.p - 4) < len) return false;
-            bm_sb_push(out, (const char *)z.p + 4, len);
-            z.p += 4 + len;
-        } else if (type == 1) {
-            if (!fixed_ready) {
-                uint8_t l[288], d[30];
-                for (int i = 0; i < 288; i++) l[i] = (uint8_t)(i < 144 ? 8 : i < 256 ? 9 : i < 280 ? 7 : 8);
-                for (int i = 0; i < 30; i++) d[i] = 5;
-                bm_zbuild(&fixed_len, l, 288);
-                bm_zbuild(&fixed_dist, d, 30);
-                fixed_ready = true;
-            }
-            z.len = fixed_len;
-            z.dist = fixed_dist;
-            if (!bm_zblock(&z)) return false;
-        } else if (type == 2) {
-            if (!bm_zdynamic(&z) || !bm_zblock(&z)) return false;
-        } else {
-            return false;
-        }
-        if (z.pad > z.nbits / 8) return false; /* read past the end: cut short */
-    } while (!final);
-    *used = (size_t)(z.p - p) - (size_t)(z.nbits / 8 - z.pad);
-    return true;
-}
-
-static uint32_t bm_crc32(uint32_t crc, const uint8_t *p, size_t n) {
-    static uint32_t table[256];
-    if (!table[1]) {
-        for (uint32_t i = 0; i < 256; i++) {
-            uint32_t c = i;
-            for (int k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
-            table[i] = c;
-        }
-    }
-    crc = ~crc;
-    while (n--) crc = table[(crc ^ *p++) & 0xff] ^ (crc >> 8);
-    return ~crc;
-}
-
-/* A gzip body (every member), else false. */
-static bool bm_gunzip(const uint8_t *p, size_t n, bm_sb *out) {
-    bool any = false;
-    while (n >= 18 && p[0] == 0x1f && p[1] == 0x8b) {
-        if (p[2] != 8) return false;
-        int flags = p[3];
-        size_t i = 10;
-        if (flags & 4) { if (n < i + 2) return false; i += 2 + ((size_t)p[i] | (size_t)p[i + 1] << 8); }
-        if (flags & 8) { while (i < n && p[i]) i++; i++; }
-        if (flags & 16) { while (i < n && p[i]) i++; i++; }
-        if (flags & 2) i += 2;
-        if (i >= n) return false;
-        size_t start = out->len, used;
-        if (!bm_inflate(p + i, n - i, out, &used)) return false;
-        i += used;
-        if (n - i < 8) return false;
-        uint32_t crc = (uint32_t)p[i] | (uint32_t)p[i + 1] << 8 | (uint32_t)p[i + 2] << 16 | (uint32_t)p[i + 3] << 24;
-        uint32_t size = (uint32_t)p[i + 4] | (uint32_t)p[i + 5] << 8 | (uint32_t)p[i + 6] << 16 | (uint32_t)p[i + 7] << 24;
-        if (bm_crc32(0, (const uint8_t *)out->data + start, out->len - start) != crc || (uint32_t)(out->len - start) != size) return false;
-        p += i + 8;
-        n -= i + 8;
-        any = true;
-    }
-    return any;
-}
-
-/* "deflate" is zlib-wrapped in the standard, but some servers send it raw: accept both. */
-static bool bm_zlib_or_raw(const uint8_t *p, size_t n, bm_sb *out) {
-    size_t used;
-    if (n >= 2 && (p[0] & 0x0f) == 8 && (p[0] >> 4) <= 7 && ((p[0] << 8) | p[1]) % 31 == 0 && !(p[1] & 0x20)) {
-        if (!bm_inflate(p + 2, n - 2, out, &used) || n - 2 - used < 4) return false;
-        const uint8_t *a = p + 2 + used;
-        uint32_t want = (uint32_t)a[0] << 24 | (uint32_t)a[1] << 16 | (uint32_t)a[2] << 8 | a[3];
-        uint32_t s1 = 1, s2 = 0;
-        for (size_t i = 0; i < out->len;) {
-            size_t block = out->len - i < 5552 ? out->len - i : 5552;
-            for (size_t e = i + block; i < e; i++) { s1 += (uint8_t)out->data[i]; s2 += s1; }
-            s1 %= 65521;
-            s2 %= 65521;
-        }
-        return ((s2 << 16) | s1) == want;
-    }
-    return bm_inflate(p, n, out, &used);
-}
-
 /* ---- DNS: getaddrinfo on a few lazily started threads (64 KiB stacks), results cached */
 
 #define BM_DNS_MAX_ADDRS 8
@@ -5404,8 +5120,7 @@ enum { BM_FETCH_DECOMPRESS = 1, BM_FETCH_INSECURE = 2 };
 
 /* Set by bm_tls_install() in programs linked with TLS (runtime/tls.c, runtime/codecs.c). */
 const bm_tls_ops *bm_tls_impl;
-bool (*bm_decode_brotli)(const uint8_t *p, size_t n, bm_sb *out);
-bool (*bm_decode_zstd)(const uint8_t *p, size_t n, bm_sb *out);
+const bm_codec_ops *bm_codec;
 
 typedef struct bm_fr {
     bm_int id;
@@ -5443,6 +5158,16 @@ typedef struct bm_fr {
     int state, status;
     bool keep, discard, head_only, got_any;
     int enc;                   /* 1 gzip, 2 deflate, 3 br, 4 zstd */
+    /* An encoded body (unless decompress: false) arrives in raw and is decoded onto rbody as it
+     * does; a reader that's behind leaves some in raw (from raw_off), undecoded. */
+    bm_decoder *dec;
+    bm_sb raw;
+    size_t raw_off;
+    /* Until the body is read whole (text() and the like), at most BM_STREAM_HIGH of it is
+     * decoded ahead of the reader: a small body that decodes to a huge one is decoded as it's
+     * read. A body that has all arrived but isn't all decoded is draining (the request settles
+     * when it's done). */
+    bool whole, draining;
     int64_t remaining;
     /* The body is checked as UTF-8 while it arrives (still in cache): text() then needn't read
      * it again. A second pass over a big body right after it arrived also slows the next
@@ -5584,11 +5309,21 @@ static void bm_fr_head_ready(bm_fr *r) {
 /* A body streamed as it arrives: at most this much waits for the reader before the socket pauses. */
 #define BM_STREAM_HIGH (4 << 20)
 
-/* Body bytes arrived: a waiting reader gets them (encoded bodies are decoded at the end). */
+/* An encoded body that's decoded (not `decompress: false`). */
+static inline bool bm_fr_decoding(bm_fr *r) { return r->decompress && r->enc; }
+
+/* Where arriving body bytes go: an encoded body's are decoded from raw onto rbody. */
+static inline bm_sb *bm_fr_sink(bm_fr *r) { return bm_fr_decoding(r) ? &r->raw : &r->rbody; }
+
+static bool bm_fr_decode(bm_fr *r, bool final);
+
+/* Body bytes arrived: decode them, and a waiting reader gets them. True when the reader is far
+ * enough behind that the socket should pause. */
 static bool bm_fr_data(bm_fr *r) {
-    if (!r->streaming || (r->decompress && r->enc)) return false;
+    if (bm_fr_decoding(r) && !bm_fr_decode(r, false)) return false;
+    if (!r->streaming) return false;
     if (r->read_p && r->rbody.len) bm_fr_resolve(&r->read_p, (bm_int)r->rbody.len);
-    return r->rbody.len >= BM_STREAM_HIGH;
+    return r->rbody.len >= BM_STREAM_HIGH || r->raw_off < r->raw.len;
 }
 
 static void bm_fr_fail(bm_fr *r, const char *code, const char *fmt, ...) {
@@ -5774,8 +5509,7 @@ static bool bm_fr_prepare(bm_fr *r) {
     }
     /* what Bun asks for (brotli and zstd come with the TLS archive, which every fetch program links) */
     if (r->decompress && !bm_hdr_has(r->headers, "accept-encoding")) {
-        if (bm_decode_brotli) bm_sb_push(h, "Accept-Encoding: gzip, deflate, br, zstd\r\n", 42);
-        else bm_sb_push(h, "Accept-Encoding: gzip, deflate\r\n", 32);
+        if (bm_codec) bm_sb_push(h, "Accept-Encoding: gzip, deflate, br, zstd\r\n", 42);
     }
     if (r->via_proxy && !https && r->proxy_auth && !bm_hdr_has(r->headers, "proxy-authorization")) {
         bm_sb_push(h, "Proxy-Authorization: ", 21);
@@ -5963,19 +5697,51 @@ static bool bm_fr_head(bm_fr *r, const char *p, size_t n) {
     r->discard = r->redirect_mode != BM_FETCH_MANUAL && bm_redirect_status(s) && r->location.len > 0;
     if (!r->discard && length > 0 && r->state == BM_FR_FIXED) {
         if (length > INT32_MAX) return false;
-        bm_sb_grow(&r->rbody, (size_t)(length < (64 << 20) ? length : (64 << 20)));
+        bm_sb_grow(bm_fr_sink(r), (size_t)(length < (64 << 20) ? length : (64 << 20)));
     }
     return true;
 }
 
+/* (an encoded body that isn't decoded is checked when text() reads it) */
 static void bm_fr_check_utf8(bm_fr *r) {
-    if (!r->utf8_bad && !r->enc) r->utf8_bad = !bm_utf8_scan((const uint8_t *)r->rbody.data, r->rbody.len, &r->utf8_pos);
+    if (!r->utf8_bad && (!r->enc || bm_fr_decoding(r))) r->utf8_bad = !bm_utf8_scan((const uint8_t *)r->rbody.data, r->rbody.len, &r->utf8_pos);
+}
+
+/* Decodes what has arrived of an encoded body onto rbody: all of it at the end (final) or for a
+ * whole-body read, else as much as a reader may have waiting. False (the request failed) if it's
+ * corrupt, or at the end, cut short. */
+static bool bm_fr_decode(bm_fr *r, bool final) {
+    const char *why = r->enc == 3 ? "BrotliDecompressionError" : r->enc == 4 ? "ZstdDecompressionError" : "ZlibError"; /* Bun's codes */
+    if (!r->dec && !(bm_codec && (r->dec = bm_codec->open(r->enc)))) {
+        bm_fr_fail(r, why, "%s fetching \"%s\". %s", why, r->url.p->data, BM_FETCH_VERBOSE);
+        return false;
+    }
+    size_t limit = 0;
+    if (!final && !r->whole) {
+        if (r->rbody.len >= BM_STREAM_HIGH) return true;
+        limit = BM_STREAM_HIGH - r->rbody.len;
+    }
+    int st = bm_codec->step(r->dec, (const uint8_t *)r->raw.data, r->raw.len, &r->raw_off, &r->rbody, limit);
+    if (st < 0 || (final && st == 0) || r->rbody.len > INT32_MAX) {
+        /* corrupt, or (at the end) cut short */
+        bm_fr_fail(r, why, "%s fetching \"%s\". %s", why, r->url.p->data, BM_FETCH_VERBOSE);
+        return false;
+    }
+    if (r->raw_off == r->raw.len) {
+        r->raw.len = r->raw_off = 0;
+    } else if (r->raw_off >= (64 << 10)) {
+        memmove(r->raw.data, r->raw.data + r->raw_off, r->raw.len - r->raw_off);
+        r->raw.len -= r->raw_off;
+        r->raw_off = 0;
+    }
+    bm_fr_check_utf8(r);
+    return true;
 }
 
 static void bm_fr_take(bm_fr *r, const char *p, size_t n) {
-    if (r->discard) return;
-    bm_sb_push(&r->rbody, p, n);
-    bm_fr_check_utf8(r);
+    if (r->discard || r->result != 1) return;
+    bm_sb_push(bm_fr_sink(r), p, n);
+    if (!bm_fr_decoding(r)) bm_fr_check_utf8(r);
     bm_fr_data(r);
 }
 
@@ -6010,6 +5776,7 @@ static int bm_fr_parse(bm_fr *r, bm_fc *c) {
             if (n == 0) return 0;
             size_t take = (int64_t)n < r->remaining ? n : (size_t)r->remaining;
             bm_fr_take(r, p, take);
+            if (r->result != 1) return 0; /* the body couldn't be decoded */
             c->in_off += take;
             r->remaining -= (int64_t)take;
             if (r->remaining == 0) { r->state = BM_FR_DONE; return 1; }
@@ -6028,7 +5795,7 @@ static int bm_fr_parse(bm_fr *r, bm_fc *c) {
             if (!digits) return -1;
             c->in_off += (size_t)(nl + 1 - p);
             if (size == 0) { r->state = BM_FR_TRAILERS; continue; }
-            if (!r->discard && (int64_t)r->rbody.len + size > INT32_MAX) return -1;
+            if (!r->discard && (int64_t)bm_fr_sink(r)->len + size > INT32_MAX) return -1;
             r->remaining = size;
             r->state = BM_FR_CHUNK_DATA;
             continue;
@@ -6037,6 +5804,7 @@ static int bm_fr_parse(bm_fr *r, bm_fc *c) {
             if (n == 0) return 0;
             size_t take = (int64_t)n < r->remaining ? n : (size_t)r->remaining;
             bm_fr_take(r, p, take);
+            if (r->result != 1) return 0; /* the body couldn't be decoded */
             c->in_off += take;
             r->remaining -= (int64_t)take;
             if (r->remaining == 0) r->state = BM_FR_CHUNK_END;
@@ -6061,7 +5829,8 @@ static int bm_fr_parse(bm_fr *r, bm_fc *c) {
         }
         case BM_FR_UNTIL_CLOSE: {
             if (n) { bm_fr_take(r, p, n); c->in_off += n; }
-            if (!r->discard && r->rbody.len > INT32_MAX) return -1;
+            if (r->result != 1) return 0;
+            if (!r->discard && bm_fr_sink(r)->len > INT32_MAX) return -1;
             return 0;
         }
         default:
@@ -6234,6 +6003,7 @@ static void bm_fc_tunnel(bm_fc *c, bool readable, bool writable) {
     r->state = BM_FR_HEAD;
     r->got_any = true;
     int st = bm_fr_parse(r, c);
+    if (r->result != 1) return;
     if (st < 0) { bm_fr_fail(r, "Malformed_HTTP_Response", "Malformed_HTTP_Response fetching \"%s\". %s", r->url.p->data, BM_FETCH_VERBOSE); return; }
     r->keep = false;
     if (st > 0) {
@@ -6427,6 +6197,9 @@ static void bm_fr_reset_response(bm_fr *r) {
     r->state = BM_FR_HEAD;
     r->status = 0;
     r->rbody.len = 0;
+    if (r->dec) { bm_codec->close(r->dec); r->dec = NULL; }
+    r->raw.len = r->raw_off = 0;
+    r->draining = false;
     r->discard = false;
     r->utf8_pos = 0;
     r->utf8_bad = false;
@@ -6493,25 +6266,18 @@ static void bm_fr_complete(bm_fr *r) {
         bm_fr_step(r);
         return;
     }
-    if (r->decompress && r->enc && r->rbody.len) {
-        bm_sb out = {0};
-        const uint8_t *in = (const uint8_t *)r->rbody.data;
-        bool ok = r->enc == 1 ? bm_gunzip(in, r->rbody.len, &out)
-            : r->enc == 2 ? bm_zlib_or_raw(in, r->rbody.len, &out)
-            : r->enc == 3 ? bm_decode_brotli && bm_decode_brotli(in, r->rbody.len, &out)
-            : bm_decode_zstd && bm_decode_zstd(in, r->rbody.len, &out);
-        if (!ok || out.len > INT32_MAX) {
-            bm_sb_free(&out);
-            const char *why = r->enc == 3 ? "BrotliDecompressionError" : r->enc == 4 ? "ZstdDecompressionError" : "ZlibError"; /* Bun's codes */
-            bm_fr_fail(r, why, "%s fetching \"%s\". %s", why, r->url.p->data, BM_FETCH_VERBOSE);
-            return;
+    if (bm_fr_decoding(r) && (r->dec || r->raw.len)) {
+        /* the rest of the body (checked as UTF-8 as it's decoded) */
+        if (!r->whole) {
+            if (!bm_fr_decode(r, false)) return;
+            if (r->raw_off < r->raw.len) {
+                r->draining = true;
+                if (r->read_p && r->rbody.len) bm_fr_resolve(&r->read_p, (bm_int)r->rbody.len);
+                return;
+            }
         }
-        bm_sb_free(&r->rbody);
-        r->rbody = out;
-        /* decoded output: check it now, while it's in cache */
-        r->utf8_pos = 0;
-        r->utf8_bad = !bm_utf8_scan((const uint8_t *)r->rbody.data, r->rbody.len, &r->utf8_pos);
-    } else if (r->enc) {
+        if (!bm_fr_decode(r, true)) return;
+    } else if (r->enc && !bm_fr_decoding(r)) {
         r->utf8_bad = true; /* not decoded (decompress: false): text() checks it */
     }
     bm_fr_settle(r, 0);
@@ -6594,14 +6360,16 @@ static void bm_fc_ready(bm_io *h, bool readable, bool writable, bool broken) {
         /* a known-length body goes straight into its buffer */
         if (r->state == BM_FR_FIXED && c->in_off == c->in_len && !r->discard) {
             size_t want = (size_t)(r->remaining < (1 << 20) ? r->remaining : (1 << 20));
-            if (r->rbody.cap - r->rbody.len < want) bm_sb_grow(&r->rbody, r->rbody.len + want);
-            long n = bm_fc_recv(c, r->rbody.data + r->rbody.len, want);
+            bm_sb *sink = bm_fr_sink(r);
+            if (sink->cap - sink->len < want) bm_sb_grow(sink, sink->len + want);
+            long n = bm_fc_recv(c, sink->data + sink->len, want);
             if (n > 0) {
                 r->got_any = true;
-                r->rbody.len += (size_t)n;
+                sink->len += (size_t)n;
                 r->remaining -= n;
-                bm_fr_check_utf8(r);
+                if (!bm_fr_decoding(r)) bm_fr_check_utf8(r);
                 bool full = bm_fr_data(r);
+                if (r->result != 1) return; /* the body couldn't be decoded */
                 if (r->remaining == 0) { r->state = BM_FR_DONE; break; }
                 if (full) { r->paused = true; bm_fc_interest(c, false, false); break; }
                 /* TLS returns a record at a time: read until it has no more */
@@ -6632,12 +6400,13 @@ static void bm_fc_ready(bm_io *h, bool readable, bool writable, bool broken) {
             r->got_any = true;
             c->in_len += (size_t)n;
             int st = bm_fr_parse(r, c);
+            if (r->result != 1) return;
             if (st < 0) {
                 bm_fr_fail(r, "Malformed_HTTP_Response", "Malformed_HTTP_Response fetching \"%s\". %s", r->url.p->data, BM_FETCH_VERBOSE);
                 return;
             }
             if (st > 0) break;
-            if (r->streaming && r->rbody.len >= BM_STREAM_HIGH && !(r->decompress && r->enc)) { r->paused = true; bm_fc_interest(c, false, false); break; }
+            if (r->streaming && (r->rbody.len >= BM_STREAM_HIGH || r->raw_off < r->raw.len)) { r->paused = true; bm_fc_interest(c, false, false); break; }
             if ((size_t)n == room || c->tls) continue;
             break;
         }
@@ -6770,6 +6539,17 @@ static bm_promise *bm_fr_promise(bm_promise **slot, bool pending, bm_int now) {
     return p;
 }
 
+/* A body that has all arrived is still being decoded: decode more (all of it for a whole-body
+ * read), and settle once it's done. */
+static void bm_fr_drain(bm_fr *r, bool all) {
+    if (!r->draining || r->result != 1) return;
+    if (!bm_fr_decode(r, all)) return;
+    if (r->raw_off < r->raw.len) return;
+    if (!all && !bm_fr_decode(r, true)) return; /* complete? */
+    r->draining = false;
+    bm_fr_settle(r, 0);
+}
+
 /* The response head arrived (0), or the request failed (< 0). */
 bm_promise *bm_native_fetchWait(bm_int id) {
     bm_fr *r = bm_fr_get(id);
@@ -6779,6 +6559,12 @@ bm_promise *bm_native_fetchWait(bm_int id) {
 /* The whole body is in (0), or it failed (< 0). */
 bm_promise *bm_native_fetchBodyWait(bm_int id) {
     bm_fr *r = bm_fr_get(id);
+    if (r && !r->whole) {
+        /* read whole: decode without holding back */
+        r->whole = true;
+        if (r->draining) bm_fr_drain(r, true);
+        else if (r->raw_off < r->raw.len && r->result == 1) bm_fr_decode(r, false);
+    }
     return bm_fr_promise(r ? &r->body_p : NULL, r && r->result == 1, r ? r->result : -1);
 }
 
@@ -6787,8 +6573,7 @@ bm_promise *bm_native_fetchRead(bm_int id) {
     bm_fr *r = bm_fr_get(id);
     if (!r) return bm_fr_promise(NULL, false, -1);
     r->streaming = true;
-    bool encoded = r->decompress && r->enc && r->result == 1; /* decoded when it's all in */
-    if (r->rbody.len && !encoded) return bm_fr_promise(NULL, false, (bm_int)r->rbody.len);
+    if (r->rbody.len) return bm_fr_promise(NULL, false, (bm_int)r->rbody.len);
     return bm_fr_promise(&r->read_p, r->result == 1, r->result);
 }
 
@@ -6800,6 +6585,9 @@ bm_arr bm_native_fetchTake(bm_int id) {
     if (r->rbody.len) memcpy(bm_arr_data(a), r->rbody.data, r->rbody.len);
     a.len = (bm_int)r->rbody.len;
     r->rbody.len = 0;
+    /* decode what waited for room (while it's still more than the reader wants, stay paused) */
+    if (r->draining) { bm_fr_drain(r, false); return a; }
+    if (r->raw_off < r->raw.len && r->result == 1 && (!bm_fr_decode(r, false) || r->raw_off < r->raw.len)) return a;
     if (r->paused && r->c) {
         /* the reader caught up: read on (what's buffered in TLS or unparsed won't raise an event) */
         r->paused = false;
@@ -6909,6 +6697,8 @@ void bm_native_fetchFree(bm_int id) {
     bm_sb_free(&r->status_text);
     bm_sb_free(&r->rheaders);
     bm_sb_free(&r->rbody);
+    if (r->dec) bm_codec->close(r->dec);
+    bm_sb_free(&r->raw);
     bm_sb_free(&r->location);
     bm_sb_free(&r->message);
     bm_free(r);

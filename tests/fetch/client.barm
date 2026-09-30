@@ -194,6 +194,56 @@ try {
 } catch (e) {
   console.log(`reader: ${describe(e)}`)
 }
+// a compressed stream is decoded as it arrives
+try {
+  const t0 = performance.now()
+  const r = await fetch(base + "/stream-gzip")
+  const decoder = new TextDecoder()
+  let text = ""
+  let firstAt = 0.0
+  for await (const chunk of r.body!) {
+    if (firstAt === 0.0) {
+      firstAt = performance.now() - t0
+    }
+    text += decoder.decode(chunk, { stream: true })
+  }
+  const all = performance.now() - t0
+  console.log(`gzip stream: ${JSON.stringify(text)} first chunk early=${firstAt < 150} all later=${all >= 150}`)
+} catch (e) {
+  console.log(`gzip stream: ${describe(e)}`)
+}
+try {
+  const r = await fetch(base + "/stream-gzip-cut")
+  let got = ""
+  const decoder = new TextDecoder()
+  for await (const chunk of r.body!) {
+    got += decoder.decode(chunk, { stream: true })
+  }
+  console.log(`gzip stream cut short: no error ${JSON.stringify(got)}`)
+} catch (e) {
+  console.log(`gzip stream cut short: ${describe(e)}`)
+}
+try {
+  await (await fetch(base + "/stream-gzip-cut")).text()
+  console.log("gzip cut short, text(): no error")
+} catch (e) {
+  console.log(`gzip cut short, text(): ${describe(e)}`)
+}
+try {
+  // 24 MiB of zeros from 24 KB
+  const r = await fetch(base + "/gzip?f=fixture-zeros.gz")
+  let total = 0
+  let zeros = true
+  for await (const chunk of r.body!) {
+    total += chunk.length
+    if (zeros && chunk.some((b) => b !== 0)) {
+      zeros = false
+    }
+  }
+  console.log(`gzip zeros streamed: ${total} zeros=${zeros}`)
+} catch (e) {
+  console.log(`gzip zeros streamed: ${describe(e)}`)
+}
 try {
   const r = await fetch(base + "/stream-cut")
   console.log(`cut: head ${r.status}`)
