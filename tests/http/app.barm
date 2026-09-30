@@ -1,0 +1,52 @@
+// The server driven by tests/http.rs.
+import { serve, Request, Response, Headers, json } from "std/http"
+
+type Item = { id: int, name: string }
+
+function route(req: Request): Response {
+  const path = req.pathname
+  if (path === "/") {
+    return new Response("hello")
+  }
+  if (path === "/echo") {
+    return new Response(req.text(), { status: 200, headers: new Headers("content-type: application/octet-stream\r\n") })
+  }
+  if (path === "/info") {
+    const h = req.headers
+    return new Response(req.method + " " + req.pathname + " " + req.search + " " + (h.get("X-NAME") ?? "-") + " " + (req.header("user-agent") ?? "-") + " " + req.url)
+  }
+  if (path === "/json") {
+    const items: Item[] = [{ id: 1, name: "a" }, { id: 2, name: "b" }]
+    return json(JSON.stringify(items), 201)
+  }
+  if (path === "/inject") {
+    const h = new Headers()
+    h.set("x-value", req.search.slice(1).replaceAll("%0D", "\r").replaceAll("%0A", "\n"))
+    h.set("X-Other", "1")
+    h.set("x-other", "2")
+    h.append("x-multi", "a")
+    h.append("x-multi", "b")
+    return new Response("ok", { headers: h })
+  }
+  if (path === "/empty") {
+    return new Response(undefined, { status: 204 })
+  }
+  if (path === "/big") {
+    return new Response("x".repeat(4 * 1024 * 1024))
+  }
+  if (path === "/crash") {
+    const xs: int[] = []
+    return new Response("unreachable " + String(xs[req.search.byteLength]!))
+  }
+  if (path === "/log") {
+    console.log("logged " + req.search)
+    return new Response("ok")
+  }
+  return new Response("not found", { status: 404 })
+}
+
+function main(): void throws Error {
+  const port = parseInt(process.env.PORT ?? "0") ?? 0
+  const workers = parseInt(process.env.WORKERS ?? "1") ?? 1
+  try serve({ port, workers, hostname: "127.0.0.1", fetch: route })
+}
