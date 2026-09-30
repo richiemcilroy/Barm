@@ -117,7 +117,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             return;
         }
         let mut set = String::new();
-        if this.is_some() {
+        if let Some((_, t, _)) = &this {
+            // The task holds (and later releases, through the class id) its own reference.
+            self.rc_roots.insert(*t);
             set.push_str(" F->self_ = self_; bmg_obj_retain(self_);");
         }
         for (i, ty) in ptys.iter().enumerate() {

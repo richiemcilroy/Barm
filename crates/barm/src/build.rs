@@ -119,7 +119,8 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     flags.extend(extra.split_whitespace());
     let flag_text = flags.join(" ");
     let rt_key = hash_hex(&[codegen::RUNTIME_H.as_bytes(), codegen::RUNTIME_C.as_bytes(), cc.as_bytes(), flag_text.as_bytes(), env!("CARGO_PKG_VERSION").as_bytes()]);
-    let key = hash_hex(&[c_src.as_bytes(), rt_key.as_bytes()]);
+    // Link flags (see below) are part of what a cached binary was built with.
+    let key = hash_hex(&[c_src.as_bytes(), rt_key.as_bytes(), LINK_FLAGS.as_bytes()]);
     let dir = cache_dir();
     let bin_dir = dir.join("bin");
     let binary = bin_dir.join(&key);
@@ -181,7 +182,11 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     // Drop the runtime functions the program doesn't use. On macOS the program runs on the main
     // thread with a 512 MiB stack (the most arm64 allows) instead of a thread of its own.
     if cfg!(target_vendor = "apple") {
-        cmd.arg("-Wl,-dead_strip").arg("-Wl,-stack_size,0x20000000");
+        cmd.arg("-Wl,-dead_strip");
+        // (Sanitizers can't lay out their shadow memory around a large main stack.)
+        if !extra.contains("-fsanitize") {
+            cmd.arg(LINK_STACK);
+        }
     } else if !cfg!(windows) {
         cmd.arg("-Wl,--gc-sections");
     }
@@ -192,6 +197,11 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     let t3 = Instant::now();
     Ok(Built { binary, cached: false, sources, timings: (t1 - t0, t2 - t1, t3 - t2) })
 }
+
+/// macOS: the main thread's stack size (the most arm64 allows).
+const LINK_STACK: &str = "-Wl,-stack_size,0x20000000";
+/// Everything that changes how programs are linked, for the binary cache key.
+const LINK_FLAGS: &str = "dead-strip; sanitizers link without -stack_size; -Wl,-stack_size,0x20000000";
 
 /// The precompiled fixed prefix (`pre-<key>.h`, with its `.pch`/`.gch` beside it) to pass as
 /// `-include`, built on first use; `None` if the compiler can't precompile it (then programs

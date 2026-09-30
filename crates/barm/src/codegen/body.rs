@@ -541,11 +541,90 @@ impl<'c, 'a> Gen<'c, 'a> {
     fn stmt_list_of(&mut self, s: StmtId) {
         let m = self.cur_m();
         if let StmtKind::Block(ss) = &self.ast(m).stmt(s).kind {
-            for &x in ss.clone().iter() {
-                self.stmt(x);
-            }
+            self.stmts(ss);
         } else {
             self.stmt(s);
+        }
+    }
+
+    /// A block's statements. A local declared here is released right after the last statement
+    /// that uses it (directly, or through a local that may borrow from it) rather than at the end
+    /// of the block, so dead values don't add to peak memory.
+    pub(crate) fn stmts(&mut self, ss: &[StmtId]) {
+        let plan = if self.b().async_fn.is_none() && ss.len() > 1 { self.last_uses(ss) } else { Vec::new() };
+        for (i, &x) in ss.iter().enumerate() {
+            self.stmt(x);
+            if let Some(keys) = plan.get(i) {
+                for &k in keys {
+                    self.release_local_now(k);
+                }
+            }
+        }
+    }
+
+    /// For each statement of `ss`, the locals declared in `ss` whose last use it is (none for the
+    /// last statement: the block's end releases those anyway).
+    fn last_uses(&self, ss: &[StmtId]) -> Vec<Vec<u32>> {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let locals_in = |exprs: &[ExprId]| -> FxSet<u32> {
+            exprs.iter().filter_map(|&e| match self.ident_fact(m, e) {
+                Some(IdentFact::Local(k)) => Some(k),
+                _ => None,
+            }).collect()
+        };
+        // A local initialized from an expression that mentions `v` may borrow from `v`: its uses
+        // count as uses of `v`.
+        let mut bindings = Vec::new();
+        for &x in ss {
+            collect_bindings(ast, x, &mut bindings);
+        }
+        let mut deps: FxMap<u32, FxSet<u32>> = FxMap::default();
+        for (k, init) in bindings {
+            let mut exprs = Vec::new();
+            collect_exprs_expr(ast, init, &mut exprs);
+            deps.entry(k).or_default().extend(locals_in(&exprs));
+        }
+        let uses: Vec<FxSet<u32>> = ss.iter().map(|&x| {
+            let mut exprs = Vec::new();
+            collect_exprs_stmt(ast, x, &mut exprs);
+            let mut set = locals_in(&exprs);
+            let mut stack: Vec<u32> = set.iter().copied().collect();
+            while let Some(k) = stack.pop() {
+                if let Some(ds) = deps.get(&k) {
+                    for &d in ds {
+                        if set.insert(d) {
+                            stack.push(d);
+                        }
+                    }
+                }
+            }
+            set
+        }).collect();
+        let mut plan = vec![Vec::new(); ss.len()];
+        for (i, &x) in ss.iter().enumerate() {
+            let StmtKind::Let { name_span, .. } = &ast.stmt(x).kind else { continue };
+            let k = name_span.start;
+            let last = (i..ss.len()).rev().find(|&j| j == i || uses[j].contains(&k)).unwrap_or(i);
+            if last + 1 < ss.len() {
+                plan[last].push(k);
+            }
+        }
+        plan
+    }
+
+    /// Releases a local now if its release is still pending in the current scope (it owns its
+    /// value), and drops that pending release.
+    fn release_local_now(&mut self, k: u32) {
+        let Some(local) = self.b().locals.get(&k).cloned() else { return };
+        if !self.is_rc(local.ty) {
+            return;
+        }
+        let rel = format!("{};", self.release_code(local.ty, &local.access));
+        let scope = self.b().scopes.last_mut().unwrap();
+        if let Some(pos) = scope.releases.iter().rposition(|r| *r == rel) {
+            scope.releases.remove(pos);
+            self.line(rel);
         }
     }
 
@@ -1026,9 +1105,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             StmtKind::Block(ss) => {
                 self.open("{");
                 self.push_scope();
-                for &x in ss {
-                    self.stmt(x);
-                }
+                self.stmts(ss);
                 self.pop_scope();
                 self.close("}");
             }
@@ -1146,6 +1223,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             StmtKind::Throw(x) => {
                 self.push_temps();
                 let v = self.expr(*x);
+                // Errors are released through their class id.
+                self.rc_roots.insert(v.ty);
                 let code = self.consume(v);
                 self.line(format!("bmg_err = (void *)({code});"));
                 self.error_path();
@@ -1368,9 +1447,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.push_scope();
         let m = self.cur_m();
         if let StmtKind::Block(ss) = &self.ast(m).stmt(s).kind {
-            for &x in ss {
-                self.stmt(x);
-            }
+            self.stmts(ss);
         } else {
             self.stmt(s);
         }
@@ -1393,9 +1470,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.b().breaks.push((BreakTarget::Native, depth - 1));
         let m = self.cur_m();
         if let StmtKind::Block(ss) = &self.ast(m).stmt(body).kind {
-            for &x in ss {
-                self.stmt(x);
-            }
+            self.stmts(ss);
         } else {
             self.stmt(body);
         }
@@ -3108,6 +3183,48 @@ fn arrow_captures(ast: &ast::Ast, facts: &crate::check::ModuleFacts, arrow: Expr
 
 pub(crate) fn collect_exprs_stmt_pub(ast: &ast::Ast, s: StmtId, out: &mut Vec<ExprId>) {
     collect_exprs_stmt(ast, s, out)
+}
+
+/// Locals declared in `s` (outside closures) that may borrow from the locals their initializer
+/// mentions: a `const` initialized from a field/index path (see the borrowed views in `stmt`).
+/// Every other local owns its value. (A `for-of` variable lives only inside its statement.)
+fn collect_bindings(ast: &ast::Ast, s: StmtId, out: &mut Vec<(u32, ExprId)>) {
+    fn path_like(ast: &ast::Ast, e: ExprId) -> bool {
+        match &ast.expr(e).kind {
+            ExprKind::Ident(_) | ExprKind::This => true,
+            ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::As(x, _) | ExprKind::Member { obj: x, .. } | ExprKind::Index { obj: x, .. } => path_like(ast, *x),
+            _ => false,
+        }
+    }
+    match &ast.stmt(s).kind {
+        StmtKind::Let { mutable: false, name_span, init: Some(e), .. } if path_like(ast, *e) => out.push((name_span.start, *e)),
+        StmtKind::ForOf { body, .. } => collect_bindings(ast, *body, out),
+        StmtKind::If(_, t, e) => {
+            collect_bindings(ast, *t, out);
+            if let Some(e) = e {
+                collect_bindings(ast, *e, out);
+            }
+        }
+        StmtKind::While(_, b) | StmtKind::DoWhile(b, _) => collect_bindings(ast, *b, out),
+        StmtKind::For { init, body, .. } => {
+            if let Some(i) = init {
+                collect_bindings(ast, *i, out);
+            }
+            collect_bindings(ast, *body, out);
+        }
+        StmtKind::Switch(_, cases) => cases.iter().flat_map(|c| c.body.iter()).for_each(|&x| collect_bindings(ast, x, out)),
+        StmtKind::Block(ss) => ss.iter().for_each(|&x| collect_bindings(ast, x, out)),
+        StmtKind::Try { body, catch, finally } => {
+            collect_bindings(ast, *body, out);
+            if let Some(c) = catch {
+                collect_bindings(ast, c.body, out);
+            }
+            if let Some(f) = finally {
+                collect_bindings(ast, *f, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 pub(crate) fn collect_exprs_stmt(ast: &ast::Ast, s: StmtId, out: &mut Vec<ExprId>) {

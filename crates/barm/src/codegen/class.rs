@@ -14,7 +14,7 @@ use super::body::FnBodyKind;
 use super::{c_string, Gen, Val};
 use crate::ast::{Arg, ExprId, ExprKind, MemberKind};
 use crate::check::class::{CField, ClassMemberRef};
-use crate::hash::FxMap;
+use crate::hash::{FxMap, FxSet};
 use crate::intern::Sym;
 use crate::source::Span;
 use crate::types::*;
@@ -86,7 +86,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let _ = writeln!(body, "    {bn} base;");
             }
             None if self.needs_weak_slot(ci.decl) => body.push_str("    bmg_objw h;\n"),
-            None => body.push_str("    bmg_obj h;\n"),
+            // Left out for a class whose objects never need it (see `bare_classes`).
+            None => {
+                let _ = writeln!(body, "    BMG_HDR_{}", ci.name);
+            }
         }
         for f in info.fields.iter().filter(|f| f.owner == ci.decl) {
             let fty = self.c.types.subst(f.ty, &ci.subst);
@@ -297,7 +300,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             self.line(format!("{bn} *{o} = bmg_cyc_alloc(sizeof({bn})); bmg_obj_init({o}, {}); BMG_WEAK({o}) = 0; ((bmg_obj *){o})->flags = BMG_CYCLIC;", ci.cid));
         } else {
             let weak_init = if self.needs_weak_slot(ci.decl) { format!(" BMG_WEAK({o}) = 0;") } else { String::new() };
-        self.line(format!("{bn} *{o} = bmg_alloc_small(sizeof({bn})); bmg_obj_init({o}, {});{weak_init}", ci.cid));
+        self.line(format!("{bn} *{o} = bmg_alloc_small(sizeof({bn})); BMG_INIT_{bn}({o}, {});{weak_init}", ci.cid));
         }
         let info = self.c.classes[ci.decl as usize].clone();
         for f in &info.fields {
@@ -702,6 +705,12 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// `v instanceof C` as a C boolean.
     pub(crate) fn instanceof_code(&mut self, v: Val, decl: u32) -> String {
         let isa = self.isa_fn(decl);
+        // Objects whose class id is read keep their header.
+        for m in self.members(v.ty) {
+            if let Ty::Class(d, _) = self.tget(m) {
+                self.cid_decls.insert(d);
+            }
+        }
         match self.tget(v.ty) {
             Ty::Class(d, _) => {
                 if self.c.class_descends(d, decl) {
@@ -750,9 +759,34 @@ impl<'c, 'a> Gen<'c, 'a> {
         let name = format!("rl_{}", ci.name);
         if self.helpers_done.insert((ty, 101)) {
             let _ = writeln!(self.protos, "static void drop_{}(void *p);", ci.name);
-            let _ = writeln!(self.helpers, "static inline void {name}(void *p) {{ if (p && --((bmg_obj *)p)->rc == 0) drop_{}(p); }}", ci.name);
+            let _ = writeln!(self.helpers, "static inline void {name}(void *p) {{ if (p && BMG_DEC_{0}(p) == 0) drop_{0}(p); }}", ci.name);
         }
         format!("{name}({place})")
+    }
+
+    /// Class instances that need no header: a leaf class without a base, weak references or cycle
+    /// collection, whose objects are never shared (so the count is always 1), never have their
+    /// class id read (no `instanceof`, no console inspection) and are released by their own
+    /// drop function. Its objects are just their fields, like a C struct.
+    pub(crate) fn bare_classes(&mut self, shared: &FxSet<TyId>) -> FxSet<TyId> {
+        let mut bare = FxSet::default();
+        if self.uses_inspect {
+            return bare;
+        }
+        for t in self.class_list.clone() {
+            let ci = self.class_insts[&t].clone();
+            let info = &self.c.classes[ci.decl as usize];
+            let has_fields = info.fields.iter().any(|f| f.owner == ci.decl);
+            if info.base.is_some() || ci.cyclic || !has_fields || shared.contains(&t) || self.cid_decls.contains(&ci.decl) {
+                continue;
+            }
+            let has_subclass = (0..self.c.classes.len() as u32).any(|d| d != ci.decl && self.c.class_descends(d, ci.decl));
+            if has_subclass || self.needs_weak_slot(ci.decl) {
+                continue;
+            }
+            bare.insert(t);
+        }
+        bare
     }
 
     /// Can some `weak` field point to an instance of class `decl`?
@@ -1012,6 +1046,14 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     /// Per-class drop, free and inspect functions, plus the id-based tables.
     pub(crate) fn emit_class_tables(&mut self) -> String {
+        // Drop, traverse and inspect functions retain nothing.
+        self.rc_helper_depth += 1;
+        let out = self.class_tables();
+        self.rc_helper_depth -= 1;
+        out
+    }
+
+    fn class_tables(&mut self) -> String {
         let mut out = String::new();
         let insts: Vec<TyId> = self.class_list.clone();
         let mut drop_cases = String::new();
