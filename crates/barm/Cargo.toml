@@ -26,3 +26,8 @@ harness = false
 name = "run"
 path = "../../tests/run.rs"
 harness = false
+
+[[test]]
+name = "http"
+path = "../../tests/http.rs"
+harness = false
