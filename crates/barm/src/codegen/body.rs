@@ -79,6 +79,9 @@ pub(crate) struct Body {
     /// (index local, array local) pairs of enclosing `for (let i = 0; i < xs.length; i++)`
     /// loops whose bodies change neither: `xs[i]` there is in bounds.
     pub in_bounds: Vec<(u32, u32)>,
+    /// Array locals pushed in a loop that nothing else in it can reallocate: the C variable
+    /// holding their capacity (pushes compare against it instead of reloading it).
+    pub push_caps: FxMap<u32, String>,
 }
 
 /// A function whose `return a + f(args)` self-calls run as a loop: the function (module,
@@ -232,6 +235,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             finallies: Vec::new(),
             tre: None,
             in_bounds: Vec::new(),
+            push_caps: FxMap::default(),
         });
     }
 
@@ -419,6 +423,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             finallies: Vec::new(),
             tre: self.pending_tre.take(),
             in_bounds: Vec::new(),
+            push_caps: FxMap::default(),
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
             let access = if inout { format!("(*p{i})") } else { format!("p{i}") };
@@ -729,6 +734,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         let facts = self.facts(m);
         let mut written: FxSet<u32> = FxSet::default();
+        let mut pushed: FxSet<u32> = FxSet::default();
         for &e in &all {
             // `xs.push(v)` in the loop: pushes then skip the ownership check.
             if let ExprKind::Call { callee, .. } = &ast.expr(e).kind
@@ -737,6 +743,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 && let (ExprKind::Ident(_), Some(IdentFact::Local(k))) = (&ast.expr(*obj).kind, facts.idents.get(obj))
             {
                 written.insert(*k);
+                pushed.insert(*k);
             }
             if let ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } = &ast.expr(e).kind {
                 let mut cur = *t;
@@ -767,6 +774,11 @@ impl<'c, 'a> Gen<'c, 'a> {
             self.line(format!("bmg_make_unique(&{}, {d});", local.access));
             self.b().unique.insert(k);
             added.push(k);
+            if pushed.contains(&k) && self.only_push_index_length(&all, k) {
+                let cv = self.fresh("cap");
+                self.line(format!("bm_int {cv} = {0}.p ? {0}.p->cap : 0;", local.access));
+                self.b().push_caps.insert(k, cv);
+            }
         }
         added
     }
@@ -832,7 +844,48 @@ impl<'c, 'a> Gen<'c, 'a> {
     fn unhoist(&mut self, keys: Vec<u32>) {
         for k in keys {
             self.b().unique.remove(&k);
+            self.b().push_caps.remove(&k);
         }
+    }
+
+    /// Is local `k` used in `all` only as `k.push(...)`, `k[...]` or `k.length`? (Then only
+    /// pushes can reallocate it.)
+    fn only_push_index_length(&self, all: &[ExprId], k: u32) -> bool {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let idents = &self.facts(m).idents;
+        let is_k = |e: ExprId| matches!((&ast.expr(e).kind, idents.get(&e)), (ExprKind::Ident(_), Some(IdentFact::Local(x))) if *x == k);
+        let mut callees = FxSet::default();
+        for &e in all {
+            match &ast.expr(e).kind {
+                ExprKind::Call { callee, args, .. } => {
+                    callees.insert(*callee);
+                    if args.iter().any(|a| a.by_ref.is_some() && is_k(a.expr)) {
+                        return false;
+                    }
+                }
+                ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } if is_k(*t) => return false,
+                _ => {}
+            }
+        }
+        let mut ok_uses = FxSet::default();
+        for &e in all {
+            match &ast.expr(e).kind {
+                ExprKind::Index { obj, .. } if is_k(*obj) => {
+                    ok_uses.insert(*obj);
+                }
+                ExprKind::Member { obj, name, .. } if is_k(*obj) => {
+                    let n = self.sym(*name);
+                    if n == "length" || (n == "push" && callees.contains(&e)) {
+                        ok_uses.insert(*obj);
+                    } else {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        all.iter().all(|&e| !is_k(e) || ok_uses.contains(&e))
     }
 
     /// A place path (`p`, `p.a.b`) whose root is a read-only parameter, `this` or a local that
@@ -2952,6 +3005,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             finallies: Vec::new(),
             tre: None,
             in_bounds: Vec::new(),
+            push_caps: FxMap::default(),
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
             let access = if inout { format!("(*p{i})") } else { format!("p{i}") };

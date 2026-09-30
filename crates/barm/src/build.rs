@@ -178,9 +178,10 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     if !cfg!(target_vendor = "apple") && !cfg!(windows) {
         cmd.arg("-lpthread");
     }
-    // Drop the runtime functions the program doesn't use.
+    // Drop the runtime functions the program doesn't use. On macOS the program runs on the main
+    // thread with a 512 MiB stack (the most arm64 allows) instead of a thread of its own.
     if cfg!(target_vendor = "apple") {
-        cmd.arg("-Wl,-dead_strip");
+        cmd.arg("-Wl,-dead_strip").arg("-Wl,-stack_size,0x20000000");
     } else if !cfg!(windows) {
         cmd.arg("-Wl,--gc-sections");
     }
