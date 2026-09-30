@@ -532,6 +532,9 @@ bm_str bm_native_bytesToString(bm_arr bytes);
 bm_arr bm_native_stringToBytes(bm_str s);
 bm_str bm_native_utf8Clean(bm_str s);
 bm_int bm_native_utf8Complete(bm_arr bytes);
+bm_str bm_native_byteSlice(bm_str s, bm_int start, bm_int end);
+bm_str bm_native_mimeLower(bm_str s);
+bm_arr bm_native_multipartParse(bm_str body, bm_str boundary);
 bm_str bm_native_headerGet(bm_str block, bm_str name);        /* values joined with ", " */
 bm_arr bm_native_headerEntries(bm_str block);                  /* sorted [name, value, ...] */
 bm_arr bm_native_headerValues(bm_str block, bm_str name);          /* WHATWG UTF-8 decode (BOM dropped, U+FFFD for bad bytes) */

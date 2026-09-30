@@ -7099,3 +7099,114 @@ bm_int bm_native_utf8Complete(bm_arr bytes) {
     }
     return (bm_int)n;
 }
+
+/* ---- Blob and FormData helpers (bytes kept in strings) */
+
+/* Bytes [start, end) of s, with negative offsets from the end and clamping, as Blob.slice. */
+bm_str bm_native_byteSlice(bm_str s, bm_int start, bm_int end) {
+    bm_int n = s.p->len;
+    if (start < 0) start = start + n < 0 ? 0 : start + n;
+    if (end < 0) end = end + n < 0 ? 0 : end + n;
+    if (start > n) start = n;
+    if (end > n) end = n;
+    if (end <= start) return BM_EMPTY_STR;
+    return bm_str_from(s.p->data + start, (size_t)(end - start));
+}
+
+/* A Blob's type: lower-cased, or "" if it has a byte outside printable ASCII. */
+bm_str bm_native_mimeLower(bm_str s) {
+    bm_int n = s.p->len;
+    for (bm_int i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s.p->data[i];
+        if (c < 0x20 || c > 0x7e) return BM_EMPTY_STR;
+    }
+    for (bm_int i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s.p->data[i];
+        if (c >= 'A' && c <= 'Z') {
+            bm_str out = bm_str_from(s.p->data, (size_t)n);
+            for (bm_int j = i; j < n; j++) {
+                char d = out.p->data[j];
+                if (d >= 'A' && d <= 'Z') out.p->data[j] = (char)(d + 32);
+            }
+            return out;
+        }
+    }
+    bm_str_retain(s);
+    return s;
+}
+
+/* A multipart/form-data body split into its parts, flattened: [name, filename, content type,
+ * "file" or "", value, ...] (a part without a name is skipped), or on a malformed body, one
+ * element: what's wrong, as Bun says it. */
+bm_arr bm_native_multipartParse(bm_str body, bm_str boundary) {
+    bm_arr out = BM_EMPTY_ARR;
+    const char *why = NULL;
+    size_t bl = (size_t)boundary.p->len + 2;
+    char *delim = bm_alloc(bl + 1);
+    delim[0] = delim[1] = '-';
+    memcpy(delim + 2, boundary.p->data, (size_t)boundary.p->len);
+    const char *p = body.p->data, *end = p + body.p->len;
+    const char *at = boundary.p->len ? memmem(p, (size_t)(end - p), delim, bl) : NULL;
+    for (;;) {
+        if (!at) { why = "missing final boundary"; break; }
+        const char *part = at + bl;
+        if (end - part >= 2 && part[0] == '-' && part[1] == '-') break; /* the closing delimiter */
+        if (end - part >= 2 && part[0] == '\r' && part[1] == '\n') part += 2;
+        else if (part < end && part[0] == '\n') part += 1;
+        const char *next = memmem(part, (size_t)(end - part), delim, bl);
+        if (!next) { why = "missing final boundary"; break; }
+        const char *stop = next;
+        if (stop - part >= 2 && stop[-2] == '\r' && stop[-1] == '\n') stop -= 2;
+        else if (stop > part && stop[-1] == '\n') stop -= 1;
+        /* headers, a blank line, the value */
+        const char *hend = memmem(part, (size_t)(stop - part), "\r\n\r\n", 4);
+        size_t skip = 4;
+        if (!hend) { hend = memmem(part, (size_t)(stop - part), "\n\n", 2); skip = 2; }
+        if (!hend) { why = "is missing header colon separator"; break; }
+        const char *name = NULL, *filename = NULL, *type = NULL;
+        size_t nl = 0, fl = 0, tl = 0;
+        for (const char *l = part; l < hend;) {
+            const char *le = memchr(l, '\n', (size_t)(hend - l));
+            if (!le) le = hend;
+            const char *lend = le > l && le[-1] == '\r' ? le - 1 : le;
+            if (lend > l && !memchr(l, ':', (size_t)(lend - l))) { why = "is missing header colon separator"; break; }
+            if (lend - l >= 20 && strncasecmp(l, "content-disposition:", 20) == 0) {
+                for (const char *x = l + 20; x < lend; x++) {
+                    bool isname = lend - x > 6 && strncasecmp(x, "name=\"", 6) == 0 && (x[-1] == ' ' || x[-1] == ';');
+                    bool isfile = lend - x > 10 && strncasecmp(x, "filename=\"", 10) == 0;
+                    if (!isname && !isfile) continue;
+                    const char *v = x + (isfile ? 10 : 6), *ve = memchr(v, '"', (size_t)(lend - v));
+                    if (!ve) break;
+                    if (isfile) { filename = v; fl = (size_t)(ve - v); } else { name = v; nl = (size_t)(ve - v); }
+                    x = ve;
+                }
+            } else if (lend - l >= 13 && strncasecmp(l, "content-type:", 13) == 0) {
+                type = l + 13;
+                while (type < lend && *type == ' ') type++;
+                tl = (size_t)(lend - type);
+            }
+            l = le + 1;
+        }
+        if (why) break;
+        if (name) {
+            const char *v = hend + skip;
+            bm_str fields[5] = {
+                bm_str_from(name, nl), filename ? bm_str_from(filename, fl) : BM_EMPTY_STR, type ? bm_str_from(type, tl) : BM_EMPTY_STR,
+                filename ? bm_str_from("file", 4) : BM_EMPTY_STR, v < stop ? bm_str_from(v, (size_t)(stop - v)) : BM_EMPTY_STR,
+            };
+            bm_str *slot = bm_arr_reserve_tail(&out, &bm_type_str, 5);
+            memcpy(slot, fields, sizeof fields);
+            out.len += 5;
+        }
+        at = next;
+    }
+    bm_free(delim);
+    if (why) {
+        bm_arr_release(out, &bm_type_str);
+        out = BM_EMPTY_ARR;
+        bm_str *slot = bm_arr_reserve_tail(&out, &bm_type_str, 1);
+        *slot = bm_str_from(why, strlen(why));
+        out.len = 1;
+    }
+    return out;
+}

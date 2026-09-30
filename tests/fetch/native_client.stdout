@@ -19,5 +19,9 @@ any: Error: b gave up
 heard: onabort listener aborted=true a=false
 throwIfAborted: b gave up
 DOMException: AbortError 20 gone true
+bytes blob: 7 60,0,255,1,13,10,62 0,255
+bytes form: raw.bin "application/octet-stream" 0,255,1,13,10 | blob p
+typed files: t.html text/html <p> | i.png image/png png
+blob stream: 60,0,255,1,13,10,62
 with a long timeout: 200 BASE/text | hello
 done

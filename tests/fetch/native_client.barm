@@ -90,6 +90,36 @@ try {
 const d = new DOMException("gone", "AbortError")
 console.log(`DOMException: ${d.name} ${d.code} ${d.message} ${d instanceof Error}`)
 
+// Blob parts and File contents as bytes
+const raw: u8[] = [0, 255, 1, 13, 10]
+const rb = new Blob(["<", raw, ">"])
+console.log(`bytes blob: ${rb.size} ${(await rb.bytes()).join(",")} ${(await rb.slice(1, 3).arrayBuffer()).join(",")}`)
+const binForm = new FormData()
+binForm.append("bin", new File([raw], "raw.bin"))
+binForm.append("plain", new Blob(["p"]))
+binForm.append("typed", new File(["<p>"], "t.html", { type: "text/html" }))
+binForm.append("png", new Blob(["png"], { type: "image/png" }), "i.png")
+try {
+  const back = try await (try await fetch(base + "/mirror", { method: "POST", body: binForm })).formData()
+  const bin = back.get("bin")
+  const plain = back.get("plain")
+  if (bin instanceof File && plain instanceof File) {
+    console.log(`bytes form: ${bin.name} ${JSON.stringify(bin.type)} ${(await bin.bytes()).join(",")} | ${plain.name} ${await plain.text()}`)
+  }
+  const typed = back.get("typed")
+  const png = back.get("png")
+  if (typed instanceof File && png instanceof File) {
+    console.log(`typed files: ${typed.name} ${typed.type} ${await typed.text()} | ${png.name} ${png.type} ${await png.text()}`)
+  }
+} catch (e) {
+  console.log(`bytes form: ${e.message}`)
+}
+let streamed = ""
+for await (const chunk of rb.stream()) {
+  streamed += chunk.join(",")
+}
+console.log(`blob stream: ${streamed}`)
+
 // a pending AbortSignal.timeout doesn't keep the program running
 const later = AbortSignal.timeout(60000)
 await show("with a long timeout", fetch(base + "/text", { signal: later }))
