@@ -1,0 +1,60 @@
+// Errors cross awaits: rejections propagate through async calls and land in the right catch/finally.
+class NotFound extends Error {}
+class Timeout extends Error {}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function lookup(id: int): Promise<string> throws NotFound {
+  await sleep(2)
+  if (id % 3 === 0) {
+    throw new NotFound("no item " + String(id))
+  }
+  return "item" + String(id)
+}
+
+async function twice(id: int): Promise<string> throws NotFound {
+  const a = try await lookup(id)
+  const b = try await lookup(id + 1)
+  return a + "," + b
+}
+
+async function guarded(id: int): Promise<string> {
+  try {
+    return try await twice(id)
+  } catch (e) {
+    return "caught: " + e.message
+  } finally {
+    console.log("finally", id)
+  }
+}
+
+async function failsLater(): Promise<int> throws Timeout {
+  await sleep(1)
+  await sleep(1)
+  throw new Timeout("too slow")
+}
+
+async function main() {
+  for (const id of [1, 2, 4, 5]) {
+    console.log(await guarded(id))
+  }
+  const late = failsLater()
+  console.log("started")
+  try {
+    await late
+    console.log("not reached")
+  } catch (e) {
+    console.log("late:", e.message)
+  }
+  const rejected = new Promise<int>((resolve, reject) => {
+    setTimeout(() => reject(new Error("rejected by hand")), 1)
+  })
+  try {
+    console.log(await rejected)
+  } catch (e) {
+    console.log("manual:", e.message)
+  }
+  console.log("done")
+}

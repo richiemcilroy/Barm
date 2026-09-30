@@ -1,0 +1,12 @@
+finally 1
+item1,item2
+finally 2
+caught: no item 3
+finally 4
+item4,item5
+finally 5
+caught: no item 6
+started
+late: too slow
+manual: rejected by hand
+done

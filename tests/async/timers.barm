@@ -1,0 +1,39 @@
+// Timers: setTimeout/setInterval/clearTimeout and promises resolved by timers. Deadlines are at
+// least 10 ms apart, so the order doesn't depend on scheduling jitter (in Node either).
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function main() {
+  setTimeout(() => console.log("timeout 40"), 40)
+  const cancelled = setTimeout(() => console.log("never"), 20)
+  setTimeout(() => console.log("timeout 10"), 10)
+  clearTimeout(cancelled)
+  let ticks = 0
+  let interval = 0
+  interval = setInterval(() => {
+    ticks++
+    console.log("interval", ticks)
+    if (ticks === 3) {
+      clearInterval(interval)
+    }
+  }, 25)
+  console.log("scheduled")
+  await sleep(5)
+  console.log("slept 5")
+  await sleep(100)
+  console.log("slept 105, ticks", ticks)
+  const results: string[] = []
+  const a = (async () => {
+    await sleep(30)
+    results.push("a")
+  })()
+  const b = (async () => {
+    await sleep(10)
+    results.push("b")
+  })()
+  await a
+  await b
+  console.log("results", results.join(","))
+  setTimeout(() => console.log("last timer"), 1)
+}

@@ -1,0 +1,10 @@
+scheduled
+slept 5
+timeout 10
+interval 1
+timeout 40
+interval 2
+interval 3
+slept 105, ticks 3
+results b,a
+last timer
