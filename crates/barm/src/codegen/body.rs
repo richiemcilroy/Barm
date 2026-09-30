@@ -1927,7 +1927,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             let code = self.consume(iv);
             let bn = self.box_name(to);
             let bv = self.fresh("bx");
-            self.line(format!("{bn} *{bv} = bmg_alloc_small(sizeof({bn})); {bv}->rc = 1; {bv}->v = {code};"));
+            self.line(format!("{bn} *{bv} = bmg_alloc_small(sizeof({bn})); RC_{bn}({bv}) = 1; {bv}->v = {code};"));
             let owned = true;
             self.b().temps.last_mut().unwrap().push((bv.clone(), to));
             return Val { code: bv, ty: to, owned };
@@ -1945,7 +1945,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             if let Some(k) = members.iter().position(|&mt| mt == from) {
                 if self.is_unit(from) {
                     let u = self.u_make(to, k, None);
-                    return self.tmp(to, &u, false);
+                    // Holds nothing: owned, so consuming it retains nothing (and it needs no release).
+                    let t = self.tmp(to, &u, false);
+                    return Val { owned: true, ..t };
                 }
                 let code = self.consume(v);
                 let u = self.u_make(to, k, Some(&code));
@@ -2778,9 +2780,13 @@ impl<'c, 'a> Gen<'c, 'a> {
             let inner = self.c.unfold(p.ty);
             let bn = self.box_name(p.ty);
             let bp = self.fresh("bp");
+            // Only a shared box is ever cloned, and a shared box's contents count as retained
+            // anyway (see `shared_boxes`), so this retain doesn't make them shared by itself.
+            self.rc_helper_depth += 1;
             let clone_inner = if self.is_rc(inner) { format!("{};", self.retain_code(inner, &format!("{bp}n->v"))) } else { String::new() };
+            self.rc_helper_depth -= 1;
             self.line(format!("{bn} **{bp} = &{};", p.lv));
-            self.line(format!("if ((*{bp})->rc > 1) {{ {bn} *{bp}n = bmg_alloc_small(sizeof({bn})); {bp}n->rc = 1; {bp}n->v = (*{bp})->v; {clone_inner} (*{bp})->rc--; *{bp} = {bp}n; }}"));
+            self.line(format!("if (RC_{bn}(*{bp}) > 1) {{ {bn} *{bp}n = bmg_alloc_small(sizeof({bn})); RC_{bn}({bp}n) = 1; {bp}n->v = (*{bp})->v; {clone_inner} RC_{bn}(*{bp})--; *{bp} = {bp}n; }}"));
             return self.project_place(Place { lv: format!("(*{bp})->v"), ty: inner, weak: false }, to);
         }
         if let Some(k) = self.tag_of(p.ty, to) {
