@@ -191,14 +191,14 @@ static uint64_t bm_hash_bytes(const void *data, size_t len) {
 
 /* ================================================================== strings */
 
-bm_strbuf bm_empty_strbuf = {-1, 0, {0}}; /* flexible-array initializer: GNU C (gcc, clang) */
+const bm_strbuf bm_empty_strbuf = {-1, 0, {0}}; /* flexible-array initializer: GNU C (gcc, clang) */
 
-typedef struct { int32_t rc; int32_t len; char data[8]; } bm_small_strbuf;
+typedef struct { int32_t rc; int32_t len; char data[4]; } bm_small_strbuf;
 #define BM_A1(c) {-1, 1, {(char)(c), 0}}
 #define BM_A4(c) BM_A1(c), BM_A1((c) + 1), BM_A1((c) + 2), BM_A1((c) + 3)
 #define BM_A16(c) BM_A4(c), BM_A4((c) + 4), BM_A4((c) + 8), BM_A4((c) + 12)
 /* Immortal one-character ASCII strings: chars()/split("") and friends never allocate for ASCII. */
-static bm_small_strbuf bm_ascii_strs[128] = {
+static const bm_small_strbuf bm_ascii_strs[128] = {
     BM_A16(0), BM_A16(16), BM_A16(32), BM_A16(48), BM_A16(64), BM_A16(80), BM_A16(96), BM_A16(112),
 };
 #undef BM_A1
@@ -1813,7 +1813,7 @@ void bm_inspect_arr(bm_sb *sb, bm_arr a, const bm_type *t, int depth) {
     int64_t shown = n < BM_MAX_ARRAY_LENGTH ? n : BM_MAX_ARRAY_LENGTH;
     for (int64_t i = 0; i < shown; i++) { /* formatProperty: indentation + 2 per entry */
         bm_ictx.indent += 2;
-        t->inspect(&out.text, a.p->data + (size_t)i * t->size, depth + 1);
+        bm_inspect_value(&out.text, t, a.p->data + (size_t)i * t->size, depth + 1);
         bm_ictx.indent -= 2;
         bm_pieces_mark(&out);
     }
@@ -1836,10 +1836,10 @@ static void bm_inspect_map_impl(bm_sb *sb, bm_map m, const bm_type *kt, const bm
     int64_t shown = 0;
     bm_ictx.indent += 2; /* formatSet / formatMap */
     for (bm_int i = 0; shown < BM_MAX_ARRAY_LENGTH && bm_map_next(m, kt, vt, &i, &k, &v); shown++) {
-        kt->inspect(&out.text, k, depth + 1);
+        bm_inspect_value(&out.text, kt, k, depth + 1);
         if (!is_set) {
             bm_sb_push(&out.text, " => ", 4);
-            vt->inspect(&out.text, v, depth + 1);
+            bm_inspect_value(&out.text, vt, v, depth + 1);
         }
         bm_pieces_mark(&out);
     }
@@ -1874,7 +1874,7 @@ void bm_inspect_record(bm_sb *sb, int depth, size_t n, const char *const *names,
         else bm_push_quoted(&out.text, names[i], strlen(names[i]));
         bm_sb_push(&out.text, ": ", 2);
         bm_ictx.indent += 2;
-        types[i]->inspect(&out.text, fields[i], depth + 1);
+        bm_inspect_value(&out.text, types[i], fields[i], depth + 1);
         bm_ictx.indent -= 2;
         bm_pieces_mark(&out);
     }
@@ -1898,7 +1898,7 @@ void bm_inspect_object(bm_sb *sb, int depth, const char *cls, size_t n, const ch
         else bm_push_quoted(&out.text, names[i], strlen(names[i]));
         bm_sb_push(&out.text, ": ", 2);
         bm_ictx.indent += 2;
-        types[i]->inspect(&out.text, fields[i], depth + 1);
+        bm_inspect_value(&out.text, types[i], fields[i], depth + 1);
         bm_ictx.indent -= 2;
         bm_pieces_mark(&out);
     }
@@ -1915,12 +1915,8 @@ void bm_inspect_object(bm_sb *sb, int depth, const char *cls, size_t n, const ch
         if (is_unsigned) bm_sb_push_u64(sb, (uint64_t)*(const ctype *)p);                          \
         else bm_sb_push_int(sb, (bm_int)*(const ctype *)p);                                        \
     }                                                                                             \
-    static void bm_##name##_inspect(bm_sb *sb, const void *p, int depth) {                        \
-        (void)depth;                                                                              \
-        bm_##name##_to_str(sb, p);                                                                \
-    }                                                                                             \
     const bm_type bm_type_##name = {sizeof(ctype), NULL, NULL, bm_##name##_eq, bm_##name##_hash,   \
-                                    bm_##name##_to_str, bm_##name##_inspect};
+                                    bm_##name##_to_str, NULL};
 
 BM_DEFINE_INT_TYPE(int, int64_t, 0)
 BM_DEFINE_INT_TYPE(i8, int8_t, 0)
@@ -1946,7 +1942,7 @@ static void bm_f64_inspect(bm_sb *sb, const void *p, int depth) {
     if (x == 0 && signbit(x)) bm_sb_push(sb, "-0", 2); /* Node shows -0 */
     else bm_sb_push_f64(sb, x);
 }
-const bm_type bm_type_f64 = {sizeof(double), NULL, NULL, bm_f64_eq, bm_f64_hash, bm_f64_to_str, bm_f64_inspect};
+const bm_type bm_type_f64 = {sizeof(double), NULL, NULL, bm_f64_eq, bm_f64_hash, bm_f64_to_str, NULL};
 
 static bool bm_f32_eq(const void *a, const void *b) { return *(const float *)a == *(const float *)b; }
 static uint64_t bm_f32_hash(const void *p) { return bm_f64_hash(&(double){(double)*(const float *)p}); }
@@ -1960,28 +1956,25 @@ static void bm_f32_inspect(bm_sb *sb, const void *p, int depth) {
     if (x == 0 && signbit(x)) bm_sb_push(sb, "-0", 2);
     else bm_f32_to_str(sb, p);
 }
-const bm_type bm_type_f32 = {sizeof(float), NULL, NULL, bm_f32_eq, bm_f32_hash, bm_f32_to_str, bm_f32_inspect};
+const bm_type bm_type_f32 = {sizeof(float), NULL, NULL, bm_f32_eq, bm_f32_hash, bm_f32_to_str, NULL};
 
 static bool bm_bool_eq(const void *a, const void *b) { return *(const bool *)a == *(const bool *)b; }
 static uint64_t bm_bool_hash(const void *p) { return *(const bool *)p ? 0x9e3779b97f4a7c15ULL : 0x2545f4914f6cdd1dULL; }
 static void bm_bool_to_str(bm_sb *sb, const void *p) { bm_sb_push_cstr(sb, *(const bool *)p ? "true" : "false"); }
-static void bm_bool_inspect(bm_sb *sb, const void *p, int depth) { (void)depth; bm_bool_to_str(sb, p); }
-const bm_type bm_type_bool = {sizeof(bool), NULL, NULL, bm_bool_eq, bm_bool_hash, bm_bool_to_str, bm_bool_inspect};
+const bm_type bm_type_bool = {sizeof(bool), NULL, NULL, bm_bool_eq, bm_bool_hash, bm_bool_to_str, NULL};
 
 static void bm_strp_retain(void *p) { bm_str_retain(*(bm_str *)p); }
 static void bm_strp_release(void *p) { bm_str_release(*(bm_str *)p); }
 static bool bm_strp_eq(const void *a, const void *b) { return bm_str_eq(*(const bm_str *)a, *(const bm_str *)b); }
 static uint64_t bm_strp_hash(const void *p) { return bm_str_hash(*(const bm_str *)p); }
 static void bm_strp_to_str(bm_sb *sb, const void *p) { bm_sb_push_str(sb, *(const bm_str *)p); }
-static void bm_strp_inspect(bm_sb *sb, const void *p, int depth) { bm_inspect_str(sb, *(const bm_str *)p, depth); }
 const bm_type bm_type_str = {sizeof(bm_str), bm_strp_retain, bm_strp_release, bm_strp_eq, bm_strp_hash,
-                             bm_strp_to_str, bm_strp_inspect};
+                             bm_strp_to_str, NULL};
 
 static bool bm_undef_eq(const void *a, const void *b) { (void)a; (void)b; return true; }
 static uint64_t bm_undef_hash(const void *p) { (void)p; return 0x6a09e667f3bcc909ULL; }
 static void bm_undef_to_str(bm_sb *sb, const void *p) { (void)p; bm_sb_push(sb, "undefined", 9); }
-static void bm_undef_inspect(bm_sb *sb, const void *p, int depth) { (void)depth; bm_undef_to_str(sb, p); }
-const bm_type bm_type_undefined = {0, NULL, NULL, bm_undef_eq, bm_undef_hash, bm_undef_to_str, bm_undef_inspect};
+const bm_type bm_type_undefined = {0, NULL, NULL, bm_undef_eq, bm_undef_hash, bm_undef_to_str, NULL};
 
 /* ================================================================== output */
 
@@ -2044,19 +2037,21 @@ bm_int bm_f64_to_int(double x, const char *what, const char *loc) {
     bm_trap(msg, loc);
 }
 
-static uint64_t bm_rng_state = 0x9e3779b97f4a7c15ULL;
+/* Stored xor the default seed, so the state is zero-initialized (no __data page in the binary). */
+#define BM_RNG_DEFAULT 0x9e3779b97f4a7c15ULL
+static uint64_t bm_rng_state;
 
 static void bm_random_seed(uint64_t seed) {
-    bm_rng_state = bm_mix64(seed + 0x9e3779b97f4a7c15ULL);
-    if (!bm_rng_state) bm_rng_state = 0x9e3779b97f4a7c15ULL;
+    uint64_t x = bm_mix64(seed + BM_RNG_DEFAULT);
+    bm_rng_state = (x ? x : BM_RNG_DEFAULT) ^ BM_RNG_DEFAULT;
 }
 
 double bm_random(void) { /* xorshift64* */
-    uint64_t x = bm_rng_state;
+    uint64_t x = bm_rng_state ^ BM_RNG_DEFAULT;
     x ^= x >> 12;
     x ^= x << 25;
     x ^= x >> 27;
-    bm_rng_state = x;
+    bm_rng_state = x ^ BM_RNG_DEFAULT;
     return (double)((x * 0x2545f4914f6cdd1dULL) >> 11) * 0x1.0p-53;
 }
 
@@ -2927,11 +2922,20 @@ static void bm_promise_ty_inspect(bm_sb *sb, const void *pp, int depth) {
     bm_sb_push_cstr(sb, "Promise { ");
     if (p->state == BM_PENDING) bm_sb_push_cstr(sb, "<pending>");
     else if (p->state == BM_REJECTED) bm_sb_push_cstr(sb, "<rejected>");
-    else if (p->vt && p->vt->inspect) p->vt->inspect(sb, p->value, depth + 1);
+    else if (p->vt) bm_inspect_value(sb, p->vt, p->value, depth + 1);
     else bm_sb_push_cstr(sb, "undefined");
     bm_sb_push_cstr(sb, " }");
 }
-const bm_type bm_type_promise = {sizeof(bm_promise *), bm_promise_ty_retain, bm_promise_ty_release, bm_promise_ty_eq, bm_promise_ty_hash, bm_promise_ty_str, bm_promise_ty_inspect};
+const bm_type bm_type_promise = {sizeof(bm_promise *), bm_promise_ty_retain, bm_promise_ty_release, bm_promise_ty_eq, bm_promise_ty_hash, bm_promise_ty_str, NULL};
+
+void bm_inspect_value(bm_sb *sb, const bm_type *t, const void *p, int depth) {
+    if (t->inspect) t->inspect(sb, p, depth);
+    else if (t == &bm_type_f64) bm_f64_inspect(sb, p, depth);
+    else if (t == &bm_type_f32) bm_f32_inspect(sb, p, depth);
+    else if (t == &bm_type_str) bm_inspect_str(sb, *(const bm_str *)p, depth);
+    else if (t == &bm_type_promise) bm_promise_ty_inspect(sb, p, depth);
+    else t->to_str(sb, p); /* integers, booleans, undefined: as String(x) */
+}
 
 /* ---------------------------------------------------------------- Promise.all, Promise.race */
 

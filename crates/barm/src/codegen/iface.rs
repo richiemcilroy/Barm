@@ -259,7 +259,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             entries.push(tname);
         }
-        let mut init = format!("{{ {rt}, {rl}, {name}_in, {name}_ts }}");
+        let mut init = format!("{{ {rt}, {rl}, BMG_INS({name}_in), {name}_ts }}");
         for e in &entries {
             let _ = write!(init, ", {e}");
         }
