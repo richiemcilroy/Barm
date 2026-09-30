@@ -449,6 +449,9 @@ void bm_native_httpRespond(bm_int status, bm_str headers, bm_str body, bool type
 /* An async handler: httpDefer (while the request is being handled) returns an id; the response
  * comes later through httpRespondTo. Responses on a connection go out in request order. */
 bm_int bm_native_httpDefer(void);
+/* The next task started (an async call not awaited) is in tail position: the caller does nothing
+ * observable before the next microtask checkpoint, so the task may continue eagerly. */
+void bm_native_spawnTail(void);
 void bm_native_httpRespondTo(bm_int id, bm_int status, bm_str headers, bm_str body, bool typed);
 bm_int bm_native_headerIndex(bm_str block, bm_str name);   /* offset of the value, or -1 */
 bm_str bm_native_headerValue(bm_str block, bm_int at);

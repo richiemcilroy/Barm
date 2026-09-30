@@ -2655,6 +2655,46 @@ bm_str bm_jp_error(bm_jp *p) {
 
 bm_task *bm_cur_task;
 static void (*bm_err_release)(void *);
+
+/* Tasks, promises and pending HTTP requests come and go per request: per-size free lists
+ * (32-byte classes up to 2 KiB) refilled from 64 KiB slabs; bigger ones from malloc. */
+enum { BM_ASYNC_STEP = 32, BM_ASYNC_MAX = 2048, BM_ASYNC_CLASSES = BM_ASYNC_MAX / BM_ASYNC_STEP + 1 };
+static void *bm_async_bins[BM_ASYNC_CLASSES];
+
+static void *bm_async_alloc(size_t size) {
+#ifdef BM_PLAIN_ALLOC
+    return bm_alloc(size);
+#endif
+    if (size > BM_ASYNC_MAX) return bm_alloc(size);
+    size_t c = (size + BM_ASYNC_STEP - 1) / BM_ASYNC_STEP;
+    void **f = bm_async_bins[c];
+    if (BM_LIKELY(f != NULL)) {
+        bm_async_bins[c] = *f;
+        return f;
+    }
+    size_t sz = c * BM_ASYNC_STEP, n = 65536 / sz;
+    char *slab = bm_alloc(n * sz);
+    for (size_t i = n - 1; i >= 1; i--) {
+        void **g = (void **)(void *)(slab + i * sz);
+        *g = bm_async_bins[c];
+        bm_async_bins[c] = g;
+    }
+    return slab;
+}
+
+static void bm_async_free(void *p, size_t size) {
+#ifdef BM_PLAIN_ALLOC
+    free(p);
+    return;
+#endif
+    if (size > BM_ASYNC_MAX) {
+        free(p);
+        return;
+    }
+    size_t c = (size + BM_ASYNC_STEP - 1) / BM_ASYNC_STEP;
+    *(void **)p = bm_async_bins[c];
+    bm_async_bins[c] = p;
+}
 static void (*bm_err_report)(void *);
 
 void bm_async_init(void (*err_release)(void *), void (*err_report)(void *)) {
@@ -2726,7 +2766,7 @@ void bm_queue_microtask(bm_fn cb) {
 static void bm_resume_job(void *a, void *b);
 
 bm_task *bm_task_new(size_t frame_size, bm_task_run run, const bm_type *vt) {
-    bm_task *t = bm_alloc(sizeof(bm_task) + frame_size);
+    bm_task *t = bm_async_alloc(sizeof(bm_task) + frame_size);
     memset(t, 0, sizeof(bm_task) + frame_size);
     t->run = run;
     t->size = (uint32_t)frame_size;
@@ -2742,7 +2782,7 @@ static void bm_task_step(bm_task *t) {
     bm_cur_task = prev;
     if (done) {
         bm_promise_release(t->promise);
-        bm_free(t);
+        bm_async_free(t, sizeof(bm_task) + t->size);
     }
 }
 
@@ -2753,10 +2793,17 @@ static void bm_resume_job(void *a, void *b) {
     bm_task_step(t);
 }
 
+/* Set by the standard library right before starting a task in tail position: nothing observable
+ * runs between the start and the next microtask checkpoint, so it may continue eagerly. */
+static bool bm_spawn_tail;
+
+void bm_native_spawnTail(void) { bm_spawn_tail = true; }
+
 bm_promise *bm_task_spawn(bm_task *t) {
     bm_promise *p = t->promise;
     bm_promise_retain(p);
-    t->flags |= BM_TASK_SYNC;
+    if (bm_spawn_tail) bm_spawn_tail = false;
+    else t->flags |= BM_TASK_SYNC;
     bm_task_step(t);
     return p;
 }
@@ -2772,7 +2819,7 @@ void bm_task_yield(void) {
 
 bm_promise *bm_promise_new(const bm_type *vt) {
     size_t size = vt ? vt->size : 0;
-    bm_promise *p = bm_alloc(sizeof(bm_promise) + size);
+    bm_promise *p = bm_async_alloc(sizeof(bm_promise) + size);
     memset(p, 0, sizeof(bm_promise));
     p->rc = 1;
     p->vt = vt;
@@ -2783,7 +2830,7 @@ void bm_promise_release_slow(bm_promise *p) {
     if (p->state == BM_FULFILLED && p->vt && p->vt->release) p->vt->release(p->value);
     if (p->state == BM_REJECTED && p->err && bm_err_release) bm_err_release(p->err);
     bm_free(p->more);
-    bm_free(p);
+    bm_async_free(p, sizeof(bm_promise) + (p->vt ? p->vt->size : 0));
 }
 
 static void bm_promise_wake(bm_promise *p) {
@@ -3231,7 +3278,7 @@ static void bm_http_drain(bm_http_conn *c) {
         if (!c->pend_head) c->pend_tail = NULL;
         c->npending--;
         bm_sb_free(&r->out);
-        bm_free(r);
+        bm_async_free(r, sizeof *r);
     }
 }
 
@@ -3244,7 +3291,7 @@ void bm_native_httpRespond(bm_int status, bm_str headers, bm_str body, bool type
         return;
     }
     /* an earlier request on this connection is still waiting: this response waits behind it */
-    bm_http_req *r = bm_alloc(sizeof *r);
+    bm_http_req *r = bm_async_alloc(sizeof *r);
     memset(r, 0, sizeof *r);
     r->c = c;
     r->keep = bm_http_keep;
@@ -3262,7 +3309,7 @@ bm_int bm_native_httpDefer(void) {
     bm_http_conn *c = bm_http_cur;
     if (!c) return 0;
     bm_http_cur = NULL;
-    bm_http_req *r = bm_alloc(sizeof *r);
+    bm_http_req *r = bm_async_alloc(sizeof *r);
     memset(r, 0, sizeof *r);
     r->c = c;
     r->keep = bm_http_keep;
@@ -3291,12 +3338,14 @@ void bm_native_httpRespondTo(bm_int id, bm_int status, bm_str headers, bm_str bo
     bm_http_deferred[id] = (bm_http_req *)(intptr_t)bm_http_deferred_free;
     bm_http_deferred_free = id;
     r->id = 0;
-    if (!r->c) { bm_free(r); return; }   /* the client went away */
+    if (!r->c) { bm_async_free(r, sizeof *r); return; }   /* the client went away */
     bm_http_refresh_date();
     bm_http_conn *c = r->c;
-    bm_http_response(NULL, &r->out, r->keep, r->head, status, headers, body, typed);
+    /* next in line: straight into the connection's output; otherwise it waits its turn */
+    if (c->pend_head == r) bm_http_response(c, NULL, r->keep, r->head, status, headers, body, typed);
+    else bm_http_response(NULL, &r->out, r->keep, r->head, status, headers, body, typed);
     r->ready = true;
-    bm_http_drain(c);   /* may write and free r */
+    bm_http_drain(c);   /* writes (in order) and frees what's ready, r included */
     bm_http_mark_dirty(c);
 }
 
@@ -3577,7 +3626,7 @@ static void bm_http_close(bm_http_conn *c) {
             r->c = NULL;
         } else {
             bm_sb_free(&r->out);
-            bm_free(r);
+            bm_async_free(r, sizeof *r);
         }
     }
     if (c->prev) c->prev->next = c->next; else bm_http_conns = c->next;

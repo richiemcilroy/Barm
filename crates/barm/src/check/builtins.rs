@@ -42,6 +42,7 @@ pub(super) fn native_sig(types: &mut Types, name: &str) -> Option<(Vec<TyId>, Ty
         "urlPart" => (vec![STR, INT], STR),
         "httpRespond" => (vec![INT, STR, STR, BOOL], VOID),
         "httpDefer" => (vec![], INT),
+        "spawnTail" => (vec![], VOID),
         "httpRespondTo" => (vec![INT, INT, STR, STR, BOOL], VOID),
         "headerIndex" => (vec![STR, STR], INT),
         "headerValue" => (vec![STR, INT], STR),
