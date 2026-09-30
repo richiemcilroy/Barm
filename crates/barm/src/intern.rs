@@ -24,6 +24,11 @@ impl Interner {
         &self.strs[sym.0 as usize]
     }
 
+    /// The symbol for `s`, if it was ever interned.
+    pub fn lookup(&self, s: &str) -> Option<Sym> {
+        self.map.get(s).copied()
+    }
+
     pub fn len(&self) -> usize {
         self.strs.len()
     }
