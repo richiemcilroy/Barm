@@ -1,0 +1,8 @@
+{
+  "name": "barm-site",
+  "private": true,
+  "scripts": {
+    "dev": "barm --watch server.barm",
+    "start": "barm server.barm"
+  }
+}
