@@ -151,6 +151,8 @@ pub struct ArrowFn {
     pub params: Vec<Param>,
     pub ret: Option<TypeId>,
     pub body: ArrowBody,
+    /// `async (x) => ...` / `async name() { }`.
+    pub is_async: bool,
 }
 
 pub enum ExprKind {
@@ -185,6 +187,8 @@ pub enum ExprKind {
     Super,
     /// `try f(x)`: passes an error thrown by the call(s) on to the caller.
     Try(ExprId),
+    /// `await e`.
+    Await(ExprId),
     Error,
 }
 
@@ -267,6 +271,8 @@ pub struct FnDecl {
     /// `throws E`.
     pub throws: Option<TypeId>,
     pub body: StmtId,
+    /// `async function` / `async method()`; a script whose top level uses `await`.
+    pub is_async: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

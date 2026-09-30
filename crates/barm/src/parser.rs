@@ -310,7 +310,8 @@ impl<'a> Parser<'a> {
         let span = first;
         let block = self.mk_stmt(StmtKind::Block(body), span);
         let name = self.interner.intern("<script>");
-        let f = FnDecl { name, name_span: span, tparams: Vec::new(), params: Vec::new(), ret: None, throws: None, body: block };
+        let is_async = top_level_await(&self.ast, block);
+        let f = FnDecl { name, name_span: span, tparams: Vec::new(), params: Vec::new(), ret: None, throws: None, body: block, is_async };
         self.ast.script = Some(self.ast.items.len() as u32);
         self.ast.items.push(Item { kind: ItemKind::Function(f), span, exported: false });
     }
@@ -357,11 +358,10 @@ impl<'a> Parser<'a> {
                     self.ast.items.push(Item { kind: ItemKind::Function(f), span, exported });
                 }
             }
-            // `async function`: Barm's async is synchronous for now (see spec §7b), so `async` is
-            // accepted and has no effect.
             Tok::Async if self.nth(1) == Tok::Function => {
                 self.bump();
-                if let Some(f) = self.function() {
+                if let Some(mut f) = self.function() {
+                    f.is_async = true;
                     let span = start.to(self.prev_span());
                     self.ast.items.push(Item { kind: ItemKind::Function(f), span, exported });
                 }
@@ -480,7 +480,7 @@ impl<'a> Parser<'a> {
     fn class_member(&mut self) -> Option<ClassMember> {
         let start = self.cur_span();
         let mut vis = Visibility::Public;
-        let (mut is_static, mut readonly, mut weak, mut is_abstract) = (false, false, false, false);
+        let (mut is_static, mut readonly, mut weak, mut is_abstract, mut is_async) = (false, false, false, false, false);
         loop {
             if self.at(Tok::Abstract) && self.at_modifier() {
                 self.bump();
@@ -498,7 +498,7 @@ impl<'a> Parser<'a> {
                 "readonly" => readonly = true,
                 "weak" => weak = true,
                 "override" => {}
-                "async" => {}
+                "async" => is_async = true,
                 "declare" => {
                     let span = self.cur_span();
                     self.err("X0021", span, "`declare` is not supported");
@@ -569,7 +569,7 @@ impl<'a> Parser<'a> {
                 let span = self.prev_span();
                 self.mk_stmt(StmtKind::Block(Vec::new()), span)
             };
-            let fd = FnDecl { name, name_span, tparams, params, ret, throws, body };
+            let fd = FnDecl { name, name_span, tparams, params, ret, throws, body, is_async };
             let kind = if text == "constructor" && accessor.is_none() {
                 MemberKind::Constructor(fd)
             } else if accessor == Some(true) {
@@ -820,7 +820,7 @@ impl<'a> Parser<'a> {
             return None;
         }
         let body = self.block();
-        Some(FnDecl { name, name_span, tparams, params, ret, throws, body })
+        Some(FnDecl { name, name_span, tparams, params, ret, throws, body, is_async: false })
     }
 
     /// `throws E` (returned) / `uses fs | net` (not supported yet).
@@ -1601,10 +1601,11 @@ impl<'a> Parser<'a> {
                 );
                 return self.unary();
             }
-            // `await e` is `e`: async is synchronous for now (spec §7b).
             Tok::Await => {
                 self.bump();
-                return self.unary();
+                let e = self.unary();
+                let span = start.to(self.expr_span(e));
+                return self.mk_expr(ExprKind::Await(e), span);
             }
             Tok::Try => {
                 self.bump();
@@ -1774,12 +1775,16 @@ impl<'a> Parser<'a> {
     fn try_arrow(&mut self) -> Option<ExprId> {
         let start = self.cur_span();
         if self.at(Tok::Async) && matches!(self.nth(1), Tok::LParen | Tok::Ident) {
-            // `async (x) => ...`: accepted, synchronous for now.
             let save = self.pos;
             self.bump();
             let r = self.try_arrow();
-            if r.is_none() {
-                self.pos = save;
+            match r {
+                Some(e) => {
+                    if let ExprKind::Arrow(f) = &mut self.ast.exprs[e as usize].kind {
+                        f.is_async = true;
+                    }
+                }
+                None => self.pos = save,
             }
             return r;
         }
@@ -1829,7 +1834,7 @@ impl<'a> Parser<'a> {
     fn arrow_body(&mut self, start: Span, params: Vec<Param>, ret: Option<TypeId>) -> ExprId {
         let body = if self.at(Tok::LBrace) { ArrowBody::Block(self.block()) } else { ArrowBody::Expr(self.assign()) };
         let span = start.to(self.prev_span());
-        self.mk_expr(ExprKind::Arrow(Box::new(ArrowFn { params, ret, body })), span)
+        self.mk_expr(ExprKind::Arrow(Box::new(ArrowFn { params, ret, body, is_async: false })), span)
     }
 
     fn int_value(&mut self, t: Token) -> u64 {
@@ -2046,7 +2051,7 @@ impl<'a> Parser<'a> {
 
     /// `name(params): T { body }` in an object literal: a field holding an arrow function
     /// (there is no `this` for it to see).
-    fn object_method(&mut self, start: Span) -> Option<ObjField> {
+    fn object_method(&mut self, start: Span, is_async: bool) -> Option<ObjField> {
         let (name, name_span) = self.prop_name()?;
         if self.at(Tok::Lt) {
             let span = self.cur_span();
@@ -2063,7 +2068,7 @@ impl<'a> Parser<'a> {
         }
         let body = ArrowBody::Block(self.block());
         let span = start.to(self.prev_span());
-        let value = self.mk_expr(ExprKind::Arrow(Box::new(ArrowFn { params, ret, body })), span);
+        let value = self.mk_expr(ExprKind::Arrow(Box::new(ArrowFn { params, ret, body, is_async })), span);
         Some(ObjField { name, name_span, value, quoted: false })
     }
 
@@ -2110,11 +2115,11 @@ impl<'a> Parser<'a> {
             } else if self.at(Tok::Async) && matches!(self.nth(1), Tok::Ident) && self.nth(2) == Tok::LParen {
                 // `async name(params) { ... }`
                 self.bump();
-                if let Some(f) = self.object_method(fstart) {
+                if let Some(f) = self.object_method(fstart, true) {
                     fields.push(f);
                 }
             } else if matches!(self.kind(), Tok::Ident) && self.nth(1) == Tok::LParen || self.kind().is_keyword() && self.nth(1) == Tok::LParen {
-                if let Some(f) = self.object_method(fstart) {
+                if let Some(f) = self.object_method(fstart, false) {
                     fields.push(f);
                 }
             } else if let Some((name, name_span)) = self.prop_name() {
@@ -2147,5 +2152,42 @@ impl<'a> Parser<'a> {
         self.expect(Tok::RBrace, "to close the object literal");
         let span = start.to(self.prev_span());
         self.mk_expr(ExprKind::Object(fields), span)
+    }
+}
+
+/// Does the statement use `await` outside nested functions (a script with top-level `await`)?
+fn top_level_await(ast: &Ast, s: StmtId) -> bool {
+    fn expr(ast: &Ast, e: ExprId) -> bool {
+        match &ast.expr(e).kind {
+            ExprKind::Await(_) => true,
+            ExprKind::Arrow(_) => false,
+            ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::As(x, _) | ExprKind::Try(x) => expr(ast, *x),
+            ExprKind::Update { target, .. } => expr(ast, *target),
+            ExprKind::Binary(_, a, b) | ExprKind::Assign(_, a, b) | ExprKind::Index { obj: a, index: b, .. } => expr(ast, *a) || expr(ast, *b),
+            ExprKind::Cond(a, b, c) => expr(ast, *a) || expr(ast, *b) || expr(ast, *c),
+            ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args, .. } => expr(ast, *callee) || args.iter().any(|a| expr(ast, a.expr)),
+            ExprKind::Member { obj, .. } => expr(ast, *obj),
+            ExprKind::Template(_, xs) | ExprKind::Array(xs) => xs.iter().any(|&x| expr(ast, x)),
+            ExprKind::Object(fs) => fs.iter().any(|f| expr(ast, f.value)),
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Undefined | ExprKind::Null | ExprKind::Ident(_) | ExprKind::This | ExprKind::Super | ExprKind::Error => false,
+        }
+    }
+    let opt = |e: &Option<ExprId>| e.is_some_and(|e| expr(ast, e));
+    match &ast.stmt(s).kind {
+        StmtKind::Let { init, .. } => opt(init),
+        StmtKind::Expr(e) | StmtKind::Throw(e) => expr(ast, *e),
+        StmtKind::Return(e) => opt(e),
+        StmtKind::If(c, t, e) => expr(ast, *c) || top_level_await(ast, *t) || e.is_some_and(|e| top_level_await(ast, e)),
+        StmtKind::While(c, b) | StmtKind::DoWhile(b, c) => expr(ast, *c) || top_level_await(ast, *b),
+        StmtKind::For { init, cond, step, body } => init.is_some_and(|i| top_level_await(ast, i)) || opt(cond) || opt(step) || top_level_await(ast, *body),
+        StmtKind::ForOf { iter, body, .. } => expr(ast, *iter) || top_level_await(ast, *body),
+        StmtKind::Switch(e, cases) => expr(ast, *e) || cases.iter().any(|c| opt(&c.test) || c.body.iter().any(|&b| top_level_await(ast, b))),
+        StmtKind::Block(ss) => ss.iter().any(|&b| top_level_await(ast, b)),
+        StmtKind::Try { body, catch, finally } => {
+            top_level_await(ast, *body) || catch.as_ref().is_some_and(|c| top_level_await(ast, c.body)) || finally.is_some_and(|f| top_level_await(ast, f))
+        }
+        // `const x = await f()` at the top level of a script: the initializer is on the item
+        StmtKind::InitGlobal(ii) => matches!(&ast.items[*ii as usize].kind, ItemKind::Const { init, .. } if expr(ast, *init)),
+        StmtKind::Break | StmtKind::Continue | StmtKind::Empty | StmtKind::Error => false,
     }
 }
