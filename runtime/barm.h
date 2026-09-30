@@ -289,6 +289,86 @@ static inline void bm_env_retain(bm_env *e) { if (e && e->rc >= 0) e->rc++; }
 void bm_env_release_slow(bm_env *e);
 static inline void bm_env_release(bm_env *e) { if (e && e->rc > 0 && --e->rc == 0) bm_env_release_slow(e); }
 
+/* ------------------------------------------------------------------ async (tasks, promises, timers)
+ *
+ * An async function compiles to a frame and a resume function that returns true once the frame
+ * has finished. A task runs one root frame; awaited async calls are embedded in their caller's
+ * frame, so resuming a task resumes its whole chain. Scheduling follows JavaScript exactly:
+ * microtasks run in FIFO order after each macrotask (a timer callback, a request), and every
+ * `await` costs one microtask tick. The one shortcut, `bm_async_eager`, is taken only when
+ * running on immediately is indistinguishable from waiting a tick. Single-threaded. */
+
+enum { BM_PENDING = 0, BM_FULFILLED = 1, BM_REJECTED = 2 };
+
+typedef struct bm_task bm_task;
+
+typedef struct bm_promise {
+    int64_t rc;
+    uint8_t state;            /* BM_PENDING, BM_FULFILLED or BM_REJECTED */
+    bool handled;             /* awaited: a rejection isn't reported as unhandled */
+    bool reported;            /* on the unhandled-rejection list */
+    const bm_type *vt;        /* the value's type */
+    void *err;                /* rejection: an Error object (owned) */
+    bm_task *waiter;          /* first task waiting for it */
+    bm_task **more;           /* further waiters, in the order they started waiting */
+    int32_t nmore, capmore;
+    _Alignas(16) unsigned char value[];
+} bm_promise;
+
+/* A task's `run` resumes its root frame; true once it has finished (and settled `promise`). */
+typedef bool (*bm_task_run)(bm_task *t);
+
+struct bm_task {
+    bm_task *next;            /* microtask queue link */
+    bm_task_run run;
+    bm_promise *promise;      /* the task's result (the task holds one reference) */
+    uint32_t flags;           /* BM_TASK_SYNC: its starter is still running (see bm_async_eager) */
+    uint32_t size;            /* frame size */
+    _Alignas(16) unsigned char frame[];
+};
+enum { BM_TASK_SYNC = 1u };
+
+extern bm_task *bm_cur_task;  /* the task running now (NULL outside tasks) */
+
+/* The program's error objects: released and printed through hooks the program installs. */
+void bm_async_init(void (*err_release)(void *), void (*err_report)(void *));
+
+bm_promise *bm_promise_new(const bm_type *vt);                 /* pending, rc 1 */
+static inline void bm_promise_retain(bm_promise *p) { if (p) p->rc++; }
+void bm_promise_release_slow(bm_promise *p);
+static inline void bm_promise_release(bm_promise *p) { if (p && --p->rc == 0) bm_promise_release_slow(p); }
+void bm_promise_resolve(bm_promise *p, const void *value);     /* copies and retains the value */
+void bm_promise_resolve_move(bm_promise *p, void *value);      /* takes the value (no retain) */
+void bm_promise_reject(bm_promise *p, void *err);              /* takes the error */
+static inline void *bm_promise_value(bm_promise *p) { return p->value; }
+bm_env *bm_promise_resolver(bm_promise *p);                     /* env of a `resolve`/`reject` closure: holds p */
+static inline bm_promise *bm_resolver_promise(bm_env *env) { return *(bm_promise **)(env + 1); }
+
+bm_task *bm_task_new(size_t frame_size, bm_task_run run, const bm_type *vt);   /* zeroed frame */
+static inline void *bm_task_frame(bm_task *t) { return t->frame; }
+/* Starts a task (an async call that isn't awaited): runs it until it first waits, then returns
+ * its promise (a new reference). */
+bm_promise *bm_task_spawn(bm_task *t);
+/* Starts a task from the event loop (the program's top level): it may continue eagerly. */
+void bm_task_start(bm_task *t);
+
+/* Continuing now is indistinguishable from waiting a tick: no microtask is queued, and the task
+ * isn't being run synchronously by a starter that still has code to run. */
+extern size_t bm_mq_len;
+static inline bool bm_async_eager(void) { return bm_mq_len == 0 && bm_cur_task && !(bm_cur_task->flags & BM_TASK_SYNC); }
+/* `await p`: true if the value can be taken now — settled, and nothing else could run first.
+ * Otherwise call bm_await_suspend and suspend: the task resumes once the value is ready. */
+static inline bool bm_await_now(bm_promise *p) { p->handled = true; return p->state != BM_PENDING && bm_async_eager(); }
+void bm_await_suspend(bm_promise *p);
+/* After an embedded async call finished: suspend for the tick its promise would have taken. */
+void bm_task_yield(void);
+
+void bm_queue_microtask(bm_fn callback);        /* queueMicrotask(cb) (retains cb) */
+bm_int bm_set_timer(bm_fn callback, double ms, bool repeat);   /* setTimeout/setInterval (retains cb) */
+void bm_clear_timer(bm_int id);
+/* Runs microtasks and timers until nothing is left. */
+void bm_async_run(void);
+
 /* ------------------------------------------------------------------ tests */
 
 /* Runs one test; a failing expect or a trap inside it marks it failed and returns.
@@ -302,8 +382,6 @@ int bm_test_summary(void);   /* prints "<n> passed, <m> failed"; returns exit st
 void bm_init(int argc, char **argv);
 extern int bm_argc;
 extern char **bm_argv;
-
-#endif
 
 /* ------------------------------------------------------------------ system (used by the standard library) */
 
@@ -373,3 +451,5 @@ bm_str bm_native_headerValue(bm_str block, bm_int at);
 void bm_http_run(void);   /* after the program: serves registered servers until stopped (no-op if none) */
 bm_str bm_native_headerRemove(bm_str block, bm_str name);  /* the block without `name` lines */
 bm_str bm_native_headerAppend(bm_str block, bm_str name, bm_str value);
+
+#endif /* BARM_H */

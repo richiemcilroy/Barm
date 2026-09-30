@@ -4,6 +4,9 @@
  * so everything that is not part of the barm.h contract is `static` and prefixed `bm_`.
  * See barm.h for ownership conventions.
  */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1   /* POSIX and BSD interfaces (sigaction, MAP_ANON, nanosleep) under -std=c11 */
+#endif
 #include "barm.h"
 
 #include <float.h>
@@ -2641,6 +2644,339 @@ bool bm_jp_find_key(bm_jp *p, const char *key, bm_str *val) {
 bm_str bm_jp_error(bm_jp *p) {
     const char *e = p->err[0] ? p->err : "Invalid JSON";
     return bm_str_from(e, strlen(e));
+}
+
+/* ================================================================== async
+ * Tasks, promises, the microtask queue and timers (see barm.h). */
+
+bm_task *bm_cur_task;
+static void (*bm_err_release)(void *);
+static void (*bm_err_report)(void *);
+
+void bm_async_init(void (*err_release)(void *), void (*err_report)(void *)) {
+    bm_err_release = err_release;
+    bm_err_report = err_report;
+}
+
+/* ---------------------------------------------------------------- microtask queue (a ring) */
+
+typedef struct { void (*fn)(void *, void *); void *a, *b; } bm_job;
+static bm_job *bm_mq;
+static size_t bm_mq_head, bm_mq_cap;
+size_t bm_mq_len;
+
+static void bm_mq_push(void (*fn)(void *, void *), void *a, void *b) {
+    if (bm_mq_len == bm_mq_cap) {
+        size_t cap = bm_mq_cap ? bm_mq_cap * 2 : 64;
+        bm_job *q = bm_alloc(cap * sizeof *q);
+        for (size_t i = 0; i < bm_mq_len; i++) q[i] = bm_mq[(bm_mq_head + i) & (bm_mq_cap - 1)];
+        bm_free(bm_mq);
+        bm_mq = q;
+        bm_mq_head = 0;
+        bm_mq_cap = cap;
+    }
+    bm_mq[(bm_mq_head + bm_mq_len) & (bm_mq_cap - 1)] = (bm_job){fn, a, b};
+    bm_mq_len++;
+}
+
+/* Rejections nobody awaited by the time the microtask queue drained (reported, then exit 1). */
+static bm_promise **bm_unhandled;
+static size_t bm_nunhandled, bm_unhandled_cap;
+
+static void bm_check_unhandled(void) {
+    for (size_t i = 0; i < bm_nunhandled; i++) {
+        bm_promise *p = bm_unhandled[i];
+        if (!p->handled) {
+            bm_out_flush();
+            if (bm_err_report) bm_err_report(p->err);
+            exit(1);
+        }
+        p->reported = false;
+        bm_promise_release(p);
+    }
+    bm_nunhandled = 0;
+}
+
+static void bm_run_microtasks(void) {
+    while (bm_mq_len) {
+        bm_job j = bm_mq[bm_mq_head];
+        bm_mq_head = (bm_mq_head + 1) & (bm_mq_cap - 1);
+        bm_mq_len--;
+        j.fn(j.a, j.b);
+    }
+    if (bm_nunhandled) bm_check_unhandled();
+}
+
+static void bm_callback_job(void *fn, void *env) {
+    ((void (*)(bm_env *))fn)((bm_env *)env);
+    bm_env_release((bm_env *)env);
+}
+
+void bm_queue_microtask(bm_fn cb) {
+    bm_env_retain(cb.env);
+    bm_mq_push(bm_callback_job, cb.fn, cb.env);
+}
+
+/* ---------------------------------------------------------------- tasks */
+
+static void bm_resume_job(void *a, void *b);
+
+bm_task *bm_task_new(size_t frame_size, bm_task_run run, const bm_type *vt) {
+    bm_task *t = bm_alloc(sizeof(bm_task) + frame_size);
+    memset(t, 0, sizeof(bm_task) + frame_size);
+    t->run = run;
+    t->size = (uint32_t)frame_size;
+    t->promise = bm_promise_new(vt);
+    return t;
+}
+
+/* Runs the task as the current one; frees it once it has finished. */
+static void bm_task_step(bm_task *t) {
+    bm_task *prev = bm_cur_task;
+    bm_cur_task = t;
+    bool done = t->run(t);
+    bm_cur_task = prev;
+    if (done) {
+        bm_promise_release(t->promise);
+        bm_free(t);
+    }
+}
+
+static void bm_resume_job(void *a, void *b) {
+    (void)b;
+    bm_task *t = a;
+    t->flags &= ~BM_TASK_SYNC;   /* run from the queue: nothing of its starter is left to run */
+    bm_task_step(t);
+}
+
+bm_promise *bm_task_spawn(bm_task *t) {
+    bm_promise *p = t->promise;
+    bm_promise_retain(p);
+    t->flags |= BM_TASK_SYNC;
+    bm_task_step(t);
+    return p;
+}
+
+void bm_task_start(bm_task *t) { bm_task_step(t); }
+
+void bm_task_yield(void) {
+    if (!bm_cur_task) bm_trap("internal error: await outside a task", NULL);
+    bm_mq_push(bm_resume_job, bm_cur_task, NULL);
+}
+
+/* ---------------------------------------------------------------- promises */
+
+bm_promise *bm_promise_new(const bm_type *vt) {
+    size_t size = vt ? vt->size : 0;
+    bm_promise *p = bm_alloc(sizeof(bm_promise) + size);
+    memset(p, 0, sizeof(bm_promise));
+    p->rc = 1;
+    p->vt = vt;
+    return p;
+}
+
+void bm_promise_release_slow(bm_promise *p) {
+    if (p->state == BM_FULFILLED && p->vt && p->vt->release) p->vt->release(p->value);
+    if (p->state == BM_REJECTED && p->err && bm_err_release) bm_err_release(p->err);
+    bm_free(p->more);
+    bm_free(p);
+}
+
+static void bm_promise_wake(bm_promise *p) {
+    if (p->waiter) {
+        bm_mq_push(bm_resume_job, p->waiter, NULL);
+        p->waiter = NULL;
+    }
+    for (int32_t i = 0; i < p->nmore; i++) bm_mq_push(bm_resume_job, p->more[i], NULL);
+    p->nmore = 0;
+}
+
+void bm_promise_resolve(bm_promise *p, const void *value) {
+    if (p->state != BM_PENDING) return;
+    size_t size = p->vt ? p->vt->size : 0;
+    if (size) {
+        memcpy(p->value, value, size);
+        if (p->vt->retain) p->vt->retain(p->value);
+    }
+    p->state = BM_FULFILLED;
+    bm_promise_wake(p);
+}
+
+void bm_promise_resolve_move(bm_promise *p, void *value) {
+    if (p->state != BM_PENDING) {
+        if (p->vt && p->vt->release) p->vt->release(value);
+        return;
+    }
+    size_t size = p->vt ? p->vt->size : 0;
+    if (size) memcpy(p->value, value, size);
+    p->state = BM_FULFILLED;
+    bm_promise_wake(p);
+}
+
+void bm_promise_reject(bm_promise *p, void *err) {
+    if (p->state != BM_PENDING) {
+        if (bm_err_release) bm_err_release(err);
+        return;
+    }
+    p->err = err;
+    p->state = BM_REJECTED;
+    if (!p->handled && !p->waiter && !p->reported) {
+        if (bm_nunhandled == bm_unhandled_cap) {
+            bm_unhandled_cap = bm_unhandled_cap ? bm_unhandled_cap * 2 : 8;
+            bm_unhandled = bm_realloc(bm_unhandled, bm_unhandled_cap * sizeof *bm_unhandled);
+        }
+        p->reported = true;
+        bm_promise_retain(p);
+        bm_unhandled[bm_nunhandled++] = p;
+    }
+    bm_promise_wake(p);
+}
+
+void bm_await_suspend(bm_promise *p) {
+    bm_task *t = bm_cur_task;
+    if (!t) bm_trap("internal error: await outside a task", NULL);
+    p->handled = true;
+    if (p->state != BM_PENDING) {
+        bm_mq_push(bm_resume_job, t, NULL);
+        return;
+    }
+    if (!p->waiter) {
+        p->waiter = t;
+        return;
+    }
+    if (p->nmore == p->capmore) {
+        p->capmore = p->capmore ? p->capmore * 2 : 4;
+        p->more = bm_realloc(p->more, (size_t)p->capmore * sizeof *p->more);
+    }
+    p->more[p->nmore++] = t;
+}
+
+typedef struct { bm_env h; bm_promise *p; } bm_resolver_env;
+
+static void bm_resolver_drop(bm_env *e) { bm_promise_release(((bm_resolver_env *)e)->p); }
+
+bm_env *bm_promise_resolver(bm_promise *p) {
+    bm_resolver_env *e = bm_alloc(sizeof *e);
+    e->h.rc = 1;
+    e->h.drop = bm_resolver_drop;
+    e->p = p;
+    bm_promise_retain(p);
+    return &e->h;
+}
+
+/* ---------------------------------------------------------------- timers (a min-heap by due time, then creation) */
+
+typedef struct {
+    uint64_t when;    /* due, in ns of CLOCK_MONOTONIC */
+    uint64_t seq;
+    uint64_t every;   /* setInterval: period in ns (0: once) */
+    bm_int id;
+    bm_fn cb;         /* fn NULL: cleared */
+} bm_timer;
+
+static bm_timer *bm_timers;
+static size_t bm_ntimers, bm_timers_cap, bm_live_timers;
+static uint64_t bm_timer_seq;
+static bm_int bm_timer_ids;
+
+static uint64_t bm_mono_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+}
+
+static bool bm_timer_before(const bm_timer *a, const bm_timer *b) { return a->when < b->when || (a->when == b->when && a->seq < b->seq); }
+
+static void bm_timer_push(bm_timer t) {
+    if (bm_ntimers == bm_timers_cap) {
+        bm_timers_cap = bm_timers_cap ? bm_timers_cap * 2 : 16;
+        bm_timers = bm_realloc(bm_timers, bm_timers_cap * sizeof *bm_timers);
+    }
+    size_t i = bm_ntimers++;
+    while (i > 0) {
+        size_t parent = (i - 1) / 2;
+        if (!bm_timer_before(&t, &bm_timers[parent])) break;
+        bm_timers[i] = bm_timers[parent];
+        i = parent;
+    }
+    bm_timers[i] = t;
+}
+
+static bm_timer bm_timer_pop(void) {
+    bm_timer top = bm_timers[0];
+    bm_timer last = bm_timers[--bm_ntimers];
+    size_t i = 0;
+    for (;;) {
+        size_t l = 2 * i + 1, r = l + 1, m = i;
+        const bm_timer *best = &last;
+        if (l < bm_ntimers && bm_timer_before(&bm_timers[l], best)) { m = l; best = &bm_timers[l]; }
+        if (r < bm_ntimers && bm_timer_before(&bm_timers[r], best)) m = r;
+        if (m == i) break;
+        bm_timers[i] = bm_timers[m];
+        i = m;
+    }
+    if (bm_ntimers) bm_timers[i] = last;
+    return top;
+}
+
+bm_int bm_set_timer(bm_fn cb, double ms, bool repeat) {
+    /* As Node: delays below 1 ms (or not a number, or too large) are 1 ms; fractions are dropped. */
+    if (!(ms >= 1 && ms <= 2147483647.0)) ms = 1;
+    uint64_t delay = (uint64_t)ms * 1000000u;
+    bm_env_retain(cb.env);
+    bm_timer t = {bm_mono_ns() + delay, ++bm_timer_seq, repeat ? delay : 0, ++bm_timer_ids, cb};
+    bm_timer_push(t);
+    bm_live_timers++;
+    return t.id;
+}
+
+void bm_clear_timer(bm_int id) {
+    for (size_t i = 0; i < bm_ntimers; i++) {
+        if (bm_timers[i].id == id && bm_timers[i].cb.fn) {
+            bm_env_release(bm_timers[i].cb.env);
+            bm_timers[i].cb.fn = NULL;
+            bm_live_timers--;
+            return;
+        }
+    }
+}
+
+/* Fires every timer that is due, each followed by the microtasks it queued (as Node). */
+static void bm_fire_timers(void) {
+    uint64_t now = bm_mono_ns();
+    while (bm_ntimers && bm_timers[0].when <= now) {
+        bm_timer t = bm_timer_pop();
+        if (!t.cb.fn) continue;
+        void (*fn)(bm_env *) = (void (*)(bm_env *))t.cb.fn;
+        if (t.every) {
+            bm_env_retain(t.cb.env);   /* the call's own reference: clearInterval may run inside it */
+            t.when = now + t.every;
+            t.seq = ++bm_timer_seq;
+            bm_timer_push(t);
+            fn(t.cb.env);
+            bm_env_release(t.cb.env);
+        } else {
+            bm_live_timers--;
+            fn(t.cb.env);
+            bm_env_release(t.cb.env);
+        }
+        bm_run_microtasks();
+    }
+}
+
+void bm_async_run(void) {
+    for (;;) {
+        bm_run_microtasks();
+        while (bm_ntimers && !bm_timers[0].cb.fn) (void)bm_timer_pop();
+        if (!bm_live_timers) return;
+        uint64_t now = bm_mono_ns();
+        if (bm_timers[0].when > now) {
+            uint64_t wait = bm_timers[0].when - now;
+            struct timespec ts = {(time_t)(wait / 1000000000u), (long)(wait % 1000000000u)};
+            while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {}
+        }
+        bm_fire_timers();
+    }
 }
 
 /* ================================================================== HTTP server */
