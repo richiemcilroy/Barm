@@ -85,6 +85,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let bn = self.box_name(bt);
                 let _ = writeln!(body, "    {bn} base;");
             }
+            None if self.needs_weak_slot(ci.decl) => body.push_str("    bmg_objw h;\n"),
             None => body.push_str("    bmg_obj h;\n"),
         }
         for f in info.fields.iter().filter(|f| f.owner == ci.decl) {
@@ -121,7 +122,8 @@ impl<'c, 'a> Gen<'c, 'a> {
         let info = self.c.classes[ci.decl as usize].clone();
         let bn = ci.name.clone();
         let o = self.fresh("eo");
-        self.line(format!("{bn} *{o} = bmg_alloc_small(sizeof({bn})); bmg_obj_init({o}, {});", ci.cid));
+        let weak_init = if self.needs_weak_slot(ci.decl) { format!(" BMG_WEAK({o}) = 0;") } else { String::new() };
+        self.line(format!("{bn} *{o} = bmg_alloc_small(sizeof({bn})); bmg_obj_init({o}, {});{weak_init}", ci.cid));
         for f in &info.fields {
             let fty = self.c.types.subst(f.ty, &ci.subst);
             let d = self.default_value(fty);
@@ -292,9 +294,10 @@ impl<'c, 'a> Gen<'c, 'a> {
         let bn = ci.name.clone();
         let o = self.fresh("o");
         if ci.cyclic {
-            self.line(format!("{bn} *{o} = bmg_cyc_alloc(sizeof({bn})); bmg_obj_init({o}, {}); ((bmg_obj *){o})->flags = BMG_CYCLIC;", ci.cid));
+            self.line(format!("{bn} *{o} = bmg_cyc_alloc(sizeof({bn})); bmg_obj_init({o}, {}); BMG_WEAK({o}) = 0; ((bmg_obj *){o})->flags = BMG_CYCLIC;", ci.cid));
         } else {
-            self.line(format!("{bn} *{o} = bmg_alloc_small(sizeof({bn})); bmg_obj_init({o}, {});", ci.cid));
+            let weak_init = if self.needs_weak_slot(ci.decl) { format!(" BMG_WEAK({o}) = 0;") } else { String::new() };
+        self.line(format!("{bn} *{o} = bmg_alloc_small(sizeof({bn})); bmg_obj_init({o}, {});{weak_init}", ci.cid));
         }
         let info = self.c.classes[ci.decl as usize].clone();
         for f in &info.fields {
@@ -753,6 +756,28 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     /// Can some `weak` field point to an instance of class `decl`?
+    /// Does class `decl`'s hierarchy count weak references (a slot after the header)? Yes when
+    /// some class in it is a weak target or cyclic (the collector pins garbage with the count).
+    pub(crate) fn needs_weak_slot(&mut self, decl: u32) -> bool {
+        let mut root = decl;
+        while let Some(b) = self.c.classes[root as usize].base.and_then(|b| self.c.class_of(b)).map(|(d, _)| d) {
+            root = b;
+        }
+        if let Some(&v) = self.weak_slot_memo.get(&root) {
+            return v;
+        }
+        let mut v = false;
+        for c in 0..self.c.classes.len() as u32 {
+            self.c.resolve_class(c);
+            if self.c.class_descends(c, root) && (self.c.classes[c as usize].cyclic || self.weak_target(c)) {
+                v = true;
+                break;
+            }
+        }
+        self.weak_slot_memo.insert(root, v);
+        v
+    }
+
     fn weak_target(&mut self, decl: u32) -> bool {
         if let Some(&v) = self.weak_memo.get(&decl) {
             return v;
@@ -1016,7 +1041,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             if ci.cyclic {
                 // The extra weak count pins the memory while fields are released (a child may drop the
                 // last weak reference back to this object).
-                let _ = writeln!(out, "static void drop_{0}(void *p) {{\n    bmg_obj *h = p;\n    if (h->flags & BMG_COLLECTING) return;\n    h->weak++;\n    dropf_{0}(p);\n    bmg_cyc_unlink(p);\n    if (--h->weak == 0) bmg_cyc_free(p, sizeof({0}));\n}}", ci.name);
+                let _ = writeln!(out, "static void drop_{0}(void *p) {{\n    bmg_obj *h = p;\n    if (h->flags & BMG_COLLECTING) return;\n    BMG_WEAK(h)++;\n    dropf_{0}(p);\n    bmg_cyc_unlink(p);\n    if (--BMG_WEAK(h) == 0) bmg_cyc_free(p, sizeof({0}));\n}}", ci.name);
                 let _ = writeln!(free_cases, "    case {}: bmg_cyc_free(p, sizeof({})); break;", ci.cid, ci.name);
                 // Traversal: the strong references this object holds to cyclic objects.
                 let mut visits = String::new();
@@ -1033,7 +1058,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let _ = writeln!(trav_cases, "    case {}: gt_{}(p); break;", ci.cid, ci.name);
             } else {
                 if self.weak_target(ci.decl) {
-                    let _ = writeln!(out, "static void drop_{0}(void *p) {{\n    bmg_obj *h = p;\n    h->weak++;\n    dropf_{0}(p);\n    if (--h->weak == 0) bmg_free_small(p, sizeof({0}));\n}}", ci.name);
+                    let _ = writeln!(out, "static void drop_{0}(void *p) {{\n    bmg_obj *h = p;\n    BMG_WEAK(h)++;\n    dropf_{0}(p);\n    if (--BMG_WEAK(h) == 0) bmg_free_small(p, sizeof({0}));\n}}", ci.name);
                 } else {
                     let _ = writeln!(out, "static void drop_{0}(void *p) {{\n    dropf_{0}(p);\n    bmg_free_small(p, sizeof({0}));\n}}", ci.name);
                 }
