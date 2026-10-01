@@ -11,6 +11,7 @@
 #include <string.h>
 
 JSGlobalContextRef bm_js_ctx;
+bool bm_js_encoded;
 static JSStringRef bm_js_bundle_url;    /* the prelude's URL */
 static JSObjectRef bm_js_npm;           /* globalThis.__barm_npm (protected) */
 static JSObjectRef bm_js_noop;          /* calling it runs pending microtasks */
@@ -125,6 +126,10 @@ JSContextRef bm_js(void) {
     if (bm_js_ctx) return bm_js_ctx;
     JSGlobalContextRef ctx = JSGlobalContextCreate(NULL);
     bm_js_ctx = ctx;
+    /* values made without the engine (js.h): only if it encodes them as expected */
+    bm_js_encoded = bm_js_bits(JSValueMakeNumber(ctx, 1.5)) == 0x3ffa000000000000ull && bm_js_bits(JSValueMakeNumber(ctx, -1)) == 0xfffe0000ffffffffull
+        && bm_js_bits(JSValueMakeBoolean(ctx, true)) == BM_JS_TRUE && bm_js_bits(JSValueMakeBoolean(ctx, false)) == BM_JS_FALSE
+        && bm_js_bits(JSValueMakeUndefined(ctx)) == BM_JS_UNDEFINED && bm_js_bits(JSValueMakeNull(ctx)) == BM_JS_NULL;
     JSObjectRef global = JSContextGetGlobalObject(ctx);
     JSObjectRef native = JSObjectMake(ctx, NULL, NULL);
     JSStringRef k = JSStringCreateWithUTF8CString("__barm_native");
@@ -155,10 +160,6 @@ void bm_js_drain(void) {
 
 /* ------------------------------------------------------------------ values */
 
-JSValueRef bm_js_undefined(void) { return JSValueMakeUndefined(bm_js()); }
-JSValueRef bm_js_null(void) { return JSValueMakeNull(bm_js()); }
-JSValueRef bm_js_bool(bool b) { return JSValueMakeBoolean(bm_js(), b); }
-JSValueRef bm_js_num(double d) { return JSValueMakeNumber(bm_js(), d); }
 
 /* UTF-8 → UTF-16, invalid sequences as U+FFFD (WHATWG decoding). Returns the length. */
 static size_t bm_utf8_to_utf16(const unsigned char *s, size_t n, JSChar *out) {
@@ -217,6 +218,28 @@ static JSStringRef bm_js_string_ref(const char *s, size_t n, bool nul_terminated
     JSStringRef r = JSStringCreateWithCharacters(buf, len);
     if (buf != small) bm_free(buf);
     return r;
+}
+
+JSValueRef bm_js_from_str(bm_str s) {
+    JSContextRef ctx = bm_js();
+    /* literals (immortal buffers): a small direct-mapped cache of their JavaScript strings */
+    enum { LIT_CACHE = 256 };
+    static struct { const bm_strbuf *p; JSValueRef v; } lits[LIT_CACHE];
+    uint32_t slot = 0;
+    if (s.p->rc < 0) {
+        slot = (uint32_t)(((uintptr_t)s.p >> 4) * 0x9e3779b97f4a7c15ull >> 56);
+        if (lits[slot].p == s.p) return lits[slot].v;
+    }
+    JSStringRef r = bm_js_string_ref(s.p->data, (size_t)s.p->len, true);
+    JSValueRef v = JSValueMakeString(ctx, r);
+    JSStringRelease(r);
+    if (s.p->rc < 0) {
+        if (lits[slot].v) JSValueUnprotect(ctx, lits[slot].v);
+        JSValueProtect(ctx, v);
+        lits[slot].p = s.p;
+        lits[slot].v = v;
+    }
+    return v;
 }
 
 JSValueRef bm_js_str(const char *s, size_t n) {
@@ -279,14 +302,25 @@ const char *bm_js_typeof(JSValueRef v) {
     return "object";
 }
 
-bool bm_js_as_num(JSValueRef v, double *out) {
+JSValueRef bm_js_num_slow(double d) { return JSValueMakeNumber(bm_js(), d); }
+JSValueRef bm_js_simple_slow(uint64_t bits) {
+    JSContextRef ctx = bm_js();
+    switch (bits) {
+    case BM_JS_TRUE: return JSValueMakeBoolean(ctx, true);
+    case BM_JS_FALSE: return JSValueMakeBoolean(ctx, false);
+    case BM_JS_NULL: return JSValueMakeNull(ctx);
+    default: return JSValueMakeUndefined(ctx);
+    }
+}
+
+bool bm_js_as_num_slow(JSValueRef v, double *out) {
     JSContextRef ctx = bm_js();
     if (!JSValueIsNumber(ctx, v)) return false;
     *out = JSValueToNumber(ctx, v, NULL);
     return true;
 }
 
-bool bm_js_as_bool(JSValueRef v, bool *out) {
+bool bm_js_as_bool_slow(JSValueRef v, bool *out) {
     JSContextRef ctx = bm_js();
     if (!JSValueIsBoolean(ctx, v)) return false;
     *out = JSValueToBoolean(ctx, v);
@@ -303,8 +337,8 @@ bool bm_js_as_str(JSValueRef v, bm_str *out) {
 }
 
 /* bm_type_js: Js values in Barm containers */
-static void bm_js_t_retain(void *p) { JSValueProtect(bm_js_ctx, *(JSValueRef *)p); }
-static void bm_js_t_release(void *p) { JSValueUnprotect(bm_js_ctx, *(JSValueRef *)p); }
+static void bm_js_t_retain(void *p) { bm_js_retain(*(JSValueRef *)p); }
+static void bm_js_t_release(void *p) { bm_js_release(*(JSValueRef *)p); }
 static bool bm_js_t_eq(const void *a, const void *b) { return JSValueIsStrictEqual(bm_js_ctx, *(JSValueRef *)a, *(JSValueRef *)b); }
 static uint64_t bm_js_t_hash(const void *p) {
     JSValueRef v = *(JSValueRef *)p;
@@ -668,9 +702,9 @@ JSValueRef bm_js_import_as(const char *spec, int kind, const char *loc) {
     return m;
 }
 
-JSValueRef bm_js_get_or_trap(JSValueRef obj, JSStringRef key, const char *loc) {
+JSValueRef bm_js_get_or_trap(JSValueRef obj, bm_js_name *key, const char *loc) {
     JSValueRef exc = NULL;
-    JSValueRef r = bm_js_get(obj, key, &exc);
+    JSValueRef r = bm_js_name_get(obj, key, &exc);
     if (!r) bm_js_trap_exc(exc, loc);
     return r;
 }
@@ -700,9 +734,14 @@ JSValueRef bm_js_key_or_trap(JSValueRef obj, bm_str key, const char *loc) {
     return r;
 }
 
-void bm_js_put_or_trap(JSValueRef obj, JSStringRef key, JSValueRef value, const char *loc) {
+static JSStringRef bm_js_name_str(bm_js_name *k) {
+    if (!k->str) k->str = JSStringCreateWithUTF8CString(k->text);
+    return k->str;
+}
+
+void bm_js_put_or_trap(JSValueRef obj, bm_js_name *key, JSValueRef value, const char *loc) {
     JSValueRef exc = NULL;
-    if (!bm_js_set(obj, key, value, &exc)) bm_js_trap_exc(exc, loc);
+    if (!bm_js_set(obj, bm_js_name_str(key), value, &exc)) bm_js_trap_exc(exc, loc);
 }
 
 _Noreturn void bm_js_type_trap(JSValueRef v, const char *want, const char *loc) {
@@ -716,11 +755,7 @@ _Noreturn void bm_js_type_trap(JSValueRef v, const char *want, const char *loc) 
     bm_trap(sb.data, loc);
 }
 
-bool bm_js_truthy(JSValueRef v) { return JSValueToBoolean(bm_js(), v); }
-bool bm_js_is_nullish(JSValueRef v) {
-    JSContextRef ctx = bm_js();
-    return JSValueIsUndefined(ctx, v) || JSValueIsNull(ctx, v);
-}
+bool bm_js_truthy_slow(JSValueRef v) { return JSValueToBoolean(bm_js(), v); }
 bool bm_js_is_array(JSValueRef v) { return JSValueIsArray(bm_js(), v); }
 
 uint32_t bm_js_length(JSValueRef v) {
@@ -734,7 +769,6 @@ uint32_t bm_js_length(JSValueRef v) {
 
 JSValueRef bm_js_array(size_t n, const JSValueRef *items) { return JSObjectMakeArray(bm_js(), n, items, NULL); }
 JSValueRef bm_js_object(void) { return JSObjectMake(bm_js(), NULL, NULL); }
-void bm_js_put(JSValueRef obj, JSStringRef key, JSValueRef value) { JSObjectSetProperty(bm_js_ctx, (JSObjectRef)obj, key, value, kJSPropertyAttributeNone, NULL); }
 
 JSValueRef bm_js_lit(JSValueRef *slot, const char *s, size_t n) {
     if (!*slot) *slot = bm_js_retain(bm_js_str(s, n));
@@ -789,3 +823,226 @@ JSValueRef bm_js_function(bm_fn fn, bm_js_tramp tramp) {
     bm_env_retain(fn.env);
     return JSObjectMake(ctx, bm_js_closure_class, c);
 }
+
+/* ------------------------------------------------------------------ roots
+ *
+ * Cells Barm holds, with counts: open addressing on the key (the cell pointer). The keys live in
+ * the program's main frame (bm_js_roots_init), where the collector's conservative stack scan sees
+ * them; the counts on the heap. Past 3/4 full, new cells go to JSValueProtect instead (a release
+ * not found here is the protect's). Tombstones are swept out when they pile up. */
+
+#define BM_JS_TOMB ((JSValueRef)(uintptr_t)8)   /* not a cell pointer (cells are 16-byte aligned) */
+static JSValueRef *bm_js_keys;
+static uint32_t *bm_js_counts;
+static uint32_t bm_js_cap, bm_js_used, bm_js_live;
+
+void bm_js_roots_init(JSValueRef *keys, uint32_t cap) {
+    memset(keys, 0, (size_t)cap * sizeof *keys);
+    bm_js_counts = calloc(cap, sizeof *bm_js_counts);
+    if (!bm_js_counts) return;
+    bm_js_keys = keys;
+    bm_js_cap = cap;
+}
+
+static uint32_t bm_js_slot_of(JSValueRef v) {
+    uint64_t h = (uint64_t)(uintptr_t)v >> 4;
+    h *= 0x9e3779b97f4a7c15ull;
+    return (uint32_t)(h >> 32) & (bm_js_cap - 1);
+}
+
+static void bm_js_sweep(void) {
+    /* rebuild without tombstones (rare: only once they've piled up) */
+    uint32_t n = bm_js_live, k = 0;
+    JSValueRef *vs = malloc((size_t)(n ? n : 1) * sizeof *vs);
+    uint32_t *cs = malloc((size_t)(n ? n : 1) * sizeof *cs);
+    if (!vs || !cs) abort();
+    for (uint32_t i = 0; i < bm_js_cap; i++) {
+        if (bm_js_keys[i] && bm_js_keys[i] != BM_JS_TOMB) { vs[k] = bm_js_keys[i]; cs[k++] = bm_js_counts[i]; }
+    }
+    memset(bm_js_keys, 0, (size_t)bm_js_cap * sizeof *bm_js_keys);
+    for (uint32_t j = 0; j < k; j++) {
+        uint32_t i = bm_js_slot_of(vs[j]);
+        while (bm_js_keys[i]) i = (i + 1) & (bm_js_cap - 1);
+        bm_js_keys[i] = vs[j];
+        bm_js_counts[i] = cs[j];
+    }
+    bm_js_used = k;
+    free(vs);
+    free(cs);
+}
+
+void bm_js_root_add(JSValueRef v) {
+    if (bm_js_cap) {
+        uint32_t i = bm_js_slot_of(v), tomb = UINT32_MAX;
+        for (;;) {
+            JSValueRef k = bm_js_keys[i];
+            if (k == v) { bm_js_counts[i]++; return; }
+            if (!k) break;
+            if (k == BM_JS_TOMB && tomb == UINT32_MAX) tomb = i;
+            i = (i + 1) & (bm_js_cap - 1);
+        }
+        if (tomb != UINT32_MAX) {
+            bm_js_keys[tomb] = v;
+            bm_js_counts[tomb] = 1;
+            bm_js_live++;
+            return;
+        }
+        if (bm_js_used + 1 <= bm_js_cap / 4 * 3) {
+            bm_js_keys[i] = v;
+            bm_js_counts[i] = 1;
+            bm_js_used++;
+            bm_js_live++;
+            return;
+        }
+        if (bm_js_live < bm_js_cap / 2) {
+            bm_js_sweep();
+            bm_js_root_add(v);
+            return;
+        }
+    }
+    JSValueProtect(bm_js(), v);
+}
+
+void bm_js_root_remove(JSValueRef v) {
+    if (bm_js_cap) {
+        uint32_t i = bm_js_slot_of(v);
+        for (JSValueRef k; (k = bm_js_keys[i]); i = (i + 1) & (bm_js_cap - 1)) {
+            if (k == v) {
+                if (--bm_js_counts[i] == 0) {
+                    bm_js_keys[i] = BM_JS_TOMB;
+                    bm_js_live--;
+                }
+                return;
+            }
+        }
+    }
+    if (bm_js_ctx) JSValueUnprotect(bm_js_ctx, v);
+}
+
+/* ------------------------------------------------------------------ names and shapes */
+
+static bool bm_js_is_ident(const char *s) {
+    if (!*s || (*s >= '0' && *s <= '9')) return false;
+    for (const char *p = s; *p; p++) {
+        char c = *p;
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '$')) return false;
+    }
+    return true;
+}
+
+/* `.name` or `["name"]` (JSON-quoted) */
+static void bm_js_access(bm_sb *sb, const char *name) {
+    if (bm_js_is_ident(name)) {
+        bm_sb_push_char(sb, '.');
+        bm_sb_push_cstr(sb, name);
+        return;
+    }
+    bm_sb_push_char(sb, '[');
+    bm_json_quote(sb, bm_str_from(name, strlen(name)));
+    bm_sb_push_char(sb, ']');
+}
+
+/* A function compiled from `body` with parameters o, a0, a1, ... (n of the a's). */
+static JSObjectRef bm_js_make_fn(const char *params_prefix, uint32_t n, bm_sb *body) {
+    JSContextRef ctx = bm_js();
+    JSStringRef *names = bm_alloc((size_t)(n + 1) * sizeof *names);
+    uint32_t np = 0;
+    if (params_prefix) names[np++] = JSStringCreateWithUTF8CString(params_prefix);
+    for (uint32_t i = 0; i < n; i++) {
+        char b[8];
+        snprintf(b, sizeof b, "a%u", i);
+        names[np++] = JSStringCreateWithUTF8CString(b);
+    }
+    bm_sb_push_char(body, 0);
+    JSStringRef src = JSStringCreateWithUTF8CString(body->data);
+    JSObjectRef f = JSObjectMakeFunction(ctx, NULL, np, names, src, NULL, 1, NULL);
+    JSStringRelease(src);
+    for (uint32_t i = 0; i < np; i++) JSStringRelease(names[i]);
+    bm_free(names);
+    bm_sb_free(body);
+    if (f) JSValueProtect(ctx, f);
+    return f;
+}
+
+JSValueRef bm_js_name_get(JSValueRef obj, bm_js_name *k, JSValueRef *exc) {
+    JSContextRef ctx = bm_js();
+    if (!k->get) {
+        bm_sb b = {0};
+        bm_sb_push_cstr(&b, "return o");
+        bm_js_access(&b, k->text);
+        k->get = bm_js_make_fn("o", 0, &b);
+        if (!k->get) return bm_js_get(obj, bm_js_name_str(k), exc);
+    }
+    JSValueRef r = JSObjectCallAsFunction(ctx, k->get, NULL, 1, &obj, exc);
+    return *exc ? NULL : r;
+}
+
+JSValueRef bm_js_name_call(JSValueRef obj, bm_js_name *k, size_t n, const JSValueRef *args, JSValueRef *exc) {
+    if (n >= 5) return bm_js_invoke(obj, bm_js_name_str(k), n, args, exc);
+    JSContextRef ctx = bm_js();
+    if (!k->call[n]) {
+        bm_sb b = {0};
+        bm_sb_push_cstr(&b, "return o");
+        bm_js_access(&b, k->text);
+        bm_sb_push_char(&b, '(');
+        for (size_t i = 0; i < n; i++) {
+            char a[16];
+            snprintf(a, sizeof a, "%sa%zu", i ? ", " : "", i);
+            bm_sb_push_cstr(&b, a);
+        }
+        bm_sb_push_char(&b, ')');
+        k->call[n] = bm_js_make_fn("o", (uint32_t)n, &b);
+        if (!k->call[n]) return bm_js_invoke(obj, bm_js_name_str(k), n, args, exc);
+    }
+    JSValueRef all[5];
+    all[0] = obj;
+    for (size_t i = 0; i < n; i++) all[i + 1] = args[i];
+    JSValueRef r = JSObjectCallAsFunction(ctx, k->call[n], NULL, n + 1, all, exc);
+    return *exc ? NULL : r;
+}
+
+JSValueRef bm_js_shape_make(bm_js_shape *s, const JSValueRef *values) {
+    JSContextRef ctx = bm_js();
+    if (!s->make) {
+        bm_sb b = {0};
+        bm_sb_push_cstr(&b, "var o = {");
+        bool first = true;
+        for (uint32_t i = 0; i < s->n; i++) {
+            if (s->optional[i]) continue;
+            char a[16];
+            snprintf(a, sizeof a, "a%u", i);
+            if (!first) bm_sb_push_cstr(&b, ", ");
+            first = false;
+            bm_json_quote(&b, bm_str_from(s->keys[i], strlen(s->keys[i])));
+            bm_sb_push_cstr(&b, ": ");
+            bm_sb_push_cstr(&b, a);
+        }
+        bm_sb_push_cstr(&b, "};");
+        for (uint32_t i = 0; i < s->n; i++) {
+            if (!s->optional[i]) continue;
+            char a[64];
+            snprintf(a, sizeof a, " if (a%u !== undefined) o", i);
+            bm_sb_push_cstr(&b, a);
+            bm_js_access(&b, s->keys[i]);
+            snprintf(a, sizeof a, " = a%u;", i);
+            bm_sb_push_cstr(&b, a);
+        }
+        bm_sb_push_cstr(&b, " return o;");
+        s->make = bm_js_make_fn(NULL, s->n, &b);
+    }
+    return JSObjectCallAsFunction(ctx, s->make, NULL, s->n, values, NULL);
+}
+
+JSValueRef bm_js_thunk(JSObjectRef *slot, const char *body, size_t n, const JSValueRef *args, JSValueRef *exc) {
+    JSContextRef ctx = bm_js();
+    if (!*slot) {
+        bm_sb b = {0};
+        bm_sb_push_cstr(&b, body);
+        *slot = bm_js_make_fn(NULL, (uint32_t)n, &b);
+        if (!*slot) bm_trap("internal error: a fused JavaScript expression didn't compile", body);
+    }
+    JSValueRef r = JSObjectCallAsFunction(ctx, *slot, NULL, n, args, exc);
+    return *exc ? NULL : r;
+}
+
+_Noreturn void bm_js_throw_trap(JSValueRef exc, const char *loc) { bm_js_trap_exc(exc, loc); }

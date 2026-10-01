@@ -503,7 +503,8 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         // A program importing npm packages: JavaScript exceptions become JsError objects.
         if self.js.used {
-            init.insert_str(0, "    bm_js_make_error = bmg_js_make_error;\n");
+            // the roots of JavaScript values Barm holds: in this frame, which the collector scans
+            init.insert_str(0, "    JSValueRef bm_js_root_keys[1 << 12]; bm_js_roots_init(bm_js_root_keys, 1 << 12);\n    bm_js_make_error = bmg_js_make_error;\n");
         }
         if self.uses_event_loop() || main_body.contains("bm_task_") {
             init.insert_str(0, "    bm_async_init(bmg_async_retain, bmg_async_release, bmg_async_report);\n");

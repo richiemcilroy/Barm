@@ -2,7 +2,8 @@
 //! and calls through the bridge (runtime/js.h).
 
 use super::{c_string, Gen, Val};
-use crate::ast::{Arg, ExprId};
+use crate::ast::{Arg, ExprId, ExprKind};
+use crate::check::Callee;
 use crate::check::NpmName;
 use crate::hash::FxMap;
 use crate::intern::Sym;
@@ -49,18 +50,18 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.instance(b, item, FxMap::default())
     }
 
-    /// A property name constant: `bm_js_key(&kN, "name")`.
+    /// A property name constant (`&kN`, a `bm_js_name`).
     pub(crate) fn js_key(&mut self, name: &str) -> String {
         let k = match self.js.keys.get(name) {
             Some(k) => k.clone(),
             None => {
                 let k = format!("bmk{}", self.js.keys.len());
-                let _ = writeln!(self.lits, "static JSStringRef {k};");
+                let _ = writeln!(self.lits, "static bm_js_name {k} = {{{}}};", c_string(name.as_bytes()));
                 self.js.keys.insert(name.to_string(), k.clone());
                 k
             }
         };
-        format!("bm_js_key(&{k}, {})", c_string(name.as_bytes()))
+        format!("&{k}")
     }
 
     /// The value an npm import names (read once, then kept).
@@ -185,20 +186,22 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             Ty::Record(fs) => {
                 let _ = fs;
+                // one engine call: a compiled (a0, ...) => ({k0: a0, ...}) per record type
                 let fields = self.c.types.fields_in_order(t);
-                let _ = writeln!(b, "    JSValueRef o = bm_js_object();");
-                for f in fields {
+                let n = self.fresh("bmgs");
+                let keys: Vec<String> = fields.iter().map(|f| c_string(self.sym(f.name).as_bytes())).collect();
+                let opts: Vec<&str> = fields.iter().map(|f| if self.c.types.has_undefined(f.ty) { "true" } else { "false" }).collect();
+                let _ = writeln!(self.lits, "static const char *const {n}k[] = {{{}}};\nstatic const bool {n}o[] = {{{}}};\nstatic bm_js_shape {n} = {{{}, {n}k, {n}o, NULL}};", keys.join(", "), opts.join(", "), fields.len());
+                let mut vals = Vec::new();
+                for f in &fields {
                     let name = self.sym(f.name).to_string();
-                    let key = self.js_key(&name);
-                    let conv = self.js_to_code(f.ty, &format!("v.f_{name}"));
-                    if self.c.types.has_undefined(f.ty) {
-                        // an absent field stays absent
-                        let _ = writeln!(b, "    {{ JSValueRef x = {conv}; if (!bm_js_is_nullish(x)) bm_js_put(o, {key}, x); }}");
-                    } else {
-                        let _ = writeln!(b, "    bm_js_put(o, {key}, {conv});");
-                    }
+                    vals.push(self.js_to_code(f.ty, &format!("v.f_{name}")));
                 }
-                b.push_str("    return o;\n");
+                if vals.is_empty() {
+                    b.push_str("    return bm_js_object();\n");
+                } else {
+                    let _ = writeln!(b, "    JSValueRef vals[{}] = {{{}}};\n    return bm_js_shape_make(&{n}, vals);", vals.len(), vals.join(", "));
+                }
             }
             Ty::Union(_) => {
                 let ms = self.members(t);
@@ -329,7 +332,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                     }
                     let conv = self.js_from_stmt(f.ty, "x", &format!("r.f_{name}"));
                     let conv = conv.replace("return false;", &format!("{{ {undo}return false; }}"));
-                    let _ = writeln!(b, "    {{ JSValueRef exc = NULL; JSValueRef x = bm_js_get(v, {key}, &exc); if (!x) {{ {undo}return false; }} {conv} }}");
+                    let _ = writeln!(b, "    {{ JSValueRef exc = NULL; JSValueRef x = bm_js_name_get(v, {key}, &exc); if (!x) {{ {undo}return false; }} {conv} }}");
                 }
                 b.push_str("    *out = r; return true;\n");
             }
@@ -419,7 +422,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             (false, Some(m)) => {
                 let text = self.sym(m).to_string();
                 let key = self.js_key(&text);
-                format!("bm_js_invoke({}, {key}, {}, {argv}, &{x})", callee_obj.code, vals.len())
+                format!("bm_js_name_call({}, {key}, {}, {argv}, &{x})", callee_obj.code, vals.len())
             }
             (false, None) => format!("bm_js_call({}, NULL, {}, {argv}, &{x})", callee_obj.code, vals.len()),
         };
@@ -432,5 +435,218 @@ impl<'c, 'a> Gen<'c, 'a> {
     pub(crate) fn js_callee(&mut self, e: ExprId) -> Val {
         let v = self.expr(e);
         self.js_of(v)
+    }
+}
+
+// ------------------------------------------------------------ fusion
+//
+// A JavaScript expression tree in Barm code (`User.safeParse({ name: n, age: a }).success`) is
+// compiled into one JavaScript function per site, called once: each engine call costs ~40 ns,
+// the work inside it (with the engine's own caches and JIT) much less. Barm values in the tree
+// (variables, other expressions) are evaluated first and passed in; literals are inlined.
+
+#[derive(Default)]
+struct Fused {
+    src: String,
+    params: Vec<String>,
+    calls: bool,
+}
+
+impl<'c, 'a> Gen<'c, 'a> {
+    /// `e`, a JavaScript operation, as one fused call if its tree holds two or more operations.
+    pub(crate) fn js_try_fuse(&mut self, e: ExprId, ty: TyId, span: Span) -> Option<Val> {
+        if self.js_ops(e) < 2 {
+            return None;
+        }
+        self.js_used();
+        let mut f = Fused::default();
+        f.src.push_str("return ");
+        self.js_fuse(e, &mut f);
+        let slot = self.fresh("bmgjf");
+        let _ = writeln!(self.lits, "static JSObjectRef {slot};");
+        let argv = if f.params.is_empty() { "NULL".to_string() } else { format!("(JSValueRef[]){{{}}}", f.params.join(", ")) };
+        let (x, r) = (self.fresh("jx"), self.fresh("jr"));
+        let src = c_string(f.src.as_bytes());
+        self.line(format!("JSValueRef {x} = NULL; JSValueRef {r} = bm_js_thunk(&{slot}, {src}, {}, {argv}, &{x});", f.params.len()));
+        if f.calls {
+            self.line(format!("if (!{r}) {{ bmg_err = bmg_js_make_error({x}); {r} = bm_js_undefined(); }}"));
+        } else {
+            let loc = self.loc(span);
+            self.line(format!("if (!{r}) bm_js_throw_trap({x}, {loc});"));
+        }
+        Some(self.coerce(Val::plain(r, JS), ty))
+    }
+
+    fn js_ty(&mut self, e: ExprId) -> TyId {
+        let t = self.ty(e);
+        self.c.types.without_undefined(t)
+    }
+
+    /// JavaScript operations (property reads, calls, `new`) in the fusable tree under `e`.
+    fn js_ops(&mut self, e: ExprId) -> usize {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        match &ast.expr(e).kind {
+            ExprKind::Paren(x) | ExprKind::Try(x) => self.js_ops(*x),
+            ExprKind::Member { obj, .. } if self.js_ty(*obj) == JS => 1 + self.js_ops(*obj),
+            ExprKind::Index { obj, index, .. } if self.js_ty(*obj) == JS => 1 + self.js_ops(*obj) + self.js_ops(*index),
+            ExprKind::Call { callee, args, .. } => match self.facts(m).calls.get(&e).map(|c| &c.callee) {
+                Some(Callee::Js { method }) => {
+                    let target = match (&ast.expr(*callee).kind, method) {
+                        (ExprKind::Member { obj, .. }, Some(_)) => *obj,
+                        _ => *callee,
+                    };
+                    1 + self.js_ops(target) + args.iter().map(|a| self.js_ops(a.expr)).sum::<usize>()
+                }
+                _ => 0,
+            },
+            ExprKind::New { callee, args, .. } => match self.facts(m).calls.get(&e).map(|c| &c.callee) {
+                Some(Callee::JsNew) => 1 + self.js_ops(*callee) + args.iter().map(|a| self.js_ops(a.expr)).sum::<usize>(),
+                _ => 0,
+            },
+            ExprKind::Object(fields) => {
+                let t = self.ty(e);
+                // (converting a literal costs an engine call too)
+                if matches!(self.tget(t), Ty::Record(_)) { 1 + fields.iter().map(|f| self.js_ops(f.value)).sum::<usize>() } else { 0 }
+            }
+            ExprKind::Array(elems) => 1 + elems.iter().map(|&x| self.js_ops(x)).sum::<usize>(),
+            _ => 0,
+        }
+    }
+
+    fn js_fuse(&mut self, e: ExprId, f: &mut Fused) {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        match &ast.expr(e).kind {
+            ExprKind::Paren(x) | ExprKind::Try(x) => self.js_fuse(*x, f),
+            ExprKind::Member { obj, name, optional, .. } if self.js_ty(*obj) == JS => {
+                let (obj, name, optional) = (*obj, *name, *optional);
+                self.js_fuse_operand(obj, f);
+                let text = self.sym(name).to_string();
+                js_access(&mut f.src, &text, optional);
+            }
+            ExprKind::Index { obj, index, optional } if self.js_ty(*obj) == JS => {
+                let (obj, index, optional) = (*obj, *index, *optional);
+                self.js_fuse_operand(obj, f);
+                f.src.push_str(if optional { "?.[" } else { "[" });
+                self.js_fuse(index, f);
+                f.src.push(']');
+            }
+            ExprKind::Call { callee, args, optional, .. } if matches!(self.facts(m).calls.get(&e).map(|c| &c.callee), Some(Callee::Js { .. })) => {
+                let Some(Callee::Js { method }) = self.facts(m).calls.get(&e).map(|c| c.callee.clone()) else { unreachable!() };
+                let (callee, optional) = (*callee, *optional);
+                let args: Vec<ExprId> = args.iter().map(|a| a.expr).collect();
+                f.calls = true;
+                match (&self.ast(m).expr(callee).kind, method) {
+                    (ExprKind::Member { obj, name, optional: mopt, .. }, Some(_)) => {
+                        let (obj, name, mopt) = (*obj, *name, *mopt);
+                        self.js_fuse_operand(obj, f);
+                        let text = self.sym(name).to_string();
+                        js_access(&mut f.src, &text, mopt);
+                    }
+                    _ => self.js_fuse_operand(callee, f),
+                }
+                f.src.push_str(if optional { "?.(" } else { "(" });
+                for (i, a) in args.into_iter().enumerate() {
+                    if i > 0 {
+                        f.src.push_str(", ");
+                    }
+                    self.js_fuse(a, f);
+                }
+                f.src.push(')');
+            }
+            ExprKind::New { callee, args, .. } if matches!(self.facts(m).calls.get(&e).map(|c| &c.callee), Some(Callee::JsNew)) => {
+                let callee = *callee;
+                let args: Vec<ExprId> = args.iter().map(|a| a.expr).collect();
+                f.calls = true;
+                f.src.push_str("new (");
+                self.js_fuse(callee, f);
+                f.src.push_str(")(");
+                for (i, a) in args.into_iter().enumerate() {
+                    if i > 0 {
+                        f.src.push_str(", ");
+                    }
+                    self.js_fuse(a, f);
+                }
+                f.src.push(')');
+            }
+            ExprKind::Object(fields) if { let t = self.ty(e); matches!(self.tget(t), Ty::Record(_)) } => {
+                let fields: Vec<(Sym, ExprId)> = fields.iter().map(|x| (x.name, x.value)).collect();
+                f.src.push('{');
+                for (i, (name, value)) in fields.into_iter().enumerate() {
+                    if i > 0 {
+                        f.src.push_str(", ");
+                    }
+                    let key = crate::npm::bundle::js_string(self.sym(name));
+                    f.src.push_str(&key);
+                    f.src.push_str(": ");
+                    self.js_fuse(value, f);
+                }
+                f.src.push('}');
+            }
+            ExprKind::Array(elems) => {
+                let elems = elems.clone();
+                f.src.push('[');
+                for (i, x) in elems.into_iter().enumerate() {
+                    if i > 0 {
+                        f.src.push_str(", ");
+                    }
+                    self.js_fuse(x, f);
+                }
+                f.src.push(']');
+            }
+            ExprKind::Str(s) if { let t = self.ty(e); matches!(self.tget(t), Ty::Str | Ty::StrLit(_) | Ty::Js) } => {
+                let text = crate::npm::bundle::js_string(self.sym(*s));
+                f.src.push_str(&text);
+            }
+            ExprKind::Bool(b) => f.src.push_str(if *b { "true" } else { "false" }),
+            ExprKind::Undefined => f.src.push_str("undefined"),
+            ExprKind::Int(v) if *v < (1u64 << 53) => {
+                let _ = write!(f.src, "{v}");
+            }
+            ExprKind::Float(x) if x.is_finite() => {
+                let _ = write!(f.src, "{x:?}");
+            }
+            _ => self.js_fuse_leaf(e, f),
+        }
+    }
+
+    /// An operand that is itself an expression: parenthesized unless it's a parameter.
+    fn js_fuse_operand(&mut self, e: ExprId, f: &mut Fused) {
+        if self.js_ops(e) == 0 {
+            self.js_fuse_leaf(e, f);
+        } else {
+            f.src.push('(');
+            self.js_fuse(e, f);
+            f.src.push(')');
+        }
+    }
+
+    /// A Barm value, evaluated here and passed in.
+    fn js_fuse_leaf(&mut self, e: ExprId, f: &mut Fused) {
+        let v = self.expr(e);
+        let j = self.js_of(v);
+        let _ = write!(f.src, "a{}", f.params.len());
+        f.params.push(j.code);
+    }
+}
+
+/// `.name`, `?.name`, or `["name"]` / `?.["name"]` for names that aren't identifiers.
+fn js_access(out: &mut String, name: &str, optional: bool) {
+    let ident = name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$') && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$');
+    match (ident, optional) {
+        (true, false) => {
+            out.push('.');
+            out.push_str(name);
+        }
+        (true, true) => {
+            out.push_str("?.");
+            out.push_str(name);
+        }
+        (false, opt) => {
+            out.push_str(if opt { "?.[" } else { "[" });
+            out.push_str(&crate::npm::bundle::js_string(name));
+            out.push(']');
+        }
     }
 }
