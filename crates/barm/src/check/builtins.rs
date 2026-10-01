@@ -5,7 +5,7 @@ use super::*;
 use crate::ast::Arg;
 
 pub(super) const BUILTIN_TYPES: &[&str] = &[
-    "int", "i64", "f64", "number", "f32", "i8", "i16", "i32", "u8", "u16", "u32", "u64", "bool", "boolean", "string", "never", "unknown", "undefined", "void", "Array", "Map",
+    "int", "i64", "f64", "number", "f32", "i8", "i16", "i32", "u8", "u16", "u32", "u64", "bool", "boolean", "string", "never", "unknown", "Js", "undefined", "void", "Array", "Map",
     "Set", "Promise", "Record",
 ];
 

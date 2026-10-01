@@ -1,0 +1,4 @@
+{ x: 1, y: 2, tags: [ 'a', 'b' ], nested: { ok: true } }
+1 and a,b
+[ 1, 2 ]
+3 x

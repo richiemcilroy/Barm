@@ -1,0 +1,60 @@
+import { add, sum, describe, twice, mapAll, fail, failWith, later, rejectLater, point, nothing, PI, Counter } from "cjs-math"
+import * as math from "cjs-math"
+import greet, { shout, count, VERSION } from "esm-greet"
+import { Kind, area, Box } from "ts-shapes"
+
+async function main() {
+  // calls, conversions both ways
+  const three = try add(1, 2)
+  console.log(three as int)
+  console.log(try sum([1.5, 2.5, 3]) as f64)
+  console.log(try describe({ name: "Ada", age: 36, tags: ["x"] }) as string)
+  console.log(try math.add("a", "b") as string)
+  // callbacks
+  console.log(try twice((x: Js) => (x as int) * 3, 2) as int)
+  const words = try mapAll(["a", "b"], (x: Js, i: Js) => `${x}${i}`) as string[]
+  console.log(words.join("|"))
+  // records and arrays from JavaScript
+  const p = try point(3, 4)
+  const pt = p as { x: int, y: int, tags: string[] }
+  console.log(pt.x + pt.y, pt.tags.length)
+  console.log(p.nested.ok as bool)
+  console.log((try nothing()) === undefined, (try nothing()) as string | undefined)
+  console.log(PI as f64)
+  // classes
+  const c = try new Counter(5)
+  try c.inc()
+  try c.inc().inc()
+  console.log(c.value as int)
+  // errors
+  try {
+    try fail("too big")
+  } catch (e) {
+    console.log(`${e.name}: ${e.message}`)
+  }
+  try {
+    try failWith(42)
+  } catch (e) {
+    if (e instanceof JsError) {
+      console.log(e.name, e.value as int)
+    }
+  }
+  // promises
+  console.log(try await later(21) as int)
+  try {
+    try await rejectLater("nope")
+  } catch (e) {
+    console.log(`rejected: ${e}`)
+  }
+  // ES modules: default export, live bindings
+  console.log(try greet("Bob") as string, try shout("hi") as string, VERSION as string)
+  console.log(count as int)
+  // TypeScript
+  const circle = try area({ kind: Kind.Circle, size: 2 })
+  const square = try area({ kind: Kind.Square, size: 3 })
+  console.log(circle as int, square as int, Kind.Other as int)
+  const b = try new Box()
+  try b.add(1).add(2)
+  console.log(b.size as int)
+  console.log(typeof add, typeof VERSION)
+}

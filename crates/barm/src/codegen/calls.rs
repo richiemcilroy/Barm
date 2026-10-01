@@ -164,6 +164,18 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.new_object(e, ty, args, &params, span)
             }
             Callee::NewPromise => self.new_promise(args, ty),
+            Callee::Js { method } => {
+                let target = match (&ast.expr(*callee).kind, method) {
+                    (ExprKind::Member { obj, .. }, Some(_)) => *obj,
+                    _ => *callee,
+                };
+                let f = self.js_callee(target);
+                self.js_call(f, method, args, false, ty)
+            }
+            Callee::JsNew => {
+                let f = self.js_callee(*callee);
+                self.js_call(f, None, args, true, ty)
+            }
             Callee::SuperCtor(base) => {
                 let base = self.inst(base);
                 self.super_ctor_call(base, args, &params);
@@ -272,6 +284,10 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         let v = self.tmp(ret, call, true);
         self.coerce(v, ty)
+    }
+
+    pub(crate) fn fn_ptr_type_pub(&mut self, ps: &[FnParam], ret: TyId) -> String {
+        self.fn_ptr_type(ps, ret)
     }
 
     fn fn_ptr_type(&mut self, ps: &[FnParam], ret: TyId) -> String {

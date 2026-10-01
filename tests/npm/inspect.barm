@@ -1,0 +1,6 @@
+import { point, add } from "cjs-math"
+const p = try point(1, 2)
+console.log(p)
+console.log(`${p.x} and ${p.tags}`)
+console.log([p.x, p.y])
+console.log(try add(1, 2), "x")

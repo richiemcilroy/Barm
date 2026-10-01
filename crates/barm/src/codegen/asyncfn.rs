@@ -282,6 +282,15 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         let v = self.expr(x);
         let v = self.own(v);
+        if v.ty == JS {
+            // a JavaScript value: a Barm promise settled with it (or with its rejection)
+            let pt = self.c.types.promise(JS, NEVER);
+            let pv = self.tmp(pt, &format!("bm_js_await({})", v.code), true);
+            let p = pv.code.clone();
+            self.line(format!("if (!bm_await_now({p})) {{ F->pc = &&aw{n}; bm_await_suspend({p}); BM_SUSPEND; }}"));
+            self.line(format!("aw{n}:;"));
+            return self.take_settled(e, &p, JS, ty);
+        }
         let value_ty = self.c.types.without_undefined(v.ty);
         let Ty::Promise(inner, _) = self.tget(value_ty) else {
             // `await value`: the value, one tick later.

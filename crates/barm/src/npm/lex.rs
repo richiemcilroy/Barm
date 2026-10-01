@@ -349,10 +349,10 @@ pub fn static_requires(src: &str) -> Result<Vec<String>, String> {
         if i > 0 && is_member_dot(&toks[i - 1], src) {
             continue;
         }
-        if let [open, arg, close, ..] = &toks[i + 1..] {
-            if open.text(src) == "(" && close.text(src) == ")" && (arg.kind == Kind::Str || arg.kind == Kind::Template) {
-                out.push(unquote(arg.text(src)));
-            }
+        if let [open, arg, close, ..] = &toks[i + 1..]
+            && open.text(src) == "(" && close.text(src) == ")" && (arg.kind == Kind::Str || arg.kind == Kind::Template)
+        {
+            out.push(unquote(arg.text(src)));
         }
     }
     Ok(out)

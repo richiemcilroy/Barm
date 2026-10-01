@@ -157,6 +157,17 @@ impl<'a> Checker<'a> {
                 if src == ERROR || target == ERROR || src == UNKNOWN || self.assignable(src, target) || self.assignable(target, src) {
                     return target;
                 }
+                if src == JS {
+                    // a checked conversion from JavaScript (traps if the value doesn't fit)
+                    if !self.js_receivable(target) {
+                        let ts = self.show(target);
+                        self.report(
+                            Diagnostic::new("T0903", span, format!("a JavaScript value can't be converted to `{ts}`"))
+                                .note("why", "conversions from JavaScript produce numbers, strings, booleans, `undefined`, arrays, records and unions of these"),
+                        );
+                    }
+                    return target;
+                }
                 let (ss, ts) = (self.show(src), self.show(target));
                 let text = self.src(self.ast().expr(*x).span).to_string();
                 let mut d = Diagnostic::new("T0601", span, format!("can't cast `{ss}` to `{ts}`"))
@@ -231,6 +242,10 @@ impl<'a> Checker<'a> {
             Some(Decl::Const(m, i)) => self.rec_ident(e, IdentFact::Const(m, i)),
             Some(Decl::Ns(m)) => self.rec_ident(e, IdentFact::Ns(m)),
             Some(Decl::Class(c)) => self.rec_ident(e, IdentFact::Class(c)),
+            Some(Decl::Npm(m, n)) => {
+                self.rec_ident(e, IdentFact::Npm(m, n));
+                return JS;
+            }
             _ => self.rec_ident(e, IdentFact::Builtin),
         }
         match self.scopes[self.cur as usize].values.get(&sym).map(|d| d.0) {
@@ -1076,6 +1091,15 @@ impl<'a> Checker<'a> {
             }
             self.types.without_undefined(t)
         };
+        if base == JS {
+            let it = self.expr(index, None);
+            if !(self.types.is_numeric(it) || self.assignable(it, STR) || it == JS || it == ERROR) {
+                let shown = self.show(it);
+                let s = self.ast().expr(index).span;
+                self.report(Diagnostic::new("T0902", s, format!("a JavaScript property key must be a number or a string, found `{shown}`")));
+            }
+            return JS;
+        }
         let result = match *self.types.get(base) {
             Ty::Error => return ERROR,
             Ty::Array(e) => {
@@ -1186,6 +1210,10 @@ impl<'a> Checker<'a> {
         let t = self.expr(obj, None);
         if t == ERROR {
             return ERROR;
+        }
+        if self.types.without_undefined(t) == JS {
+            // a JavaScript property (`undefined` if there's none)
+            return JS;
         }
         // `req.params` in a `routes` handler: `{ id: string }` for "/users/:id".
         if self.name(name) == "params"
@@ -1806,6 +1834,13 @@ impl<'a> Checker<'a> {
         }
         let exp_p = exp.map(|t| self.types.promise(t, NEVER));
         let t = self.expr(x, exp_p);
+        if t == JS {
+            // a JavaScript promise (or any value): rejects with a JsError
+            let err = self.builtin_class("JsError");
+            let text = format!("await {}", self.src(self.ast().expr(x).span));
+            self.on_throw(err, span, Some(&text), Some(e));
+            return JS;
+        }
         let mut values = Vec::new();
         let mut errors = Vec::new();
         for m in self.flat_members(t) {
@@ -1862,6 +1897,21 @@ impl<'a> Checker<'a> {
     }
 
     fn new_expr(&mut self, e: ExprId, callee: ExprId, type_args: &[crate::ast::TypeId], args: &[Arg], exp: Option<TyId>, span: Span) -> TyId {
+        // `new X(...)` on a JavaScript constructor (`import { X } from "pkg"`, `new pkg.X()`)
+        let js_callee = match self.ast().expr(callee).kind {
+            ExprKind::Ident(s) => match self.lookup(s) {
+                Some((_, t)) => t == JS,
+                None => matches!(self.scopes[self.cur as usize].values.get(&s).map(|d| d.0), Some(Decl::Npm(..))),
+            },
+            _ => true,
+        };
+        if js_callee {
+            let t = self.expr(callee, None);
+            if t == JS || t == ERROR {
+                let text = format!("new {}", self.src(self.ast().expr(callee).span));
+                return self.js_call(e, None, &text, args, span, true);
+            }
+        }
         let ExprKind::Ident(s) = self.ast().expr(callee).kind else { return ERROR };
         let name = self.name(s).to_string();
         let tscope = self.tscope();
@@ -2043,6 +2093,10 @@ impl<'a> Checker<'a> {
                     }
                     return ERROR;
                 }
+                if self.types.without_undefined(recv) == JS {
+                    let desc = format!("{}.{mtext}", self.src(self.ast().expr(obj).span));
+                    return self.js_call(e, Some(name), &desc, args, span, false);
+                }
                 let base = if mopt {
                     self.types.without_undefined(recv)
                 } else {
@@ -2125,6 +2179,9 @@ impl<'a> Checker<'a> {
         let t = self.expr(callee, None);
         let text = self.src(cnode.span).to_string();
         let t = if optional { self.types.without_undefined(t) } else { t };
+        if t == JS {
+            return self.js_call(e, None, &text, args, span, false);
+        }
         self.rec_call(e, Callee::Value);
         self.pending_call = Some(e);
         let r = self.call_value(t, &text, args, exp, span);
@@ -2230,6 +2287,87 @@ impl<'a> Checker<'a> {
             parts.push(format!("...items: {}[]", self.show(r)));
         }
         format!("{desc}({}): {}", parts.join(", "), self.show(cs.ret))
+    }
+
+    // ------------------------------------------------------------ JavaScript values (npm)
+
+    /// Can a Barm value of type `t` go to JavaScript? It's converted on the way: numbers,
+    /// strings, booleans, `undefined`, arrays, records and unions of these, `Js` itself, and
+    /// functions whose parameters are `Js` (JavaScript calls them back).
+    pub(super) fn js_convertible(&mut self, t: TyId) -> bool {
+        match *self.types.get(t) {
+            Ty::Js | Ty::Error | Ty::Never | Ty::Str | Ty::StrLit(_) | Ty::Bool | Ty::Undefined | Ty::Void => true,
+            Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 => true,
+            Ty::Array(e) => self.js_convertible(e),
+            Ty::Record(fs) => {
+                let fs = self.types.fields(fs).to_vec();
+                fs.iter().all(|f| self.js_convertible(f.ty))
+            }
+            Ty::Union(ms) => {
+                let ms = self.types.tys(ms).to_vec();
+                ms.iter().all(|&m| self.js_convertible(m))
+            }
+            Ty::Func(ps, r, th) => {
+                let ps = self.types.params(ps).to_vec();
+                th == NEVER && ps.iter().all(|p| p.ty == JS && !p.inout) && self.js_convertible(r)
+            }
+            _ => false,
+        }
+    }
+
+    /// Can a JavaScript value be converted to `t` (`x as T`)?
+    pub(super) fn js_receivable(&mut self, t: TyId) -> bool {
+        match *self.types.get(t) {
+            Ty::Js | Ty::Error | Ty::Str | Ty::StrLit(_) | Ty::Bool | Ty::Undefined | Ty::Void => true,
+            Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 => true,
+            Ty::Array(e) => self.js_receivable(e),
+            Ty::Record(fs) => {
+                let fs = self.types.fields(fs).to_vec();
+                fs.iter().all(|f| self.js_receivable(f.ty))
+            }
+            Ty::Union(ms) => {
+                let ms = self.types.tys(ms).to_vec();
+                ms.iter().all(|&m| self.js_receivable(m))
+            }
+            _ => false,
+        }
+    }
+
+    /// An argument to a JavaScript function: arrows get `Js` parameters (and return `Js`).
+    fn js_arg(&mut self, a: &Arg) {
+        let x = a.expr;
+        let exp = match &self.ast().expr(x).kind {
+            ExprKind::Arrow(f) => {
+                let n = f.params.len();
+                let ps = vec![FnParam { ty: JS, inout: false, optional: false }; n];
+                Some(self.types.func(ps, JS))
+            }
+            _ => Some(JS),
+        };
+        let t = self.expr(x, exp);
+        if !self.js_convertible(t) {
+            let shown = self.show(t);
+            let s = self.ast().expr(x).span;
+            self.report(
+                Diagnostic::new("T0901", s, format!("a `{shown}` can't be passed to JavaScript"))
+                    .note("why", "values are converted for JavaScript: numbers, strings, booleans, `undefined`, arrays, records, `Js` values, and functions taking `Js`"),
+            );
+        }
+    }
+
+    /// A call to a JavaScript function or method, or `new` on a JavaScript constructor: returns
+    /// a `Js`, and can throw a `JsError`.
+    fn js_call(&mut self, e: ExprId, method: Option<Sym>, desc: &str, args: &[Arg], span: Span, new: bool) -> TyId {
+        for a in args {
+            if let Some(s) = a.by_ref {
+                self.report(Diagnostic::new("T0904", s, "JavaScript functions take values, not `&` references"));
+            }
+            self.js_arg(a);
+        }
+        self.rec_call(e, if new { Callee::JsNew } else { Callee::Js { method } });
+        let err = self.builtin_class("JsError");
+        self.on_throw(err, span, Some(desc), Some(e));
+        JS
     }
 
     fn types_without_undef(&self, t: TyId) -> TyId {
@@ -2481,7 +2619,8 @@ impl<'a> Checker<'a> {
     // ---------------------------------------------------------------- conditions and narrowing
 
     fn condition_ok(&mut self, t: TyId) -> bool {
-        if t == BOOL || t == ERROR {
+        if t == BOOL || t == ERROR || t == JS {
+            // (a JavaScript value: its truthiness, as in JavaScript)
             return true;
         }
         if self.types.has_undefined(t) {

@@ -121,7 +121,7 @@ pub fn load(paths: &[PathBuf], base: &Path) -> Result<Loaded, String> {
             let file = sm.add(source);
             diags.extend(pd);
             by_path.insert(path.clone(), modules.len() as u32);
-            modules.push(Module { file, path, name, ast, imports: HashMap::default(), builtin: false, std: false, entry: true });
+            modules.push(Module { file, path, name, ast, imports: HashMap::default(), builtin: false, std: false, entry: true, npm: None });
         }
     }
 
@@ -137,16 +137,17 @@ pub fn load(paths: &[PathBuf], base: &Path) -> Result<Loaded, String> {
         let (ast, pd) = parser::parse(&sm.get(file).text, file, &mut interner);
         diags.extend(pd);
         by_path.insert(target.clone(), modules.len() as u32);
-        modules.push(Module { file, path: target, name: "std/http".into(), ast, imports: HashMap::default(), builtin: false, std: true, entry: false });
+        modules.push(Module { file, path: target, name: "std/http".into(), ast, imports: HashMap::default(), builtin: false, std: true, entry: false, npm: None });
     }
     // Follow imports (files outside the roots are parsed here, sequentially).
     let mut mi = 0;
+    let npm = crate::npm::resolve::Resolver::default();
     while mi < modules.len() {
         let mut targets = Vec::new();
         for (ii, item) in modules[mi].ast.items.iter().enumerate() {
             if let ItemKind::Import(imp) = &item.kind {
-                match resolve_import(&modules[mi].path, &imp.path, imp.path_span) {
-                    Ok(target) => targets.push((ii as u32, if target.starts_with("<std>") { target } else { normalize(&target) })),
+                match resolve_import(&modules[mi].path, &imp.path, imp.path_span, &npm) {
+                    Ok(target) => targets.push((ii as u32, if target.starts_with("<std>") || target.starts_with("<npm>") { target } else { normalize(&target) })),
                     Err(d) => diags.push(d),
                 }
             }
@@ -154,6 +155,17 @@ pub fn load(paths: &[PathBuf], base: &Path) -> Result<Loaded, String> {
         for (ii, target) in targets {
             let t = match by_path.get(&target) {
                 Some(&t) => t,
+                None if target.starts_with("<npm>") => {
+                    // an npm package: no Barm source; its exports are `Js` values
+                    let spec = target.to_string_lossy()["<npm>/".len()..].to_string();
+                    let file = sm.add(SourceFile::new(target.clone(), spec.clone(), String::new()));
+                    let (ast, pd) = parser::parse("", file, &mut interner);
+                    diags.extend(pd);
+                    let t = modules.len() as u32;
+                    by_path.insert(target.clone(), t);
+                    modules.push(Module { file, path: target, name: spec.clone(), ast, imports: HashMap::default(), builtin: false, std: false, entry: false, npm: Some(spec) });
+                    t
+                }
                 None => {
                     let std_src = target.to_str().and_then(|p| p.strip_prefix("<std>/")).and_then(|n| STD_MODULES.iter().find(|m| m.0 == n));
                     let text = match std_src {
@@ -169,7 +181,7 @@ pub fn load(paths: &[PathBuf], base: &Path) -> Result<Loaded, String> {
                     diags.extend(pd);
                     let t = modules.len() as u32;
                     by_path.insert(target.clone(), t);
-                    modules.push(Module { file, path: target, name, ast, imports: HashMap::default(), builtin: false, std: std_src.is_some(), entry: false });
+                    modules.push(Module { file, path: target, name, ast, imports: HashMap::default(), builtin: false, std: std_src.is_some(), entry: false, npm: None });
                     t
                 }
             };
@@ -181,7 +193,7 @@ pub fn load(paths: &[PathBuf], base: &Path) -> Result<Loaded, String> {
     let file = sm.add(SourceFile::new(PathBuf::from("<builtin>"), "<builtin>".into(), PRELUDE.into()));
     let (ast, pd) = parser::parse(&sm.get(file).text, file, &mut interner);
     diags.extend(pd);
-    modules.push(Module { file, path: PathBuf::from("<builtin>"), name: "<builtin>".into(), ast, imports: HashMap::default(), builtin: true, std: true, entry: false });
+    modules.push(Module { file, path: PathBuf::from("<builtin>"), name: "<builtin>".into(), ast, imports: HashMap::default(), builtin: true, std: true, entry: false, npm: None });
 
     Ok(Loaded { sm, interner, modules, diags })
 }
@@ -310,19 +322,36 @@ fn display_name(path: &Path, base: &Path) -> String {
     path.strip_prefix(base).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| path.to_string_lossy().into_owned())
 }
 
-fn resolve_import(from: &Path, spec: &str, span: Span) -> Result<PathBuf, Diagnostic> {
+fn resolve_import(from: &Path, spec: &str, span: Span, npm: &crate::npm::resolve::Resolver) -> Result<PathBuf, Diagnostic> {
     if let Some(m) = std_module(spec) {
         return Ok(PathBuf::from(format!("<std>/{}", m.0)));
     }
-    if spec.starts_with("node:") || spec.starts_with("std/") || matches!(spec, "os" | "child_process" | "http" | "https" | "net" | "crypto" | "util" | "events" | "stream" | "readline" | "url" | "buffer" | "zlib") {
-        let name = spec.strip_prefix("node:").or_else(|| spec.strip_prefix("std/")).unwrap_or(spec);
-        let have: Vec<String> = STD_MODULES.iter().filter(|m| m.2).map(|(n, _, _)| format!("node:{n}")).collect();
-        let d = Diagnostic::new("N0103", span, format!("the Node module \"{name}\" is not available yet")).note("available", have.join(", "));
-        return Err(if name == "http" { d.note("instead", "use the Bun-style server: `import { serve } from \"std/http\"`") } else { d });
+    if let Some(name) = spec.strip_prefix("std/") {
+        let have: Vec<String> = STD_MODULES.iter().map(|(n, _, _)| format!("std/{n}")).collect();
+        return Err(Diagnostic::new("N0103", span, format!("there is no standard module \"std/{name}\"")).note("available", have.join(", ")));
     }
-    if !spec.starts_with("./") && !spec.starts_with("../") {
-        return Err(Diagnostic::new("N0104", span, format!("\"{spec}\" is not a relative path; npm packages are not supported"))
-            .note("instead", "import local modules with a relative path: `\"./file\"`"));
+    // Node.js's other built-ins come from JavaScript (runtime/node), like npm packages.
+    let node = spec.strip_prefix("node:").unwrap_or(spec);
+    if crate::npm::resolve::BUILTINS.contains(&node) {
+        return Ok(PathBuf::from(format!("<npm>/node:{node}")));
+    }
+    if spec.starts_with("node:") {
+        return Err(Diagnostic::new("N0103", span, format!("\"{spec}\" is not a Node.js built-in module")));
+    }
+    if !spec.starts_with("./") && !spec.starts_with("../") && !spec.starts_with('/') {
+        // an npm package, from the nearest node_modules
+        let dir = from.parent().unwrap_or(Path::new("."));
+        return match npm.resolve(dir, spec) {
+            Ok(_) => Ok(PathBuf::from(format!("<npm>/{spec}"))),
+            Err(e) => {
+                let pkg = if spec.starts_with('@') { spec.splitn(3, '/').take(2).collect::<Vec<_>>().join("/") } else { spec.split('/').next().unwrap_or(spec).to_string() };
+                let mut d = Diagnostic::new("N0104", span, format!("can't find the npm package \"{spec}\""));
+                if !e.starts_with("can't find package") {
+                    d = d.note("why", e);
+                }
+                Err(d.note("instead", format!("install it: `bun add {pkg}` (or npm, pnpm, yarn)")))
+            }
+        };
     }
     let dir = from.parent().unwrap_or(Path::new("."));
     for ext in [".ts", ".js", ".tsx", ".mjs"] {

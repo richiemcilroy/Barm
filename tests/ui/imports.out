@@ -18,16 +18,16 @@ error[N0105] imports/main.barm:3:23: imports name Barm modules without an extens
     3 | import { other } from "./lib.ts"
   fix[safe]: use "./lib"
 
-error[N0103] imports/main.barm:4:21: the Node module "sockets" is not available yet
+error[N0103] imports/main.barm:4:21: there is no standard module "std/sockets"
     4 | import * as fs from "std/sockets"
-  available: node:fs, node:path
+  available: std/fs, std/path, std/http
 
-error[X0011] imports/main.barm:5:8: default imports are not supported
+error[N0104] imports/main.barm:5:20: can't find the npm package "lodash"
     5 | import lodash from "lodash"
-  instead: import named exports: `import { lodash } from ...` or `import * as lodash from ...`
+  instead: install it: `bun add lodash` (or npm, pnpm, yarn)
 
-error[N0104] imports/main.barm:5:20: "lodash" is not a relative path; npm packages are not supported
-    5 | import lodash from "lodash"
-  instead: import local modules with a relative path: `"./file"`
+error[X0011] imports/main.barm:6:8: default imports are only for npm packages
+    6 | import lib from "./lib"
+  instead: import named exports: `import { lib } from ...` or `import * as lib from ...`
 
 7 error(s)

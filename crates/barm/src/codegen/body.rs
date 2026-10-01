@@ -1841,6 +1841,16 @@ impl<'c, 'a> Gen<'c, 'a> {
                 {
                     return self.new_promise(args, ty);
                 }
+                if let Some(fact) = self.facts(m).calls.get(&e)
+                    && let Callee::JsNew = fact.callee
+                {
+                    let f = self.js_callee(*callee);
+                    let v = self.js_call(f, None, args, true, ty);
+                    if self.facts(m).throwing.contains(&e) {
+                        self.error_check();
+                    }
+                    return v;
+                }
                 let name = match &ast.expr(*callee).kind {
                     ExprKind::Ident(s) => self.sym(*s).to_string(),
                     _ => String::new(),
@@ -1981,6 +1991,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             ExprKind::As(x, _) => {
                 let v = self.expr(*x);
+                if v.ty == JS && ty != JS {
+                    return self.barm_of_js(v, ty, span);
+                }
                 self.downcast(v, ty, span)
             }
             ExprKind::NonNull(x) => {
@@ -2038,6 +2051,10 @@ impl<'c, 'a> Gen<'c, 'a> {
             Some(IdentFact::Const(cm, ci)) => {
                 let v = self.const_ref(cm, ci);
                 self.project(v, ty)
+            }
+            Some(IdentFact::Npm(nm, name)) => {
+                let span = self.expr_span(e);
+                self.npm_value(nm, name, span, ty)
             }
             _ => Val::plain("0", ty),
         }
@@ -2110,6 +2127,9 @@ impl<'c, 'a> Gen<'c, 'a> {
         let from = v.ty;
         if from == to || to == ERROR || from == ERROR || from == NEVER {
             return Val { ty: to, ..v };
+        }
+        if to == JS {
+            return self.js_of(v);
         }
         let (tf, tt) = (self.tget(from), self.tget(to));
         match (tf, tt) {
@@ -2424,6 +2444,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 "object"
             }
         };
+        if v.ty == JS {
+            return self.tmp(STR, &format!("({{ const char *s = bm_js_typeof({}); bm_str_from(s, strlen(s)); }})", v.code), true);
+        }
         if let Ty::Union(ms) = self.tget(v.ty) {
             let ms = self.c.types.tys(ms).to_vec();
             let res = self.fresh("s");
@@ -2456,6 +2479,9 @@ impl<'c, 'a> Gen<'c, 'a> {
     fn truthy(&mut self, v: Val) -> String {
         if v.ty == BOOL {
             return v.code;
+        }
+        if v.ty == JS {
+            return format!("bm_js_truthy({})", v.code);
         }
         let v = if matches!(self.tget(v.ty), Ty::Rec(..)) { return "true".into() } else { v };
         match self.tag_of(v.ty, UNDEFINED) {
@@ -2658,6 +2684,16 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// `a === b` as a C boolean.
     pub(crate) fn equality(&mut self, a: Val, b: Val, _strict: bool) -> String {
         let (ta, tb) = (a.ty, b.ty);
+        if ta == JS || tb == JS {
+            // `=== undefined`: Barm has no `null`; JavaScript's reads as `undefined`
+            if ta == UNDEFINED || tb == UNDEFINED {
+                let v = if ta == JS { a } else { b };
+                return format!("bm_js_is_nullish({})", v.code);
+            }
+            // JavaScript's ===
+            let (a, b) = (self.js_of(a), self.js_of(b));
+            return self.eq_code(JS, &a.code, &b.code);
+        }
         if self.c.types.is_numeric(ta) && self.c.types.is_numeric(tb) {
             let (x, y) = self.numeric_operands(a, b);
             return format!("({x} == {y})");
@@ -2711,6 +2747,12 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     fn member(&mut self, e: ExprId, obj: ExprId, name: crate::intern::Sym, optional: bool, ty: TyId, span: Span) -> Val {
         let m = self.cur_m();
+        let ot = self.ty(obj);
+        if self.c.types.without_undefined(ot) == JS {
+            let base = self.expr(obj);
+            let base = self.js_of(base);
+            return self.js_member(base, name, optional, ty, span);
+        }
         match self.facts(m).members.get(&e).copied() {
             Some(MemberFact::NsFn(fm, fi)) => {
                 let code = self.fn_value(fm, fi);
@@ -2871,6 +2913,13 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     fn index(&mut self, obj: ExprId, index: ExprId, optional: bool, ty: TyId, span: Span) -> Val {
+        let ot = self.ty(obj);
+        if self.c.types.without_undefined(ot) == JS {
+            let base = self.expr(obj);
+            let base = self.js_of(base);
+            let iv = self.expr(index);
+            return self.js_index(base, iv, optional, ty, span);
+        }
         let _ = (optional, span);
         let a = self.expr(obj);
         let a = if optional {
