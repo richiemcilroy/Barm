@@ -6,7 +6,7 @@ mod expr;
 pub mod facts;
 mod stmt;
 
-pub use facts::{CallFact, Callee, IdentFact, MemberFact, ModuleFacts};
+pub use facts::{CallFact, Callee, IdentFact, MemberFact, ModuleFacts, NpmName};
 
 /// `__native.name`'s parameter types and result (for code generation).
 pub fn native_sig_pub(types: &mut Types, name: &str) -> Option<(Vec<TyId>, TyId)> {
@@ -36,6 +36,9 @@ pub struct Module {
     pub std: bool,
     /// Named on the command line (only entry modules may be scripts).
     pub entry: bool,
+    /// An npm package (or a Node.js built-in Barm has no module for), as imported: its exports
+    /// are JavaScript values (`Js`), bundled with the program (see crate::npm).
+    pub npm: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -46,6 +49,8 @@ pub(crate) enum Decl {
     Iface(u32),
     Ns(u32),
     Class(u32),
+    /// Imported from an npm package (module index): a `Js` value, or `Js` as a type.
+    Npm(u32, facts::NpmName),
 }
 
 #[derive(Default, Clone)]
@@ -686,6 +691,25 @@ impl<'a> Checker<'a> {
             for (ii, item) in module.ast.items.iter().enumerate() {
                 let ItemKind::Import(imp) = &item.kind else { continue };
                 let Some(&target) = module.imports.get(&(ii as u32)) else { continue };
+                if modules[target as usize].npm.is_some() {
+                    // Anything a package exports is a JavaScript value; names are checked when
+                    // the program runs (a missing export reads as `undefined`, as in JavaScript).
+                    let binds = imp.namespace.map(|n| (n, facts::NpmName::Ns)).into_iter()
+                        .chain(imp.default.map(|n| (n, facts::NpmName::Default)))
+                        .chain(imp.names.iter().map(|&(s, sp)| ((s, sp), facts::NpmName::Named(s))));
+                    for ((name, span), what) in binds {
+                        self.bind_import(mi, name, span, Decl::Npm(target, what), false);
+                        self.bind_import(mi, name, span, Decl::Npm(target, what), true);
+                    }
+                    continue;
+                }
+                if let Some((name, span)) = imp.default {
+                    let n = self.interner.get(name).to_string();
+                    self.done.push(
+                        Diagnostic::new("X0011", span, "default imports are only for npm packages")
+                            .note("instead", format!("import named exports: `import {{ {n} }} from ...` or `import * as {n} from ...`")),
+                    );
+                }
                 if let Some((ns, span)) = imp.namespace {
                     self.bind_import(mi, ns, span, Decl::Ns(target), false);
                     self.bind_import(mi, ns, span, Decl::Ns(target), true);
@@ -1501,6 +1525,8 @@ impl<'a> Checker<'a> {
             self.scopes[self.cur as usize].types.get(&name).map(|d| d.0)
         };
         match decl {
+            // a type from an npm package: its values are JavaScript's
+            Some(Decl::Npm(..)) => JS,
             Some(Decl::Alias(a)) => {
                 let (am, ai) = (self.aliases[a as usize].module, self.aliases[a as usize].item);
                 let arity = match &self.modules[am as usize].ast.items[ai as usize].kind {
@@ -1594,6 +1620,7 @@ impl<'a> Checker<'a> {
             "string" => Some(STR),
             "never" => Some(NEVER),
             "unknown" => Some(UNKNOWN),
+            "Js" => Some(JS),
             _ => None,
         };
         if let Some(p) = prim {
@@ -1698,6 +1725,10 @@ impl<'a> Checker<'a> {
         if assuming.contains(&(src, dst)) {
             return true;
         }
+        if dst == JS {
+            // converted for JavaScript
+            return self.js_convertible(src);
+        }
         let (s, d) = (*self.types.get(src), *self.types.get(dst));
         match (&s, &d) {
             (Ty::Int, Ty::F64 | Ty::F32) if top => return true,
@@ -1783,7 +1814,7 @@ impl<'a> Checker<'a> {
 
     /// Can values of these types ever be equal?
     fn comparable(&mut self, a: TyId, b: TyId) -> bool {
-        if a == ERROR || b == ERROR || a == UNKNOWN || b == UNKNOWN {
+        if a == ERROR || b == ERROR || a == UNKNOWN || b == UNKNOWN || a == JS || b == JS {
             return true;
         }
         if self.types.is_numeric(a) && self.types.is_numeric(b) {

@@ -57,7 +57,7 @@ void bm_js_drain(void);
 void JSValueProtect(JSContextRef ctx, JSValueRef value);
 void JSValueUnprotect(JSContextRef ctx, JSValueRef value);
 extern JSGlobalContextRef bm_js_ctx;   /* NULL until bm_js() */
-static inline JSValueRef bm_js_retain(JSValueRef v) { JSValueProtect(bm_js_ctx, v); return v; }
+static inline JSValueRef bm_js_retain(JSValueRef v) { if (v) JSValueProtect(bm_js_ctx, v); return v; }
 static inline void bm_js_release(JSValueRef v) { if (v) JSValueUnprotect(bm_js_ctx, v); }
 
 extern const bm_type bm_type_js;       /* Barm's `Js` (retain/release as above; String(x); inspect) */
@@ -100,8 +100,40 @@ JSValueRef bm_js_new(JSValueRef fn, size_t n, const JSValueRef *args, JSValueRef
 /* A package's exports: require(spec) inside the bundle (spec as the program imports it). */
 JSValueRef bm_js_import(const char *spec, JSValueRef *exc);
 
+/* Set by the program: a Barm JsError object (owned) holding a thrown JavaScript value. */
+extern void *(*bm_js_make_error)(JSValueRef exc);
+
 /* A thrown value as text: "Name: message" and, for errors, the stack. */
 bm_str bm_js_error_text(JSValueRef exc);
+/* For a Barm JsError: the thrown value's name and message (an Error's own; else "JsError" and
+ * String(value)). */
+void bm_js_error_parts(JSValueRef exc, bm_str *name, bm_str *message);
+
+/* ------------------------------------------------------------------ for generated code */
+
+/* `import ... from "spec"`: kind 0 the namespace (`import * as`), 1 the default export, else
+ * the module's exports; traps if the package fails to load. */
+JSValueRef bm_js_import_as(const char *spec, int kind, const char *loc);
+/* obj.key / obj[i] / obj[k]; a JavaScript exception (a throwing getter, a property of
+ * undefined) traps. */
+JSValueRef bm_js_get_or_trap(JSValueRef obj, JSStringRef key, const char *loc);
+JSValueRef bm_js_at_or_trap(JSValueRef obj, double i, const char *loc);
+JSValueRef bm_js_key_or_trap(JSValueRef obj, bm_str key, const char *loc);
+void bm_js_put_or_trap(JSValueRef obj, JSStringRef key, JSValueRef value, const char *loc);
+/* A value from JavaScript that doesn't convert to the type `want` names: traps. */
+_Noreturn void bm_js_type_trap(JSValueRef v, const char *want, const char *loc);
+bool bm_js_truthy(JSValueRef v);
+bool bm_js_is_nullish(JSValueRef v);    /* undefined or null */
+bool bm_js_is_array(JSValueRef v);
+uint32_t bm_js_length(JSValueRef v);    /* v.length as an array index */
+JSValueRef bm_js_array(size_t n, const JSValueRef *items);
+JSValueRef bm_js_object(void);
+void bm_js_put(JSValueRef obj, JSStringRef key, JSValueRef value);
+JSValueRef bm_js_lit(JSValueRef *slot, const char *s, size_t n);   /* a string literal, created once */
+/* A JavaScript function calling a Barm closure through `tramp` (generated per signature); the
+ * closure's environment is held until the function is collected. */
+typedef JSValueRef (*bm_js_tramp)(const bm_fn *fn, size_t n, const JSValueRef *args);
+JSValueRef bm_js_function(bm_fn fn, bm_js_tramp tramp);
 
 /* ------------------------------------------------------------------ bytes */
 

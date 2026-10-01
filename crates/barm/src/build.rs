@@ -18,6 +18,13 @@ mod tls_files {
     include!(concat!(env!("OUT_DIR"), "/tls_files.rs"));
 }
 
+/// The JavaScript bridge and the Node.js natives: linked by programs that import npm packages.
+const JS_C: &str = include_str!("../../../runtime/js.c");
+const NODE_C: &str = include_str!("../../../runtime/node.c");
+/// Lets JavaScriptCore compile JavaScript to machine code (without it, it only interprets: an
+/// order of magnitude slower). Programs that link it are signed with this.
+const JIT_ENTITLEMENTS: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>com.apple.security.cs.allow-jit</key><true/></dict></plist>\n";
+
 pub enum BuildError {
     Diagnostics(SourceMap, Vec<Diagnostic>),
     Message(String),
@@ -136,6 +143,8 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     if !diags.is_empty() {
         return Err(BuildError::Diagnostics(sm, diags));
     }
+    // npm packages resolve from the entry file's directory
+    let npm_root = modules.iter().find(|m| m.entry).and_then(|m| m.path.parent()).map(Path::to_path_buf).unwrap_or_else(|| base.to_path_buf());
     let (diags, mut checker) = check::check_for_build(&modules, &mut interner, &sm);
     if !diags.is_empty() {
         drop(checker);
@@ -150,7 +159,29 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         }
     };
     drop(checker);
-    let codegen::Program { c: c_src, uses_tls } = program;
+    let codegen::Program { c: mut c_src, uses_tls, npm } = program;
+    // npm packages: bundled into a blob the program embeds (see runtime/js.c)
+    if !npm.is_empty() {
+        if !cfg!(target_vendor = "apple") {
+            return Err(BuildError::Message("npm packages need macOS for now (Barm runs them on the system's JavaScriptCore)".into()));
+        }
+        let b = crate::npm::bundle(&npm_root, &npm).map_err(|e| BuildError::Message(format!("can't bundle the npm packages: {e}")))?;
+        if std::env::var_os("BARM_TRACE").is_some() {
+            for w in &b.warnings {
+                eprintln!("npm: {w}");
+            }
+        }
+        let blob = b.blob();
+        let c_dir = cache_dir().join("c");
+        std::fs::create_dir_all(&c_dir).map_err(|e| BuildError::Message(format!("can't create {}: {e}", c_dir.display())))?;
+        let path = c_dir.join(format!("npm-{}.blob", hash_hex(&[&blob])));
+        if !path.is_file() {
+            let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+            std::fs::write(&tmp, &blob).and_then(|_| std::fs::rename(&tmp, &path)).map_err(|e| BuildError::Message(format!("can't write {}: {e}", path.display())))?;
+        }
+        let p = path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+        c_src.push_str(&format!("__asm__(\".section __TEXT,__const\\n.globl _bm_js_blob\\n.p2align 3\\n_bm_js_blob:\\n.incbin \\\"{p}\\\"\\n.byte 0\\n.text\\n\");\n"));
+    }
     let t2 = Instant::now();
     if let Some(p) = &opts.emit_c {
         std::fs::write(p, codegen::standalone(&c_src)).map_err(|e| BuildError::Message(format!("can't write {}: {e}", p.display())))?;
@@ -183,9 +214,11 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     let rt_key = hash_hex(&[codegen::RUNTIME_H.as_bytes(), codegen::RUNTIME_C.as_bytes(), cc.as_bytes(), flag_text.as_bytes(), env!("CARGO_PKG_VERSION").as_bytes()]);
     // A program that fetches links TLS (its code calls bm_tls_install).
     let tls = uses_tls.then(|| TlsArchive::new(&cc, sysroot.as_deref(), &extra));
+    // A program importing npm packages links the JavaScript bridge (compiled once per compiler).
+    let js_key = if npm.is_empty() { String::new() } else { hash_hex(&[JS_C.as_bytes(), NODE_C.as_bytes(), codegen::JS_H.as_bytes(), codegen::RUNTIME_H.as_bytes(), cc.as_bytes(), flag_text.as_bytes(), JIT_ENTITLEMENTS.as_bytes()]) };
     // Link flags (see below) are part of what a cached binary was built with.
     let tls_key = tls.as_ref().map(|t| t.key.clone()).unwrap_or_default();
-    let key = hash_hex(&[c_src.as_bytes(), rt_key.as_bytes(), LINK_FLAGS.as_bytes(), tls_key.as_bytes()]);
+    let key = hash_hex(&[c_src.as_bytes(), rt_key.as_bytes(), LINK_FLAGS.as_bytes(), tls_key.as_bytes(), js_key.as_bytes()]);
     let dir = cache_dir();
     let bin_dir = dir.join("bin");
     let binary = bin_dir.join(&key);
@@ -241,6 +274,12 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         cmd.args(extra.split_whitespace()).arg("-o").arg(&tmp).arg(&obj);
     }
     cmd.arg(&rt_obj);
+    if !js_key.is_empty() {
+        for obj in js_objects(&cc, &flags_base(&flags, &pch), &c_dir, &js_key)? {
+            cmd.arg(obj);
+        }
+        cmd.args(["-framework", "JavaScriptCore"]);
+    }
     if let Some(t) = &tls {
         cmd.arg(t.build(&cc, &c_dir)?);
         // BoringSSL is C++ (no exceptions or RTTI): a few libc++/libstdc++ helpers
@@ -271,9 +310,62 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     let linked = run_cc(cmd, &ld, &c_path);
     let _ = std::fs::remove_file(&obj);
     linked?;
+    if !js_key.is_empty() {
+        sign_for_jit(&tmp, &c_dir)?;
+    }
     std::fs::rename(&tmp, &binary).map_err(|e| BuildError::Message(format!("can't move the binary into the cache: {e}")))?;
     let t3 = Instant::now();
     Ok(Built { binary, tls: uses_tls, cached: false, sources, timings: (t1 - t0, t2 - t1, t3 - t2) })
+}
+
+/// The compiler flags without the precompiled header's `-include` (for other C files).
+fn flags_base(flags: &[&str], pch: &Option<PathBuf>) -> Vec<String> {
+    let mut out: Vec<String> = flags.iter().map(|s| s.to_string()).collect();
+    if pch.is_some()
+        && let Some(i) = out.iter().position(|f| f == "-include")
+    {
+        out.drain(i..i + 2);
+    }
+    out
+}
+
+/// runtime/js.c and runtime/node.c compiled once per compiler and flags: (js.o, node.o).
+fn js_objects(cc: &str, flags: &[String], c_dir: &Path, key: &str) -> Result<Vec<PathBuf>, BuildError> {
+    let objs = vec![c_dir.join(format!("js-{key}.o")), c_dir.join(format!("node-{key}.o"))];
+    if objs.iter().all(|o| o.is_file()) {
+        return Ok(objs);
+    }
+    let fail = |what: String| BuildError::Message(format!("can't build the JavaScript bridge: {what}"));
+    let dir = c_dir.join(format!("js-{key}.tmp{}", std::process::id()));
+    std::fs::create_dir_all(&dir).map_err(|e| fail(e.to_string()))?;
+    for (name, text) in [("barm.h", codegen::RUNTIME_H), ("js.h", codegen::JS_H), ("js.c", JS_C), ("node.c", NODE_C)] {
+        std::fs::write(dir.join(name), text).map_err(|e| fail(e.to_string()))?;
+    }
+    for (src, obj) in ["js.c", "node.c"].iter().zip(&objs) {
+        let tmp = obj.with_extension(format!("tmp{}.o", std::process::id()));
+        let mut cmd = Command::new(cc);
+        cmd.args(flags).args(["-ffunction-sections", "-fdata-sections", "-c", "-o"]).arg(&tmp).arg(dir.join(src));
+        run_cc(cmd, cc, &dir.join(src))?;
+        std::fs::rename(&tmp, obj).map_err(|e| fail(e.to_string()))?;
+    }
+    for name in ["barm.h", "js.h", "js.c", "node.c"] {
+        let _ = std::fs::remove_file(dir.join(name));
+    }
+    let _ = std::fs::remove_dir(&dir);
+    Ok(objs)
+}
+
+/// Ad-hoc signs a binary with the JIT entitlement (see JIT_ENTITLEMENTS).
+fn sign_for_jit(binary: &Path, c_dir: &Path) -> Result<(), BuildError> {
+    let plist = c_dir.join(format!("jit-{}.plist", hash_hex(&[JIT_ENTITLEMENTS.as_bytes()])));
+    if !plist.is_file() {
+        std::fs::write(&plist, JIT_ENTITLEMENTS).map_err(|e| BuildError::Message(format!("can't write {}: {e}", plist.display())))?;
+    }
+    let out = Command::new("/usr/bin/codesign").args(["-s", "-", "-f", "--entitlements"]).arg(&plist).arg(binary).output().map_err(|e| BuildError::Message(format!("can't run codesign: {e}")))?;
+    if !out.status.success() {
+        return Err(BuildError::Message(format!("codesign failed: {}", String::from_utf8_lossy(&out.stderr).trim())));
+    }
+    Ok(())
 }
 
 /// macOS: the main thread's stack size (the most arm64 allows).

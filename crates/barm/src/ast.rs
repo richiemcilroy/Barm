@@ -318,6 +318,8 @@ pub enum MemberKind {
 pub struct Import {
     pub names: Vec<(Sym, Span)>,
     pub namespace: Option<(Sym, Span)>,
+    /// `import x from "pkg"`: only npm packages have a default export.
+    pub default: Option<(Sym, Span)>,
     pub path: String,
     pub path_span: Span,
 }

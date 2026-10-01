@@ -16,6 +16,18 @@ pub enum IdentFact {
     /// A class name (the right side of `instanceof`).
     Class(u32),
     Builtin,
+    /// A name imported from an npm package (module index).
+    Npm(u32, NpmName),
+}
+
+/// What an npm import names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NpmName {
+    /// `import * as ns`: the module namespace.
+    Ns,
+    /// `import d from`.
+    Default,
+    Named(Sym),
 }
 
 #[derive(Clone, Debug)]
@@ -41,6 +53,10 @@ pub enum Callee {
     SuperCtor(TyId),
     /// `new Promise(executor)`; the promise type is the call's return type.
     NewPromise,
+    /// A call on a JavaScript value: `f(...)`, or `obj.name(...)` (a method, with `obj` as `this`).
+    Js { method: Option<Sym> },
+    /// `new C(...)` on a JavaScript constructor.
+    JsNew,
 }
 
 #[derive(Clone, Debug)]

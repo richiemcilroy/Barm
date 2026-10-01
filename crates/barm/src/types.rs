@@ -75,6 +75,8 @@ pub enum Ty {
     Expect(TyId),
     /// `Promise<T>`: (value type, what it can reject with — `never` if nothing).
     Promise(TyId, TyId),
+    /// A JavaScript value from an npm package (dynamically typed; see runtime/js.h).
+    Js,
 }
 
 /// Hash-consed storage for lists of `T`.
@@ -149,6 +151,7 @@ prims! {
     U32 = 14 => Ty::U32,
     U64 = 15 => Ty::U64,
     STR = 16 => Ty::Str,
+    JS = 17 => Ty::Js,
 }
 
 impl Default for Types {
@@ -584,6 +587,7 @@ impl Display<'_> {
             Ty::Error => out.push_str("<error>"),
             Ty::Never => out.push_str("never"),
             Ty::Unknown => out.push_str("unknown"),
+            Ty::Js => out.push_str("Js"),
             Ty::Void => out.push_str("void"),
             Ty::Undefined => out.push_str("undefined"),
             Ty::Bool => out.push_str("bool"),

@@ -332,12 +332,24 @@ static void bm_js_t_to_str(bm_sb *sb, const void *p) {
 static void bm_js_t_inspect(bm_sb *sb, const void *p, int depth) {
     JSValueRef v = *(JSValueRef *)p;
     JSContextRef ctx = bm_js();
-    /* util.inspect when the bundle has it (globalThis.__barm_inspect), else JSON-ish */
-    static JSStringRef k;
-    JSValueRef f = JSObjectGetProperty(ctx, JSContextGetGlobalObject(ctx), bm_js_key(&k, "__barm_inspect"), NULL);
-    if (JSValueIsObject(ctx, f) && JSObjectIsFunction(ctx, (JSObjectRef)f)) {
-        JSValueRef args[2] = {v, JSValueMakeNumber(ctx, depth)};
-        JSValueRef r = JSObjectCallAsFunction(ctx, (JSObjectRef)f, NULL, 2, args, NULL);
+    /* Node.js's util.inspect when the bundle has node:util (programs that print JavaScript values
+     * do), else JSON-ish */
+    static JSValueRef inspect;
+    static bool looked;
+    if (!looked) {
+        looked = true;
+        JSValueRef exc = NULL;
+        JSValueRef util = bm_js_import("node:util", &exc);
+        static JSStringRef k;
+        if (util && JSValueIsObject(ctx, util)) inspect = JSObjectGetProperty(ctx, (JSObjectRef)util, bm_js_key(&k, "inspect"), NULL);
+        if (inspect && JSValueIsObject(ctx, inspect)) JSValueProtect(ctx, inspect); else inspect = NULL;
+    }
+    if (depth == 0 && JSValueIsString(ctx, v)) {
+        bm_js_t_to_str(sb, p);
+        return;
+    }
+    if (inspect) {
+        JSValueRef r = JSObjectCallAsFunction(ctx, (JSObjectRef)inspect, NULL, 1, &v, NULL);
         if (r && JSValueIsString(ctx, r)) {
             bm_str s = bm_js_to_str(r);
             bm_sb_push_str(sb, s);
@@ -601,4 +613,179 @@ bm_promise *bm_js_await(JSValueRef v) {
         bm_js_waiter_settle(ctx, (JSObjectRef)fns[1], 1, &exc, false);
     }
     return p;
+}
+
+/* ------------------------------------------------------------------ for generated code */
+
+void bm_js_error_parts(JSValueRef exc, bm_str *name, bm_str *message) {
+    JSContextRef ctx = bm_js();
+    if (JSValueIsObject(ctx, exc)) {
+        static JSStringRef kname, kmessage;
+        JSValueRef n = JSObjectGetProperty(ctx, (JSObjectRef)exc, bm_js_key(&kname, "name"), NULL);
+        JSValueRef m = JSObjectGetProperty(ctx, (JSObjectRef)exc, bm_js_key(&kmessage, "message"), NULL);
+        if (n && JSValueIsString(ctx, n) && m && !JSValueIsUndefined(ctx, m)) {
+            *name = bm_js_to_str(n);
+            *message = bm_js_to_str(m);
+            return;
+        }
+    }
+    *name = bm_str_from("JsError", 7);
+    *message = bm_js_to_str(exc);
+}
+
+static _Noreturn void bm_js_trap_exc(JSValueRef exc, const char *loc) {
+    bm_str text = bm_js_error_text(exc);
+    bm_sb sb = {0};
+    bm_sb_push_cstr(&sb, "uncaught JavaScript exception: ");
+    bm_sb_push_str(&sb, text);
+    bm_sb_push_char(&sb, 0);
+    bm_trap(sb.data, loc);
+}
+
+JSValueRef bm_js_import_as(const char *spec, int kind, const char *loc) {
+    JSContextRef ctx = bm_js();
+    JSValueRef exc = NULL;
+    JSValueRef m = bm_js_import(spec, &exc);
+    if (!m) bm_js_trap_exc(exc, loc);
+    if (kind == 0) {
+        /* as in Node.js: a CommonJS module's namespace has `default` (module.exports) and its keys */
+        static JSStringRef kns;
+        JSValueRef ns = JSObjectGetProperty(ctx, JSContextGetGlobalObject(ctx), bm_js_key(&kns, "__barm_ns"), NULL);
+        JSValueRef r = JSObjectCallAsFunction(ctx, (JSObjectRef)ns, NULL, 1, &m, &exc);
+        if (!r) bm_js_trap_exc(exc, loc);
+        return r;
+    }
+    if (kind == 1 && JSValueIsObject(ctx, m)) {
+        /* an ES module's default export; a CommonJS module's is module.exports */
+        static JSStringRef kesm, kdefault;
+        JSValueRef esm = JSObjectGetProperty(ctx, (JSObjectRef)m, bm_js_key(&kesm, "__esModule"), NULL);
+        if (esm && JSValueToBoolean(ctx, esm)) {
+            JSValueRef r = JSObjectGetProperty(ctx, (JSObjectRef)m, bm_js_key(&kdefault, "default"), &exc);
+            if (!r || exc) bm_js_trap_exc(exc, loc);
+            return r;
+        }
+    }
+    return m;
+}
+
+JSValueRef bm_js_get_or_trap(JSValueRef obj, JSStringRef key, const char *loc) {
+    JSValueRef exc = NULL;
+    JSValueRef r = bm_js_get(obj, key, &exc);
+    if (!r) bm_js_trap_exc(exc, loc);
+    return r;
+}
+
+JSValueRef bm_js_at_or_trap(JSValueRef obj, double i, const char *loc) {
+    JSContextRef ctx = bm_js();
+    JSValueRef exc = NULL;
+    JSObjectRef o = JSValueToObject(ctx, obj, &exc);
+    if (!o) bm_js_trap_exc(exc, loc);
+    JSValueRef r;
+    if (i >= 0 && i < 4294967295.0 && i == (double)(uint32_t)i) {
+        r = JSObjectGetPropertyAtIndex(ctx, o, (unsigned)i, &exc);
+    } else {
+        r = JSObjectGetPropertyForKey(ctx, o, JSValueMakeNumber(ctx, i), &exc);
+    }
+    if (exc) bm_js_trap_exc(exc, loc);
+    return r;
+}
+
+JSValueRef bm_js_key_or_trap(JSValueRef obj, bm_str key, const char *loc) {
+    JSContextRef ctx = bm_js();
+    JSValueRef exc = NULL;
+    JSObjectRef o = JSValueToObject(ctx, obj, &exc);
+    if (!o) bm_js_trap_exc(exc, loc);
+    JSValueRef r = JSObjectGetPropertyForKey(ctx, o, bm_js_from_str(key), &exc);
+    if (exc) bm_js_trap_exc(exc, loc);
+    return r;
+}
+
+void bm_js_put_or_trap(JSValueRef obj, JSStringRef key, JSValueRef value, const char *loc) {
+    JSValueRef exc = NULL;
+    if (!bm_js_set(obj, key, value, &exc)) bm_js_trap_exc(exc, loc);
+}
+
+_Noreturn void bm_js_type_trap(JSValueRef v, const char *want, const char *loc) {
+    bm_sb sb = {0};
+    bm_sb_push_cstr(&sb, "a JavaScript ");
+    bm_sb_push_cstr(&sb, JSValueIsNull(bm_js(), v) ? "null" : bm_js_typeof(v));
+    bm_sb_push_cstr(&sb, " isn't a `");
+    bm_sb_push_cstr(&sb, want);
+    bm_sb_push_cstr(&sb, "`");
+    bm_sb_push_char(&sb, 0);
+    bm_trap(sb.data, loc);
+}
+
+bool bm_js_truthy(JSValueRef v) { return JSValueToBoolean(bm_js(), v); }
+bool bm_js_is_nullish(JSValueRef v) {
+    JSContextRef ctx = bm_js();
+    return JSValueIsUndefined(ctx, v) || JSValueIsNull(ctx, v);
+}
+bool bm_js_is_array(JSValueRef v) { return JSValueIsArray(bm_js(), v); }
+
+uint32_t bm_js_length(JSValueRef v) {
+    JSContextRef ctx = bm_js();
+    static JSStringRef klength;
+    if (!JSValueIsObject(ctx, v)) return 0;
+    JSValueRef n = JSObjectGetProperty(ctx, (JSObjectRef)v, bm_js_key(&klength, "length"), NULL);
+    double d = n ? JSValueToNumber(ctx, n, NULL) : 0;
+    return d >= 0 && d < 4294967296.0 ? (uint32_t)d : 0;
+}
+
+JSValueRef bm_js_array(size_t n, const JSValueRef *items) { return JSObjectMakeArray(bm_js(), n, items, NULL); }
+JSValueRef bm_js_object(void) { return JSObjectMake(bm_js(), NULL, NULL); }
+void bm_js_put(JSValueRef obj, JSStringRef key, JSValueRef value) { JSObjectSetProperty(bm_js_ctx, (JSObjectRef)obj, key, value, kJSPropertyAttributeNone, NULL); }
+
+JSValueRef bm_js_lit(JSValueRef *slot, const char *s, size_t n) {
+    if (!*slot) *slot = bm_js_retain(bm_js_str(s, n));
+    return *slot;
+}
+
+/* Barm closures as JavaScript functions: the closure and its trampoline as private data.
+ * Environments of collected functions are released later, outside the collector. */
+typedef struct { bm_fn fn; bm_js_tramp tramp; } bm_js_closure;
+static JSClassRef bm_js_closure_class;
+static bm_env **bm_js_dead_envs;
+static size_t bm_js_ndead, bm_js_capdead;
+
+static void bm_js_release_dead(void) {
+    while (bm_js_ndead) bm_env_release(bm_js_dead_envs[--bm_js_ndead]);
+}
+
+static JSValueRef bm_js_closure_call(JSContextRef ctx, JSObjectRef f, JSObjectRef self, size_t n, const JSValueRef a[], JSValueRef *exc) {
+    (void)ctx; (void)self; (void)exc;
+    bm_js_closure *c = JSObjectGetPrivate(f);
+    return c->tramp(&c->fn, n, a);
+}
+
+static void bm_js_closure_finalize(JSObjectRef f) {
+    bm_js_closure *c = JSObjectGetPrivate(f);
+    if (!c) return;
+    if (c->fn.env) {
+        if (bm_js_ndead == bm_js_capdead) {
+            bm_js_capdead = bm_js_capdead ? bm_js_capdead * 2 : 16;
+            bm_js_dead_envs = realloc(bm_js_dead_envs, bm_js_capdead * sizeof *bm_js_dead_envs);
+            if (!bm_js_dead_envs) abort();
+        }
+        bm_js_dead_envs[bm_js_ndead++] = c->fn.env;
+    }
+    free(c);
+}
+
+JSValueRef bm_js_function(bm_fn fn, bm_js_tramp tramp) {
+    JSContextRef ctx = bm_js();
+    bm_js_release_dead();
+    if (!bm_js_closure_class) {
+        JSClassDefinition d = kJSClassDefinitionEmpty;
+        d.className = "Function";
+        d.callAsFunction = bm_js_closure_call;
+        d.finalize = bm_js_closure_finalize;
+        bm_js_closure_class = JSClassCreate(&d);
+    }
+    bm_js_closure *c = malloc(sizeof *c);
+    if (!c) abort();
+    c->fn = fn;
+    c->tramp = tramp;
+    bm_env_retain(fn.env);
+    return JSObjectMake(ctx, bm_js_closure_class, c);
 }

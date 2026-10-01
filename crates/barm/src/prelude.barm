@@ -31,3 +31,19 @@ export class SyntaxError extends Error {
     this.name = "SyntaxError"
   }
 }
+
+/** An error thrown by JavaScript (an npm package): `value` is what was thrown; `name` and
+ * `message` are its own when it's an `Error`. */
+export class JsError extends Error {
+  value: Js
+  constructor(name: string, message: string, value: Js) {
+    super(message)
+    this.name = name
+    this.value = value
+  }
+}
+
+/** (Makes the JsError for a JavaScript exception; called by generated code.) */
+export function __jsError(name: string, message: string, value: Js): JsError {
+  return new JsError(name, message, value)
+}

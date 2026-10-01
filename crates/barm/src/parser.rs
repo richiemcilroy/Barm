@@ -614,6 +614,7 @@ impl<'a> Parser<'a> {
         }
         let mut names = Vec::new();
         let mut namespace = None;
+        let mut default = None;
         if self.at(Tok::Str) {
             let span = self.cur_span();
             self.err("X0031", span, "side-effect imports are not supported; modules have no initialization side effects");
@@ -628,42 +629,23 @@ impl<'a> Parser<'a> {
             }
             namespace = self.ident("a namespace name");
         } else if self.at(Tok::LBrace) {
-            self.bump();
-            while !self.at(Tok::RBrace) && !self.at(Tok::Eof) {
-                if self.at(Tok::Type) {
-                    self.bump();
-                }
-                let Some(name) = self.ident("an imported name") else {
-                    self.recover_line();
-                    return;
-                };
-                names.push(name);
-                if self.at_word("as") {
-                    let as_span = self.cur_span();
-                    self.bump();
-                    let alias = self.ident("a name");
-                    let span = as_span.to(self.prev_span());
-                    let original = self.interner.get(name.0).to_string();
-                    let mut d = Diagnostic::new("X0012", span, "renaming imports is not supported")
-                        .note("why", "every name has one spelling across the codebase, so search finds all uses");
-                    if alias.is_some() {
-                        d = d.fix(Applicability::Maybe, format!("import `{original}` without renaming and use that name"), Span::new(self.file, name.1.end, span.end), "");
+            if !self.import_list(&mut names) {
+                return;
+            }
+        } else if self.at(Tok::Ident) {
+            // (the checker allows it only from npm packages)
+            default = self.ident("a name");
+            // `import d, { a } from ...` / `import d, * as ns from ...`
+            if self.eat(Tok::Comma) {
+                if self.eat(Tok::Star) {
+                    if self.at_word("as") {
+                        self.bump();
                     }
-                    self.push(d);
-                }
-                if !self.eat(Tok::Comma) {
-                    break;
+                    namespace = self.ident("a namespace name");
+                } else if self.at(Tok::LBrace) && !self.import_list(&mut names) {
+                    return;
                 }
             }
-            self.expect(Tok::RBrace, "to close the import list");
-        } else if self.at(Tok::Ident) {
-            let span = self.cur_span();
-            let name = self.text(self.tok()).to_string();
-            self.push(
-                Diagnostic::new("X0011", span, "default imports are not supported")
-                    .note("instead", format!("import named exports: `import {{ {name} }} from ...` or `import * as {name} from ...`")),
-            );
-            self.bump();
         } else {
             let span = self.cur_span();
             let msg = format!("expected `{{`, `*` or a string after `import`, found {}", self.found());
@@ -691,7 +673,40 @@ impl<'a> Parser<'a> {
         let path_span = self.span_of(t);
         self.terminator();
         let span = start.to(path_span);
-        self.ast.items.push(Item { kind: ItemKind::Import(Import { names, namespace, path, path_span }), span, exported: false });
+        self.ast.items.push(Item { kind: ItemKind::Import(Import { names, namespace, default, path, path_span }), span, exported: false });
+    }
+
+    /// `{ a, b }` in an import; false if it had to give up on the line.
+    fn import_list(&mut self, names: &mut Vec<(Sym, Span)>) -> bool {
+        self.bump();
+        while !self.at(Tok::RBrace) && !self.at(Tok::Eof) {
+            if self.at(Tok::Type) {
+                self.bump();
+            }
+            let Some(name) = self.ident("an imported name") else {
+                self.recover_line();
+                return false;
+            };
+            names.push(name);
+            if self.at_word("as") {
+                let as_span = self.cur_span();
+                self.bump();
+                let alias = self.ident("a name");
+                let span = as_span.to(self.prev_span());
+                let original = self.interner.get(name.0).to_string();
+                let mut d = Diagnostic::new("X0012", span, "renaming imports is not supported")
+                    .note("why", "every name has one spelling across the codebase, so search finds all uses");
+                if alias.is_some() {
+                    d = d.fix(Applicability::Maybe, format!("import `{original}` without renaming and use that name"), Span::new(self.file, name.1.end, span.end), "");
+                }
+                self.push(d);
+            }
+            if !self.eat(Tok::Comma) {
+                break;
+            }
+        }
+        self.expect(Tok::RBrace, "to close the import list");
+        true
     }
 
     fn tparams(&mut self) -> Vec<TypeParam> {

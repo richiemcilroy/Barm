@@ -52,9 +52,8 @@ fn main() -> ExitCode {
         Some("__bundle") => bundle_cmd(&rest[1..]),
         // Bun's package commands: there's nothing for them to do yet, so say so.
         Some(cmd @ ("install" | "i" | "add" | "remove" | "update")) => {
-            eprintln!("error: `barm {cmd}`: Barm has no packages yet, so there's nothing to install");
-            eprintln!("  instead: import the standard library (\"std/http\", \"node:fs\", \"node:path\", ...) and local files (\"./file\")");
-            eprintln!("  note: Barm code can't import npm packages; tools that package.json scripts run can still be installed with npm or bun");
+            eprintln!("error: `barm {cmd}` isn't available yet");
+            eprintln!("  instead: install npm packages with bun, npm, pnpm or yarn: Barm imports them from node_modules (`import {{ z }} from \"zod\"`)");
             ExitCode::from(1)
         }
         Some("version" | "--version" | "-V") => {

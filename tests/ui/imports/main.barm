@@ -3,6 +3,7 @@ import { thing } from "./libz"
 import { other } from "./lib.ts"
 import * as fs from "std/sockets"
 import lodash from "lodash"
+import lib from "./lib"
 
 function main() {
   console.log(area(2.0))

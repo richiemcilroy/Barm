@@ -167,8 +167,8 @@ impl Resolver {
                 let imports = pkg.get("imports").ok_or_else(|| format!("\"{spec}\": the package has no `imports` field"))?;
                 for conds in [REQUIRE_CONDITIONS, IMPORT_CONDITIONS] {
                     if let Some(Some(target)) = resolve_map(imports, spec, conds) {
-                        if target.starts_with("./") {
-                            let p = d.join(&target[2..]);
+                        if let Some(rel) = target.strip_prefix("./") {
+                            let p = d.join(rel);
                             return self.exact_file(&p).map(Target::File).ok_or_else(|| format!("\"{spec}\" resolves to {}, which doesn't exist", p.display()));
                         }
                         return self.resolve(d, &target);
@@ -289,10 +289,10 @@ fn resolve_target(target: &Json, star: &str, conds: &[&str]) -> Option<Option<St
         }
         Json::Object(entries) => {
             for (k, v) in entries {
-                if k == "default" || conds.contains(&k.as_str()) {
-                    if let Some(r) = resolve_target(v, star, conds) {
-                        return Some(r);
-                    }
+                if (k == "default" || conds.contains(&k.as_str()))
+                    && let Some(r) = resolve_target(v, star, conds)
+                {
+                    return Some(r);
                 }
             }
             None
