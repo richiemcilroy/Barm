@@ -65,6 +65,8 @@ def run(cmd, cwd=None, timeout=30):
 
 
 _slot = threading.local()
+_workers = iter(range(10**6))
+_workers_lock = threading.Lock()
 
 
 def scratch(project):
@@ -81,7 +83,8 @@ def scratch(project):
 def check(project, pkg):
     # scratch files per worker, overwritten: bounded disk use
     if not hasattr(_slot, "n"):
-        _slot.n = threading.get_ident() % 100000
+        with _workers_lock:
+            _slot.n = next(_workers)
     base = os.path.join(scratch(project), f"w{_slot.n}")
     with open(base + ".bun.js", "w") as f:
         f.write(PROBE % ("require", json.dumps(pkg)))

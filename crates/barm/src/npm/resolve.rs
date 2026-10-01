@@ -144,9 +144,15 @@ impl Resolver {
                         let p = pkg_dir.join(target.trim_start_matches("./"));
                         return self.exact_file(&p).map(Target::File).ok_or_else(|| format!("\"{spec}\" resolves to {}, which doesn't exist", p.display()));
                     }
-                    Some(None) => return Err(format!("\"{spec}\" is not exported by its package (package.json `exports`)")),
+                    Some(None) => break,
                     None => {}
                 }
+            }
+            // Not exported: Node.js stops here; Bun takes a file that's there (so do we)
+            if subpath != "."
+                && let Some(f) = self.file_or_dir(&pkg_dir.join(&subpath[2..]))
+            {
+                return Ok(Target::File(f));
             }
             return Err(format!("\"{spec}\" is not exported by its package (package.json `exports`)"));
         }

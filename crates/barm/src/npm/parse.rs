@@ -1789,8 +1789,9 @@ impl<'a> P<'a> {
                         self.bump();
                         Ok(())
                     }
-                    "require" if self.is_punct(1, "(") && self.kind(2) == Some(Kind::Str) && self.is_punct(3, ")") => {
-                        self.m.requires.push(super::bundle::unquote(self.text(2)));
+                    "require" if self.is_punct(1, "(") && lex::literal_arg(&self.toks[self.i..], self.src, 1).is_some() => {
+                        let spec = lex::literal_arg(&self.toks[self.i..], self.src, 1).unwrap_or_default();
+                        self.m.requires.push(spec);
                         self.reference(0, Ctx::Callee);
                         self.bump();
                         Ok(())
