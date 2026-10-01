@@ -31,11 +31,69 @@ function lazy(name, load, enumerable = false) {
 
 Object.defineProperty(g, 'global', { __proto__: null, value: g, writable: true, enumerable: false, configurable: true });
 
+// V8's Error.prepareStackTrace and CallSites (internal/barm/callsite), for packages that read
+// their callers: while it's a function, Error.captureStackTrace and `new Error()` (the global
+// Error is then a wrapper around the engine's) give it the error and its frames.
+{
+  const NativeError = g.Error;
+  const nativeCapture = NativeError.captureStackTrace;
+  let prepareStackTrace;
+  // (its own frame, if the engine keeps it, isn't one of the error's)
+  const PreparingError = function Error(...args) {
+    const e = Reflect.construct(NativeError, args, new.target ?? PreparingError);
+    if (typeof prepareStackTrace === 'function') {
+      const stack = require('internal/barm/callsite').prepare(e, e.stack, /^Error@/.test(e.stack) ? 1 : 0);
+      Object.defineProperty(e, 'stack', { __proto__: null, value: stack, writable: true, configurable: true });
+    }
+    return e;
+  };
+  PreparingError.prototype = NativeError.prototype;
+  Object.setPrototypeOf(PreparingError, NativeError);
+  for (const target of [NativeError, PreparingError]) {
+    Object.defineProperty(target, 'prepareStackTrace', {
+      __proto__: null,
+      configurable: true,
+      enumerable: false,
+      get: () => prepareStackTrace,
+      set(fn) {
+        prepareStackTrace = fn;
+        if (typeof fn === 'function') {
+          if (g.Error === NativeError) g.Error = PreparingError;
+        } else if (g.Error === PreparingError) {
+          g.Error = NativeError;
+        }
+      },
+    });
+  }
+  Object.defineProperty(PreparingError, 'stackTraceLimit', {
+    __proto__: null,
+    configurable: true,
+    enumerable: true,
+    get: () => NativeError.stackTraceLimit,
+    set(n) { NativeError.stackTraceLimit = n; },
+  });
+  if (typeof nativeCapture === 'function') {
+    const captureStackTrace = function captureStackTrace(obj, fn) {
+      nativeCapture(obj, fn ?? captureStackTrace);
+      if (typeof prepareStackTrace === 'function') {
+        const stack = require('internal/barm/callsite').prepare(obj, obj.stack, 0);
+        Object.defineProperty(obj, 'stack', { __proto__: null, value: stack, writable: true, configurable: true });
+      }
+    };
+    Object.defineProperty(NativeError, 'captureStackTrace', { __proto__: null, value: captureStackTrace, writable: true, configurable: true });
+  }
+}
+
 // process: a plain object (it sets the global itself), with the rest of Node.js's process
 // loading as it's used
 require('internal/bootstrap/process');
 
-lazy('console', () => require('internal/console/global'));
+// (bound to process.stdout and process.stderr on first write, as Node.js's startup does)
+lazy('console', () => {
+  const console = require('internal/console/global');
+  require('internal/console/constructor').initializeGlobalConsole(console);
+  return console;
+});
 // the global `crypto` (Web Crypto): random values without the rest of crypto; `subtle` brings
 // crypto in when the program's bundle has it
 lazy('crypto', () => {
@@ -90,6 +148,13 @@ lazy('TextDecoderStream', () => require('internal/webstreams/encoding').TextDeco
 lazy('CompressionStream', () => require('internal/webstreams/compression').CompressionStream);
 lazy('DecompressionStream', () => require('internal/webstreams/compression').DecompressionStream);
 lazy('Blob', () => require('internal/blob').Blob);
+lazy('performance', () => require('perf_hooks').performance);
+lazy('PerformanceEntry', () => require('perf_hooks').PerformanceEntry);
+lazy('PerformanceMark', () => require('perf_hooks').PerformanceMark);
+lazy('PerformanceMeasure', () => require('perf_hooks').PerformanceMeasure);
+lazy('PerformanceObserver', () => require('perf_hooks').PerformanceObserver);
+lazy('PerformanceObserverEntryList', () => require('perf_hooks').PerformanceObserverEntryList);
+lazy('PerformanceResourceTiming', () => require('perf_hooks').PerformanceResourceTiming);
 lazy('File', () => require('internal/file').File);
 
 // timers: Barm's event loop drives them (the natives); internal/bindings/timers wires them up

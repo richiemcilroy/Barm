@@ -67,6 +67,18 @@ function getConstructorName(obj) {
   return 'Object';
 }
 
+// The modules Node.js's files load with defineLazyProperties: literal requires, so the bundler
+// includes them (not util.setTraceSigInt's, which would bring worker_threads into every bundle)
+const lazyModules = {
+  'internal/blob': () => require('internal/blob'),
+  'internal/encoding': () => require('internal/encoding'),
+  'internal/file': () => require('internal/file'),
+  'internal/fs/dir': () => require('internal/fs/dir'),
+  'internal/mime': () => require('internal/mime'),
+  'internal/util/diff': () => require('internal/util/diff'),
+  'internal/util/parse_args/parse_args': () => require('internal/util/parse_args/parse_args'),
+};
+
 // Lazily required properties: `target[key]` is require(id)[key], loaded on first use
 function defineLazyProperties(target, id, keys, enumerable = true) {
   let mod;
@@ -79,7 +91,7 @@ function defineLazyProperties(target, id, keys, enumerable = true) {
       configurable: true,
       get() {
         if (!set) {
-          mod ??= require(id);
+          mod ??= lazyModules[id] ? lazyModules[id]() : require(id);
           value = mod[key];
           set = true;
         }
