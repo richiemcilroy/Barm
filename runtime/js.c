@@ -500,8 +500,9 @@ bool bm_js_bytes_view(JSValueRef v, uint8_t **ptr, size_t *len) {
         *len = JSObjectGetArrayBufferByteLength(ctx, o, NULL);
         return true;
     }
-    /* (the pointer is the view's start: its byte offset is applied) */
-    *ptr = JSObjectGetTypedArrayBytesPtr(ctx, o, NULL);
+    /* JSObjectGetTypedArrayBytesPtr points at the start of the backing ArrayBuffer: add the
+     * view's byte offset (a Buffer is usually a slice of a shared pool) */
+    *ptr = (uint8_t *)JSObjectGetTypedArrayBytesPtr(ctx, o, NULL) + JSObjectGetTypedArrayByteOffset(ctx, o, NULL);
     *len = JSObjectGetTypedArrayByteLength(ctx, o, NULL);
     return true;
 }

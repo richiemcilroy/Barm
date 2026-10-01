@@ -20,8 +20,20 @@ const kHasOutstanding = 2;
 let processImmediate = null;
 let processTimers = null;
 let checkRequested = false;
+let runTicks = null;
+
+// Wires internal/timers to the loop: on the first timer or immediate (whether it came through
+// the globals or require('timers')), as Node.js's bootstrap does at startup.
+function ensureSetup() {
+  if (processTimers !== null) return;
+  const queue = require('internal/bootstrap/ticks')();
+  ({ processImmediate, processTimers } = require('internal/timers').getTimerCallbacks(queue.runNextTicks));
+  runTicks = require('internal/bindings/task_queue').runTicks;
+  native.timerSetup(onTimer, onCheck);
+}
 
 function requestCheck() {
+  ensureSetup();
   if (checkRequested) return;
   checkRequested = true;
   native.requestCheck(immediateFields[kRefCount] > 0);
@@ -44,16 +56,19 @@ const immediateInfo = new Proxy(immediateFields, {
 
 const timeoutInfo = new Int32Array(1);
 
+// (each runs the tick queue when it's done: Node.js runs it after every callback from the loop,
+// before promise jobs)
 function onTimer() {
   const now = native.now();
   const next = processTimers(now);
   if (next === 0) {
     native.timerRef(false);
-    return;
+  } else {
+    const due = Math.abs(next) - native.now();
+    native.timerSchedule(due > 0 ? due : 1);
+    native.timerRef(next > 0);
   }
-  const due = Math.abs(next) - native.now();
-  native.timerSchedule(due > 0 ? due : 1);
-  native.timerRef(next > 0);
+  runTicks();
 }
 
 function onCheck() {
@@ -61,6 +76,7 @@ function onCheck() {
   if (immediateFields[kCount] === 0) return;
   processImmediate();
   if (immediateFields[kCount] > 0) requestCheck();
+  runTicks();
 }
 
 module.exports = {
@@ -68,11 +84,14 @@ module.exports = {
   timeoutInfo,
   getLibuvNow: () => native.now(),
   setupTimers(pi, pt) {
+    if (processTimers !== null) return;
     processImmediate = pi;
     processTimers = pt;
+    runTicks = require('internal/bindings/task_queue').runTicks;
     native.timerSetup(onTimer, onCheck);
   },
   scheduleTimer(ms) {
+    ensureSetup();
     native.timerSchedule(ms > 0 ? ms : 1);
   },
   toggleTimerRef(ref) {
