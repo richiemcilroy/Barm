@@ -1,0 +1,541 @@
+/* js.c — Barm's bridge to JavaScriptCore (see js.h): the engine, values, calls, bytes and
+ * promises across the boundary. Linked only by programs that import npm packages, with
+ * runtime/node.c (the Node.js natives) and the system JavaScriptCore framework. */
+
+#include "js.h"
+
+#include <JavaScriptCore/JavaScriptCore.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+JSGlobalContextRef bm_js_ctx;
+static JSStringRef bm_js_bundle_text;   /* the bundle, kept for __barm_source */
+static JSStringRef bm_js_bundle_url;
+static JSObjectRef bm_js_npm;           /* globalThis.__barm_npm (protected) */
+static JSObjectRef bm_js_noop;          /* calling it runs pending microtasks */
+
+/* Set by the program: a Barm JsError object (owned) holding a thrown JavaScript value. */
+void *(*bm_js_make_error)(JSValueRef exc);
+
+/* Until runtime/node.c defines it (a program links node.c as an object, so its definition wins):
+ * no natives, so the shims fall back to what the engine has (internal/bootstrap/host_fallback). */
+__attribute__((weak)) void bm_node_install(JSContextRef ctx, JSObjectRef native) {
+    (void)native;
+    JSStringRef k = JSStringCreateWithUTF8CString("__barm_native");
+    JSObjectDeleteProperty(ctx, JSContextGetGlobalObject(ctx), k, NULL);
+    JSStringRelease(k);
+}
+
+static JSValueRef bm_js_noop_fn(JSContextRef ctx, JSObjectRef f, JSObjectRef self, size_t n, const JSValueRef a[], JSValueRef *exc) {
+    (void)f; (void)self; (void)n; (void)a; (void)exc;
+    return JSValueMakeUndefined(ctx);
+}
+
+/* globalThis.__barm_source(url): the bundle's text for its own URL (assert reads the failing
+ * expression from it), else undefined. */
+static JSValueRef bm_js_source_fn(JSContextRef ctx, JSObjectRef f, JSObjectRef self, size_t n, const JSValueRef a[], JSValueRef *exc) {
+    (void)f; (void)self;
+    if (n > 0 && JSValueIsString(ctx, a[0])) {
+        JSStringRef url = JSValueToStringCopy(ctx, a[0], exc);
+        bool ours = url && JSStringIsEqual(url, bm_js_bundle_url);
+        if (url) JSStringRelease(url);
+        if (ours) return JSValueMakeString(ctx, bm_js_bundle_text);
+    }
+    return JSValueMakeUndefined(ctx);
+}
+
+void bm_js_def(JSContextRef ctx, JSObjectRef obj, const char *name, JSObjectCallAsFunctionCallback fn) {
+    JSStringRef k = JSStringCreateWithUTF8CString(name);
+    JSObjectSetProperty(ctx, obj, k, JSObjectMakeFunctionWithCallback(ctx, k, fn), kJSPropertyAttributeDontEnum, NULL);
+    JSStringRelease(k);
+}
+
+static _Noreturn void bm_js_fatal(const char *what, JSValueRef exc) {
+    bm_str text = bm_js_error_text(exc);
+    bm_err_cstr(what);
+    bm_err_cstr(text.p->data);
+    bm_err_cstr("\n");
+    exit(1);
+}
+
+JSContextRef bm_js(void) {
+    if (bm_js_ctx) return bm_js_ctx;
+    JSGlobalContextRef ctx = JSGlobalContextCreate(NULL);
+    bm_js_ctx = ctx;
+    JSObjectRef global = JSContextGetGlobalObject(ctx);
+    JSObjectRef native = JSObjectMake(ctx, NULL, NULL);
+    JSStringRef k = JSStringCreateWithUTF8CString("__barm_native");
+    JSObjectSetProperty(ctx, global, k, native, kJSPropertyAttributeDontEnum, NULL);
+    JSStringRelease(k);
+    bm_node_install(ctx, native);
+    bm_js_def(ctx, global, "__barm_source", bm_js_source_fn);
+    bm_js_noop = JSObjectMakeFunctionWithCallback(ctx, NULL, bm_js_noop_fn);
+    JSValueProtect(ctx, bm_js_noop);
+    /* (the bundle is NUL-terminated) */
+    bm_js_bundle_text = JSStringCreateWithUTF8CString(bm_js_bundle);
+    bm_js_bundle_url = JSStringCreateWithUTF8CString("barm:npm");
+    JSValueRef exc = NULL;
+    JSEvaluateScript(ctx, bm_js_bundle_text, NULL, bm_js_bundle_url, 1, &exc);
+    if (exc) bm_js_fatal("npm packages failed to load: ", exc);
+    k = JSStringCreateWithUTF8CString("__barm_npm");
+    JSValueRef npm = JSObjectGetProperty(ctx, global, k, NULL);
+    JSStringRelease(k);
+    bm_js_npm = (JSObjectRef)npm;
+    JSValueProtect(ctx, npm);
+    return ctx;
+}
+
+void bm_js_drain(void) {
+    if (bm_js_ctx) JSObjectCallAsFunction(bm_js_ctx, bm_js_noop, NULL, 0, NULL, NULL);
+}
+
+/* ------------------------------------------------------------------ values */
+
+JSValueRef bm_js_undefined(void) { return JSValueMakeUndefined(bm_js()); }
+JSValueRef bm_js_null(void) { return JSValueMakeNull(bm_js()); }
+JSValueRef bm_js_bool(bool b) { return JSValueMakeBoolean(bm_js(), b); }
+JSValueRef bm_js_num(double d) { return JSValueMakeNumber(bm_js(), d); }
+
+/* UTF-8 → UTF-16, invalid sequences as U+FFFD (WHATWG decoding). Returns the length. */
+static size_t bm_utf8_to_utf16(const unsigned char *s, size_t n, JSChar *out) {
+    size_t i = 0, o = 0;
+    while (i < n) {
+        unsigned c = s[i];
+        if (c < 0x80) { out[o++] = (JSChar)c; i++; continue; }
+        unsigned need, cp, lo = 0x80, hi = 0xbf;
+        if (c >= 0xc2 && c <= 0xdf) { need = 1; cp = c & 0x1f; }
+        else if (c >= 0xe0 && c <= 0xef) { need = 2; cp = c & 0x0f; if (c == 0xe0) lo = 0xa0; if (c == 0xed) hi = 0x9f; }
+        else if (c >= 0xf0 && c <= 0xf4) { need = 3; cp = c & 0x07; if (c == 0xf0) lo = 0x90; if (c == 0xf4) hi = 0x8f; }
+        else { out[o++] = 0xfffd; i++; continue; }
+        i++;
+        bool bad = false;
+        for (unsigned k = 0; k < need; k++) {
+            if (i >= n || s[i] < lo || s[i] > hi) { bad = true; break; }
+            cp = (cp << 6) | (s[i] & 0x3f);
+            lo = 0x80; hi = 0xbf;
+            i++;
+        }
+        if (bad) { out[o++] = 0xfffd; continue; }
+        if (cp >= 0x10000) {
+            cp -= 0x10000;
+            out[o++] = (JSChar)(0xd800 + (cp >> 10));
+            out[o++] = (JSChar)(0xdc00 + (cp & 0x3ff));
+        } else {
+            out[o++] = (JSChar)cp;
+        }
+    }
+    return o;
+}
+
+/* Valid UTF-8 without NUL bytes (JavaScriptCore reads it as a C string, 8-bit when it can). */
+static bool bm_utf8_plain(const unsigned char *s, size_t n) {
+    size_t i = 0;
+    while (i < n) {
+        unsigned c = s[i];
+        if (c >= 0x01 && c < 0x80) { i++; continue; }
+        if (c < 0xc2 || c > 0xf4) return false;   /* (NUL included) */
+        size_t need = c >= 0xf0 ? 3 : c >= 0xe0 ? 2 : 1;
+        if (n - i <= need) return false;
+        unsigned lo = 0x80, hi = 0xbf;
+        if (c == 0xe0) lo = 0xa0; else if (c == 0xed) hi = 0x9f; else if (c == 0xf0) lo = 0x90; else if (c == 0xf4) hi = 0x8f;
+        if (s[i + 1] < lo || s[i + 1] > hi) return false;
+        for (size_t k = 2; k <= need; k++) if ((s[i + k] & 0xc0) != 0x80) return false;
+        i += need + 1;
+    }
+    return true;
+}
+
+static JSStringRef bm_js_string_ref(const char *s, size_t n, bool nul_terminated) {
+    if (nul_terminated && bm_utf8_plain((const unsigned char *)s, n)) return JSStringCreateWithUTF8CString(s);
+    JSChar small[256];
+    JSChar *buf = n <= 256 ? small : bm_alloc(n * sizeof(JSChar));
+    size_t len = bm_utf8_to_utf16((const unsigned char *)s, n, buf);
+    JSStringRef r = JSStringCreateWithCharacters(buf, len);
+    if (buf != small) bm_free(buf);
+    return r;
+}
+
+JSValueRef bm_js_str(const char *s, size_t n) {
+    JSContextRef ctx = bm_js();
+    JSStringRef r = bm_js_string_ref(s, n, false);
+    JSValueRef v = JSValueMakeString(ctx, r);
+    JSStringRelease(r);
+    return v;
+}
+
+static bm_str bm_js_string_to_str(JSStringRef r) {
+    size_t len = JSStringGetLength(r);
+    const JSChar *u = JSStringGetCharactersPtr(r);
+    /* UTF-16 → UTF-8 with lone surrogates as U+FFFD (as TextEncoder does) */
+    bm_sb sb = {0};
+    bm_sb_grow(&sb, len + 1);
+    for (size_t i = 0; i < len; i++) {
+        unsigned c = u[i];
+        if (c < 0x80) { bm_sb_add_char(&sb, (char)c); continue; }
+        if (c >= 0xd800 && c <= 0xdbff && i + 1 < len && u[i + 1] >= 0xdc00 && u[i + 1] <= 0xdfff) {
+            c = 0x10000 + ((c - 0xd800) << 10) + (u[i + 1] - 0xdc00);
+            i++;
+        } else if (c >= 0xd800 && c <= 0xdfff) {
+            c = 0xfffd;
+        }
+        char b[4];
+        size_t k;
+        if (c < 0x800) { b[0] = (char)(0xc0 | (c >> 6)); b[1] = (char)(0x80 | (c & 0x3f)); k = 2; }
+        else if (c < 0x10000) { b[0] = (char)(0xe0 | (c >> 12)); b[1] = (char)(0x80 | ((c >> 6) & 0x3f)); b[2] = (char)(0x80 | (c & 0x3f)); k = 3; }
+        else { b[0] = (char)(0xf0 | (c >> 18)); b[1] = (char)(0x80 | ((c >> 12) & 0x3f)); b[2] = (char)(0x80 | ((c >> 6) & 0x3f)); b[3] = (char)(0x80 | (c & 0x3f)); k = 4; }
+        bm_sb_add(&sb, b, k);
+    }
+    return bm_str_from_sb(&sb);
+}
+
+bm_str bm_js_to_str(JSValueRef v) {
+    JSContextRef ctx = bm_js();
+    JSValueRef exc = NULL;
+    JSStringRef r = JSValueToStringCopy(ctx, v, &exc);
+    if (!r) return bm_str_from("[object]", 8);
+    bm_str s = bm_js_string_to_str(r);
+    JSStringRelease(r);
+    return s;
+}
+
+const char *bm_js_typeof(JSValueRef v) {
+    JSContextRef ctx = bm_js();
+    switch (JSValueGetType(ctx, v)) {
+    case kJSTypeUndefined: return "undefined";
+    case kJSTypeNull: return "object";
+    case kJSTypeBoolean: return "boolean";
+    case kJSTypeNumber: return "number";
+    case kJSTypeString: return "string";
+    case kJSTypeSymbol: return "symbol";
+#if defined(MAC_OS_VERSION_15_0) || defined(kJSTypeBigInt)
+    case kJSTypeBigInt: return "bigint";
+#endif
+    case kJSTypeObject: return JSObjectIsFunction(ctx, (JSObjectRef)v) ? "function" : "object";
+    }
+    return "object";
+}
+
+bool bm_js_as_num(JSValueRef v, double *out) {
+    JSContextRef ctx = bm_js();
+    if (!JSValueIsNumber(ctx, v)) return false;
+    *out = JSValueToNumber(ctx, v, NULL);
+    return true;
+}
+
+bool bm_js_as_bool(JSValueRef v, bool *out) {
+    JSContextRef ctx = bm_js();
+    if (!JSValueIsBoolean(ctx, v)) return false;
+    *out = JSValueToBoolean(ctx, v);
+    return true;
+}
+
+bool bm_js_as_str(JSValueRef v, bm_str *out) {
+    JSContextRef ctx = bm_js();
+    if (!JSValueIsString(ctx, v)) return false;
+    JSStringRef r = JSValueToStringCopy(ctx, v, NULL);
+    *out = bm_js_string_to_str(r);
+    JSStringRelease(r);
+    return true;
+}
+
+/* bm_type_js: Js values in Barm containers */
+static void bm_js_t_retain(void *p) { JSValueProtect(bm_js_ctx, *(JSValueRef *)p); }
+static void bm_js_t_release(void *p) { JSValueUnprotect(bm_js_ctx, *(JSValueRef *)p); }
+static bool bm_js_t_eq(const void *a, const void *b) { return JSValueIsStrictEqual(bm_js_ctx, *(JSValueRef *)a, *(JSValueRef *)b); }
+static uint64_t bm_js_t_hash(const void *p) {
+    JSValueRef v = *(JSValueRef *)p;
+    JSContextRef ctx = bm_js_ctx;
+    if (JSValueIsString(ctx, v)) {
+        bm_str s = bm_js_to_str(v);
+        uint64_t h = bm_str_hash(s);
+        bm_str_release(s);
+        return h;
+    }
+    if (JSValueIsNumber(ctx, v)) {
+        double d = JSValueToNumber(ctx, v, NULL);
+        if (d == 0) d = 0; /* -0 === 0 */
+        uint64_t u;
+        memcpy(&u, &d, 8);
+        return u * 0x9e3779b97f4a7c15ull;
+    }
+    return (uint64_t)(uintptr_t)v * 0x9e3779b97f4a7c15ull;
+}
+static void bm_js_t_to_str(bm_sb *sb, const void *p) {
+    bm_str s = bm_js_to_str(*(JSValueRef *)p);
+    bm_sb_push_str(sb, s);
+    bm_str_release(s);
+}
+static void bm_js_t_inspect(bm_sb *sb, const void *p, int depth) {
+    JSValueRef v = *(JSValueRef *)p;
+    JSContextRef ctx = bm_js();
+    /* util.inspect when the bundle has it (globalThis.__barm_inspect), else JSON-ish */
+    static JSStringRef k;
+    JSValueRef f = JSObjectGetProperty(ctx, JSContextGetGlobalObject(ctx), bm_js_key(&k, "__barm_inspect"), NULL);
+    if (JSValueIsObject(ctx, f) && JSObjectIsFunction(ctx, (JSObjectRef)f)) {
+        JSValueRef args[2] = {v, JSValueMakeNumber(ctx, depth)};
+        JSValueRef r = JSObjectCallAsFunction(ctx, (JSObjectRef)f, NULL, 2, args, NULL);
+        if (r && JSValueIsString(ctx, r)) {
+            bm_str s = bm_js_to_str(r);
+            bm_sb_push_str(sb, s);
+            bm_str_release(s);
+            return;
+        }
+    }
+    if (JSValueIsString(ctx, v)) {
+        bm_str s = bm_js_to_str(v);
+        bm_inspect_str(sb, s, depth);
+        bm_str_release(s);
+        return;
+    }
+    if (JSValueIsObject(ctx, v) && !JSObjectIsFunction(ctx, (JSObjectRef)v)) {
+        JSStringRef json = JSValueCreateJSONString(ctx, v, 0, NULL);
+        if (json) {
+            bm_str s = bm_js_string_to_str(json);
+            JSStringRelease(json);
+            bm_sb_push_str(sb, s);
+            bm_str_release(s);
+            return;
+        }
+    }
+    bm_js_t_to_str(sb, p);
+}
+const bm_type bm_type_js = {sizeof(JSValueRef), bm_js_t_retain, bm_js_t_release, bm_js_t_eq, bm_js_t_hash, bm_js_t_to_str, bm_js_t_inspect};
+
+/* ------------------------------------------------------------------ calls and properties */
+
+JSStringRef bm_js_key_slow(JSStringRef *slot, const char *name) {
+    *slot = JSStringCreateWithUTF8CString(name);
+    return *slot;
+}
+
+static JSValueRef bm_js_type_error(JSContextRef ctx, const char *msg, JSValueRef *exc) {
+    JSValueRef m = bm_js_str(msg, strlen(msg));
+    JSObjectRef e = JSObjectMakeError(ctx, 1, &m, NULL);
+    static JSStringRef kname;
+    JSObjectSetProperty(ctx, e, bm_js_key(&kname, "name"), bm_js_str("TypeError", 9), kJSPropertyAttributeDontEnum, NULL);
+    *exc = e;
+    return NULL;
+}
+
+JSValueRef bm_js_get(JSValueRef obj, JSStringRef key, JSValueRef *exc) {
+    JSContextRef ctx = bm_js();
+    JSObjectRef o = JSValueToObject(ctx, obj, exc);
+    if (!o) return NULL;
+    JSValueRef r = JSObjectGetProperty(ctx, o, key, exc);
+    return *exc ? NULL : r;
+}
+
+bool bm_js_set(JSValueRef obj, JSStringRef key, JSValueRef value, JSValueRef *exc) {
+    JSContextRef ctx = bm_js();
+    JSObjectRef o = JSValueToObject(ctx, obj, exc);
+    if (!o) return false;
+    JSObjectSetProperty(ctx, o, key, value, kJSPropertyAttributeNone, exc);
+    return !*exc;
+}
+
+JSValueRef bm_js_index(JSValueRef obj, uint32_t i, JSValueRef *exc) {
+    JSContextRef ctx = bm_js();
+    JSObjectRef o = JSValueToObject(ctx, obj, exc);
+    if (!o) return NULL;
+    JSValueRef r = JSObjectGetPropertyAtIndex(ctx, o, i, exc);
+    return *exc ? NULL : r;
+}
+
+JSValueRef bm_js_call(JSValueRef fn, JSValueRef self, size_t n, const JSValueRef *args, JSValueRef *exc) {
+    JSContextRef ctx = bm_js();
+    if (!JSValueIsObject(ctx, fn) || !JSObjectIsFunction(ctx, (JSObjectRef)fn)) return bm_js_type_error(ctx, "not a function", exc);
+    JSObjectRef this_obj = NULL;
+    if (self && !JSValueIsUndefined(ctx, self)) {
+        /* (a primitive `this` is boxed, as for sloppy-mode callees) */
+        this_obj = JSValueToObject(ctx, self, NULL);
+    }
+    JSValueRef r = JSObjectCallAsFunction(ctx, (JSObjectRef)fn, this_obj, n, args, exc);
+    return *exc ? NULL : r;
+}
+
+JSValueRef bm_js_invoke(JSValueRef obj, JSStringRef key, size_t n, const JSValueRef *args, JSValueRef *exc) {
+    JSValueRef fn = bm_js_get(obj, key, exc);
+    if (!fn) return NULL;
+    JSContextRef ctx = bm_js_ctx;
+    if (!JSValueIsObject(ctx, fn) || !JSObjectIsFunction(ctx, (JSObjectRef)fn)) {
+        char msg[200];
+        bm_str k = bm_js_string_to_str(key);
+        snprintf(msg, sizeof msg, "%.150s is not a function", k.p->data);
+        bm_str_release(k);
+        return bm_js_type_error(ctx, msg, exc);
+    }
+    JSValueRef r = JSObjectCallAsFunction(ctx, (JSObjectRef)fn, JSValueToObject(ctx, obj, NULL), n, args, exc);
+    return *exc ? NULL : r;
+}
+
+JSValueRef bm_js_new(JSValueRef fn, size_t n, const JSValueRef *args, JSValueRef *exc) {
+    JSContextRef ctx = bm_js();
+    if (!JSValueIsObject(ctx, fn) || !JSObjectIsConstructor(ctx, (JSObjectRef)fn)) return bm_js_type_error(ctx, "not a constructor", exc);
+    JSObjectRef r = JSObjectCallAsConstructor(ctx, (JSObjectRef)fn, n, args, exc);
+    return *exc ? NULL : r;
+}
+
+JSValueRef bm_js_import(const char *spec, JSValueRef *exc) {
+    JSContextRef ctx = bm_js();
+    JSValueRef arg = bm_js_str(spec, strlen(spec));
+    JSValueRef r = JSObjectCallAsFunction(ctx, bm_js_npm, NULL, 1, &arg, exc);
+    return *exc ? NULL : r;
+}
+
+bm_str bm_js_error_text(JSValueRef exc) {
+    JSContextRef ctx = bm_js_ctx;
+    bm_sb sb = {0};
+    bm_str s = bm_js_to_str(exc);
+    bm_sb_push_str(&sb, s);
+    bm_str_release(s);
+    if (JSValueIsObject(ctx, exc)) {
+        static JSStringRef kstack;
+        JSValueRef st = JSObjectGetProperty(ctx, (JSObjectRef)exc, bm_js_key(&kstack, "stack"), NULL);
+        if (st && JSValueIsString(ctx, st)) {
+            bm_str t = bm_js_to_str(st);
+            /* JavaScriptCore's frames are "fn@url:line:col" lines */
+            const char *p = t.p->data;
+            while (*p) {
+                const char *e = strchr(p, '\n');
+                size_t n = e ? (size_t)(e - p) : strlen(p);
+                if (n) {
+                    bm_sb_push(&sb, "\n    at ", 8);
+                    bm_sb_push(&sb, p, n);
+                }
+                p += n + (e ? 1 : 0);
+            }
+            bm_str_release(t);
+        }
+    }
+    return bm_str_from_sb(&sb);
+}
+
+/* ------------------------------------------------------------------ bytes */
+
+JSObjectRef bm_js_bytes(void *ptr, size_t len, void (*dealloc)(void *bytes, void *ctx), void *dctx) {
+    return JSObjectMakeTypedArrayWithBytesNoCopy(bm_js(), kJSTypedArrayTypeUint8Array, ptr, len, dealloc, dctx, NULL);
+}
+
+static void bm_js_free_bytes(void *bytes, void *ctx) { (void)ctx; free(bytes); }
+
+JSObjectRef bm_js_bytes_copy(const void *ptr, size_t len) {
+    void *copy = malloc(len ? len : 1);
+    if (!copy) bm_trap("out of memory", "js");
+    memcpy(copy, ptr, len);
+    return bm_js_bytes(copy, len, bm_js_free_bytes, NULL);
+}
+
+bool bm_js_bytes_view(JSValueRef v, uint8_t **ptr, size_t *len) {
+    JSContextRef ctx = bm_js();
+    if (!JSValueIsObject(ctx, v)) return false;
+    JSObjectRef o = (JSObjectRef)v;
+    JSTypedArrayType t = JSValueGetTypedArrayType(ctx, v, NULL);
+    if (t == kJSTypedArrayTypeNone) return false;
+    if (t == kJSTypedArrayTypeArrayBuffer) {
+        *ptr = JSObjectGetArrayBufferBytesPtr(ctx, o, NULL);
+        *len = JSObjectGetArrayBufferByteLength(ctx, o, NULL);
+        return true;
+    }
+    /* (the pointer is the view's start: its byte offset is applied) */
+    *ptr = JSObjectGetTypedArrayBytesPtr(ctx, o, NULL);
+    *len = JSObjectGetTypedArrayByteLength(ctx, o, NULL);
+    return true;
+}
+
+/* ------------------------------------------------------------------ promises */
+
+struct bm_js_deferred {
+    JSObjectRef resolve, reject;
+};
+
+JSObjectRef bm_js_deferred_new(bm_js_deferred **out) {
+    JSContextRef ctx = bm_js();
+    bm_js_deferred *d = bm_alloc(sizeof *d);
+    JSObjectRef p = JSObjectMakeDeferredPromise(ctx, &d->resolve, &d->reject, NULL);
+    JSValueProtect(ctx, d->resolve);
+    JSValueProtect(ctx, d->reject);
+    *out = d;
+    return p;
+}
+
+void bm_js_settle(bm_js_deferred *d, JSValueRef value, bool ok) {
+    JSContextRef ctx = bm_js_ctx;
+    JSObjectCallAsFunction(ctx, ok ? d->resolve : d->reject, NULL, 1, &value, NULL);
+    JSValueUnprotect(ctx, d->resolve);
+    JSValueUnprotect(ctx, d->reject);
+    bm_free(d);
+}
+
+/* bm_js_await: the two reactions passed to `then` share one record. */
+typedef struct {
+    bm_promise *p;      /* settled by the first reaction to run (held) */
+    int refs;           /* reactions not yet finalized */
+} bm_js_waiter;
+
+static JSClassRef bm_js_fulfill_class, bm_js_reject_class;
+
+static void bm_js_waiter_settle(JSContextRef ctx, JSObjectRef f, size_t n, const JSValueRef a[], bool ok) {
+    bm_js_waiter *w = JSObjectGetPrivate(f);
+    if (!w || !w->p) return;
+    JSValueRef v = n > 0 ? a[0] : JSValueMakeUndefined(ctx);
+    bm_promise *p = w->p;
+    w->p = NULL;
+    if (ok) {
+        bm_promise_resolve(p, &v);
+    } else {
+        if (!bm_js_make_error) bm_js_fatal("uncaught ", v);
+        bm_promise_reject(p, bm_js_make_error(v));
+    }
+    bm_promise_release(p);
+}
+static JSValueRef bm_js_fulfill_fn(JSContextRef ctx, JSObjectRef f, JSObjectRef self, size_t n, const JSValueRef a[], JSValueRef *exc) {
+    (void)self; (void)exc;
+    bm_js_waiter_settle(ctx, f, n, a, true);
+    return JSValueMakeUndefined(ctx);
+}
+static JSValueRef bm_js_reject_fn(JSContextRef ctx, JSObjectRef f, JSObjectRef self, size_t n, const JSValueRef a[], JSValueRef *exc) {
+    (void)self; (void)exc;
+    bm_js_waiter_settle(ctx, f, n, a, false);
+    return JSValueMakeUndefined(ctx);
+}
+static void bm_js_waiter_finalize(JSObjectRef f) {
+    bm_js_waiter *w = JSObjectGetPrivate(f);
+    if (w && --w->refs == 0) {
+        if (w->p) bm_promise_release(w->p);
+        free(w);
+    }
+}
+
+bm_promise *bm_js_await(JSValueRef v) {
+    JSContextRef ctx = bm_js();
+    bm_promise *p = bm_promise_new(&bm_type_js);
+    static JSStringRef kthen;
+    JSValueRef then = JSValueIsObject(ctx, v) ? JSObjectGetProperty(ctx, (JSObjectRef)v, bm_js_key(&kthen, "then"), NULL) : NULL;
+    if (!then || !JSValueIsObject(ctx, then) || !JSObjectIsFunction(ctx, (JSObjectRef)then)) {
+        bm_promise_resolve(p, &v);
+        return p;
+    }
+    if (!bm_js_fulfill_class) {
+        JSClassDefinition d = kJSClassDefinitionEmpty;
+        d.callAsFunction = bm_js_fulfill_fn;
+        d.finalize = bm_js_waiter_finalize;
+        bm_js_fulfill_class = JSClassCreate(&d);
+        d.callAsFunction = bm_js_reject_fn;
+        bm_js_reject_class = JSClassCreate(&d);
+    }
+    bm_js_waiter *w = malloc(sizeof *w);
+    if (!w) bm_trap("out of memory", "js");
+    w->p = p;
+    w->refs = 2;
+    bm_promise_retain(p);
+    JSValueRef fns[2] = {JSObjectMake(ctx, bm_js_fulfill_class, w), JSObjectMake(ctx, bm_js_reject_class, w)};
+    JSValueRef exc = NULL;
+    JSObjectCallAsFunction(ctx, (JSObjectRef)then, (JSObjectRef)v, 2, fns, &exc);
+    if (exc && w->p) {
+        /* `then` threw: the await rejects with that */
+        bm_js_waiter_settle(ctx, (JSObjectRef)fns[1], 1, &exc, false);
+    }
+    return p;
+}
