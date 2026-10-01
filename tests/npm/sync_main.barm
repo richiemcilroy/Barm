@@ -1,0 +1,13 @@
+// A synchronous main: JavaScript's timers still run before the program exits (as in Node.js).
+import { after } from "cjs-math"
+
+function main() {
+  try {
+    try after(5, () => {
+      console.log("the timer fired")
+    })
+  } catch (e) {
+    console.log("unexpected")
+  }
+  console.log("main returns first")
+}

@@ -139,6 +139,17 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
                 Err(e) => warnings.push(format!("{name}: {e}")),
             }
         }
+        // Globals whose shims load by a computed name (so programs that don't use them don't
+        // carry them): bundled when a package's code mentions one, and mapped there (a require
+        // the bundler didn't see finds a module through another's map).
+        if !in_shim {
+            for (global, shim) in LAZY_GLOBALS {
+                if body.contains(global) && super::node_shims::shim(shim).is_some() && !map.iter().any(|(s, _)| s == shim) {
+                    let to = add(&mut modules, &mut index, &mut queue, Target::Builtin(shim.to_string()));
+                    map.push((shim.to_string(), to));
+                }
+            }
+        }
         modules[id].name = name;
         modules[id].body = body;
         modules[id].map = map;
@@ -302,6 +313,9 @@ fn expand_pattern(from_dir: &Path, prefix: &str, suffix: &str) -> Vec<String> {
     out.dedup();
     out
 }
+
+/// (global name, the shim that defines it) for globals globals.js loads by a computed name.
+const LAZY_GLOBALS: &[(&str, &str)] = &[("CompressionStream", "internal/webstreams/compression"), ("DecompressionStream", "internal/webstreams/compression")];
 
 /// The module JSX compiles to calls of: the nearest tsconfig.json's `jsxImportSource` (Solid,
 /// Preact, ...) + `/jsx-runtime`, else React's.

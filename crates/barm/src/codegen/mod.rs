@@ -506,7 +506,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             // the roots of JavaScript values Barm holds: in this frame, which the collector scans
             init.insert_str(0, "    JSValueRef bm_js_root_keys[1 << 12]; bm_js_roots_init(bm_js_root_keys, 1 << 12);\n    bm_js_make_error = bmg_js_make_error;\n");
         }
-        if self.uses_event_loop() || main_body.contains("bm_task_") {
+        // (an npm program runs the event loop to the end: JavaScript's timers and callbacks,
+        // as Node.js does, even when `main` is synchronous)
+        if self.uses_event_loop() || main_body.contains("bm_task_") || self.js.used {
             init.insert_str(0, "    bm_async_init(bmg_async_retain, bmg_async_release, bmg_async_report);\n");
         } else {
             main_body = main_body.replace(ASYNC_RUN, "");
