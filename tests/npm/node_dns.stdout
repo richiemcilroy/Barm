@@ -1,0 +1,15 @@
+lookup ip "127.0.0.1" 4 "::1" 6
+lookup localhost v4 "127.0.0.1" 4
+lookup all [{"address":"127.0.0.1","family":4}] undefined
+lookup missing ENOTFOUND getaddrinfo nothing-here.invalid
+promises lookup {"address":"127.0.0.1","family":4}
+promises missing ENOTFOUND -3008 getaddrinfo ENOTFOUND nothing-here.invalid
+bad family ERR_INVALID_ARG_VALUE
+servers true true
+setServers ["1.2.3.4","[2001:db8::1]:5353","5.6.7.8"]
+setServers invalid ERR_INVALID_IP_ADDRESS
+isIP 4 6 0 true
+constants true ENOTFOUND ENODATA function function
+lookupService string
+resolve bad name EBADNAME
+resolve no server ECONNREFUSED queryA

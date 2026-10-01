@@ -1581,6 +1581,465 @@ NATIVE(n_crypto_equal) {
     return JSValueMakeBoolean(ctx, d == 0);
 }
 
+/* ------------------------------------------------------------------ work off the loop (libuv's
+ * uv_queue_work): a job runs on a worker thread, then its callback is called from the event loop
+ * with what done() makes of it. A pending job keeps the program running. */
+
+#include <netdb.h>
+#include <poll.h>
+#include <pthread.h>
+#include <sys/socket.h>
+
+typedef struct bm_node_job {
+    struct bm_node_job *next;
+    void (*work)(struct bm_node_job *job);                          /* on a worker thread */
+    size_t (*done)(JSContextRef ctx, struct bm_node_job *job, JSValueRef *args);  /* on the loop: the callback's arguments (up to 4) */
+    void (*free)(struct bm_node_job *job);
+    JSObjectRef callback;
+} bm_node_job;
+
+static pthread_mutex_t bm_node_work_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t bm_node_work_cv = PTHREAD_COND_INITIALIZER;
+static bm_node_job *bm_node_jobs, *bm_node_jobs_tail, *bm_node_done;
+static int bm_node_workers, bm_node_idle;
+static int bm_node_wake[2] = {-1, -1};
+static bm_io bm_node_work_io;
+
+static void *bm_node_worker(void *arg) {
+    (void)arg;
+    pthread_mutex_lock(&bm_node_work_mu);
+    for (;;) {
+        while (!bm_node_jobs) {
+            bm_node_idle++;
+            pthread_cond_wait(&bm_node_work_cv, &bm_node_work_mu);
+            bm_node_idle--;
+        }
+        bm_node_job *job = bm_node_jobs;
+        bm_node_jobs = job->next;
+        if (!bm_node_jobs) bm_node_jobs_tail = NULL;
+        pthread_mutex_unlock(&bm_node_work_mu);
+        job->work(job);
+        pthread_mutex_lock(&bm_node_work_mu);
+        job->next = bm_node_done;
+        bm_node_done = job;
+        char one = 1;
+        ssize_t w = write(bm_node_wake[1], &one, 1);
+        (void)w;
+    }
+    return NULL;
+}
+
+static void bm_node_work_ready(bm_io *h, bool readable, bool writable, bool broken) {
+    (void)h; (void)readable; (void)writable; (void)broken;
+    char buf[64];
+    while (read(bm_node_wake[0], buf, sizeof buf) > 0) {}
+    pthread_mutex_lock(&bm_node_work_mu);
+    bm_node_job *done = bm_node_done;
+    bm_node_done = NULL;
+    pthread_mutex_unlock(&bm_node_work_mu);
+    /* (oldest first) */
+    bm_node_job *ordered = NULL;
+    while (done) {
+        bm_node_job *next = done->next;
+        done->next = ordered;
+        ordered = done;
+        done = next;
+    }
+    while (ordered) {
+        bm_node_job *job = ordered;
+        ordered = job->next;
+        bm_io_refs--;
+        JSValueRef args[4];
+        size_t nargs = job->done(bm_js_ctx, job, args);
+        JSObjectRef cb = job->callback;
+        if (job->free) job->free(job);
+        free(job);
+        JSValueRef exc = NULL;
+        JSObjectCallAsFunction(bm_js_ctx, cb, NULL, nargs, args, &exc);
+        JSValueUnprotect(bm_js_ctx, cb);
+        if (exc) bm_node_report(exc);
+    }
+}
+
+static void bm_node_queue(JSContextRef ctx, bm_node_job *job, JSValueRef callback) {
+    if (bm_node_wake[0] < 0) {
+        if (pipe(bm_node_wake) != 0) bm_trap("can't create a pipe for the work queue", NULL);
+        for (int i = 0; i < 2; i++) {
+            fcntl(bm_node_wake[i], F_SETFL, fcntl(bm_node_wake[i], F_GETFL) | O_NONBLOCK);
+            fcntl(bm_node_wake[i], F_SETFD, FD_CLOEXEC);
+        }
+        bm_node_work_io.ready = bm_node_work_ready;
+        bm_io_add(bm_node_wake[0], &bm_node_work_io, true, false);
+    }
+    job->callback = (JSObjectRef)callback;
+    JSValueProtect(ctx, callback);
+    bm_io_refs++;
+    job->next = NULL;
+    pthread_mutex_lock(&bm_node_work_mu);
+    if (bm_node_jobs_tail) bm_node_jobs_tail->next = job;
+    else bm_node_jobs = job;
+    bm_node_jobs_tail = job;
+    if (bm_node_idle == 0 && bm_node_workers < 4) {
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        pthread_t t;
+        if (pthread_create(&t, &attr, bm_node_worker, NULL) == 0) bm_node_workers++;
+        pthread_attr_destroy(&attr);
+    }
+    pthread_cond_signal(&bm_node_work_cv);
+    pthread_mutex_unlock(&bm_node_work_mu);
+}
+
+/* ------------------------------------------------------------------ dns (Node.js's cares_wrap.cc):
+ * getaddrinfo and getnameinfo on the work queue, and DNS queries (the resolve* family) sent to a
+ * server over UDP, then TCP if the answer was truncated; internal/bindings/cares_wrap.js builds
+ * the queries and reads the answers. */
+
+/* libuv's error for a getaddrinfo failure */
+static int bm_node_eai(int r) {
+    switch (r) {
+#ifdef EAI_ADDRFAMILY
+    case EAI_ADDRFAMILY: return -3000;
+#endif
+    case EAI_AGAIN: return -3001;
+    case EAI_BADFLAGS: return -3002;
+    case EAI_FAIL: return -3004;
+    case EAI_FAMILY: return -3005;
+    case EAI_MEMORY: return -3006;
+#if defined(EAI_NODATA) && EAI_NODATA != EAI_NONAME
+    case EAI_NODATA: return -3007;
+#endif
+    case EAI_NONAME: return -3008;
+#ifdef EAI_OVERFLOW
+    case EAI_OVERFLOW: return -3009;
+#endif
+    case EAI_SERVICE: return -3010;
+    case EAI_SOCKTYPE: return -3011;
+#ifdef EAI_BADHINTS
+    case EAI_BADHINTS: return -3013;
+#endif
+#ifdef EAI_PROTOCOL
+    case EAI_PROTOCOL: return -3014;
+#endif
+    case EAI_SYSTEM: return -errno;
+    default: return -3004;
+    }
+}
+
+typedef struct {
+    bm_node_job job;
+    char *host;
+    int family, flags, order;
+    int err;
+    struct addrinfo *res;
+} bm_node_gai;
+
+static void bm_node_gai_work(bm_node_job *j) {
+    bm_node_gai *g = (bm_node_gai *)j;
+    struct addrinfo hints = {0};
+    hints.ai_family = g->family;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = g->flags;
+    int r = getaddrinfo(g->host, NULL, &hints, &g->res);
+    g->err = r ? bm_node_eai(r) : 0;
+}
+
+static size_t bm_node_gai_done(JSContextRef ctx, bm_node_job *j, JSValueRef *args) {
+    bm_node_gai *g = (bm_node_gai *)j;
+    args[0] = num(ctx, g->err);
+    if (g->err) {
+        args[1] = undef(ctx);
+        return 2;
+    }
+    JSValueRef items[256];
+    size_t count = 0;
+    /* order: 0 as the resolver gave them, 1 IPv4 first, 2 IPv6 first */
+    int passes[2] = { AF_INET, AF_INET6 };
+    if (g->order == 2) { passes[0] = AF_INET6; passes[1] = AF_INET; }
+    for (int pass = 0; pass < (g->order ? 2 : 1); pass++) {
+        for (struct addrinfo *ai = g->res; ai && count < 256; ai = ai->ai_next) {
+            if (g->order && ai->ai_family != passes[pass]) continue;
+            char ip[INET6_ADDRSTRLEN];
+            const void *addr = ai->ai_family == AF_INET ? (const void *)&((struct sockaddr_in *)ai->ai_addr)->sin_addr
+                             : ai->ai_family == AF_INET6 ? (const void *)&((struct sockaddr_in6 *)ai->ai_addr)->sin6_addr : NULL;
+            if (!addr || !inet_ntop(ai->ai_family, addr, ip, sizeof ip)) continue;
+            items[count++] = str(ctx, ip);
+        }
+    }
+    args[1] = array(ctx, count, items);
+    return 2;
+}
+
+static void bm_node_gai_free(bm_node_job *j) {
+    bm_node_gai *g = (bm_node_gai *)j;
+    if (g->res) freeaddrinfo(g->res);
+    free(g->host);
+}
+
+/* getaddrinfo(hostname, family, flags, order, callback(err, addresses)) */
+NATIVE(n_dns_getaddrinfo) {
+    UNUSED;
+    if (n < 5) return undef(ctx);
+    bm_node_gai *g = calloc(1, sizeof *g);
+    g->host = arg_cstr(ctx, n, a, 0);
+    int family = (int)arg_num(ctx, n, a, 1, 0);
+    g->family = family == 4 ? AF_INET : family == 6 ? AF_INET6 : AF_UNSPEC;
+    g->flags = (int)arg_num(ctx, n, a, 2, 0);
+    g->order = (int)arg_num(ctx, n, a, 3, 0);
+    g->job.work = bm_node_gai_work;
+    g->job.done = bm_node_gai_done;
+    g->job.free = bm_node_gai_free;
+    bm_node_queue(ctx, &g->job, a[4]);
+    return num(ctx, 0);
+}
+
+typedef struct {
+    bm_node_job job;
+    struct sockaddr_storage addr;
+    socklen_t len;
+    int err;
+    char host[NI_MAXHOST], service[NI_MAXSERV];
+} bm_node_gni;
+
+static void bm_node_gni_work(bm_node_job *j) {
+    bm_node_gni *g = (bm_node_gni *)j;
+    int r = getnameinfo((struct sockaddr *)&g->addr, g->len, g->host, sizeof g->host, g->service, sizeof g->service, NI_NAMEREQD);
+    g->err = r ? bm_node_eai(r) : 0;
+}
+
+static size_t bm_node_gni_done(JSContextRef ctx, bm_node_job *j, JSValueRef *args) {
+    bm_node_gni *g = (bm_node_gni *)j;
+    args[0] = num(ctx, g->err);
+    if (g->err) return 1;
+    args[1] = str(ctx, g->host);
+    args[2] = str(ctx, g->service);
+    return 3;
+}
+
+/* getnameinfo(ip, port, callback(err, hostname, service)) -> 0, or UV_EINVAL for a bad ip */
+NATIVE(n_dns_getnameinfo) {
+    UNUSED;
+    if (n < 3) return undef(ctx);
+    char *ip = arg_cstr(ctx, n, a, 0);
+    int port = (int)arg_num(ctx, n, a, 1, 0);
+    bm_node_gni *g = calloc(1, sizeof *g);
+    struct sockaddr_in *v4 = (struct sockaddr_in *)&g->addr;
+    struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)&g->addr;
+    if (ip && inet_pton(AF_INET, ip, &v4->sin_addr) == 1) {
+        v4->sin_family = AF_INET;
+        v4->sin_port = htons((uint16_t)port);
+        g->len = sizeof *v4;
+    } else if (ip && inet_pton(AF_INET6, ip, &v6->sin6_addr) == 1) {
+        v6->sin6_family = AF_INET6;
+        v6->sin6_port = htons((uint16_t)port);
+        g->len = sizeof *v6;
+    } else {
+        free(ip);
+        free(g);
+        return num(ctx, -EINVAL);
+    }
+#ifdef __APPLE__
+    ((struct sockaddr *)&g->addr)->sa_len = (uint8_t)g->len;
+#endif
+    free(ip);
+    g->job.work = bm_node_gni_work;
+    g->job.done = bm_node_gni_done;
+    bm_node_queue(ctx, &g->job, a[2]);
+    return num(ctx, 0);
+}
+
+/* canonicalizeIP(ip) -> its canonical form, or undefined if it isn't one */
+NATIVE(n_dns_canonicalize) {
+    UNUSED;
+    char *ip = arg_cstr(ctx, n, a, 0);
+    unsigned char buf[sizeof(struct in6_addr)];
+    char out[INET6_ADDRSTRLEN];
+    JSValueRef r = undef(ctx);
+    if (ip && inet_pton(AF_INET, ip, buf) == 1 && inet_ntop(AF_INET, buf, out, sizeof out)) r = str(ctx, out);
+    else if (ip && inet_pton(AF_INET6, ip, buf) == 1 && inet_ntop(AF_INET6, buf, out, sizeof out)) r = str(ctx, out);
+    free(ip);
+    return r;
+}
+
+/* ipv6Bytes(ip) -> 16 bytes, or undefined */
+NATIVE(n_dns_ipv6_bytes) {
+    UNUSED;
+    char *ip = arg_cstr(ctx, n, a, 0);
+    unsigned char buf[16];
+    JSValueRef r = undef(ctx);
+    if (ip && inet_pton(AF_INET6, ip, buf) == 1) r = bm_js_bytes_copy(buf, 16);
+    free(ip);
+    return r;
+}
+
+typedef struct {
+    bm_node_job job;
+    struct sockaddr_storage servers[8];
+    socklen_t lens[8];
+    int nservers;
+    uint8_t *query;
+    size_t query_len;
+    int timeout_ms, tries;
+    const char *err;
+    uint8_t *answer;
+    size_t answer_len;
+} bm_node_dnsq;
+
+static bool bm_node_dns_wait(int fd, short ev, int ms) {
+    struct pollfd p = { fd, ev, 0 };
+    return poll(&p, 1, ms) == 1 && (p.revents & ev);
+}
+
+/* one query over TCP (for an answer too big for UDP) */
+static bool bm_node_dns_tcp(bm_node_dnsq *q, int i) {
+    int fd = socket(q->servers[i].ss_family, SOCK_STREAM, 0);
+    if (fd < 0) return false;
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+    bool ok = false;
+    if (connect(fd, (struct sockaddr *)&q->servers[i], q->lens[i]) != 0 && errno != EINPROGRESS) goto out;
+    if (!bm_node_dns_wait(fd, POLLOUT, q->timeout_ms)) goto out;
+    uint8_t len[2] = { (uint8_t)(q->query_len >> 8), (uint8_t)q->query_len };
+    if (write(fd, len, 2) != 2 || write(fd, q->query, q->query_len) != (ssize_t)q->query_len) goto out;
+    size_t want = 0, got = 0;
+    uint8_t head[2];
+    size_t head_got = 0;
+    while (head_got < 2) {
+        if (!bm_node_dns_wait(fd, POLLIN, q->timeout_ms)) goto out;
+        ssize_t r = read(fd, head + head_got, 2 - head_got);
+        if (r <= 0) goto out;
+        head_got += (size_t)r;
+    }
+    want = (size_t)head[0] << 8 | head[1];
+    uint8_t *buf = malloc(want ? want : 1);
+    while (got < want) {
+        if (!bm_node_dns_wait(fd, POLLIN, q->timeout_ms)) { free(buf); goto out; }
+        ssize_t r = read(fd, buf + got, want - got);
+        if (r <= 0) { free(buf); goto out; }
+        got += (size_t)r;
+    }
+    free(q->answer);
+    q->answer = buf;
+    q->answer_len = want;
+    ok = true;
+out:
+    close(fd);
+    return ok;
+}
+
+static void bm_node_dnsq_work(bm_node_job *j) {
+    bm_node_dnsq *q = (bm_node_dnsq *)j;
+    q->err = "ETIMEOUT";
+    bool refused = false;
+    for (int t = 0; t < q->tries; t++) {
+        for (int i = 0; i < q->nservers; i++) {
+            int fd = socket(q->servers[i].ss_family, SOCK_DGRAM, 0);
+            if (fd < 0) continue;
+            if (connect(fd, (struct sockaddr *)&q->servers[i], q->lens[i]) != 0 || send(fd, q->query, q->query_len, 0) < 0) {
+                close(fd);
+                continue;
+            }
+            uint8_t buf[4096];
+            ssize_t r = -1;
+            int left = q->timeout_ms << (t < 4 ? t : 4);
+            while (bm_node_dns_wait(fd, POLLIN, left)) {
+                r = recv(fd, buf, sizeof buf, 0);
+                if (r < 0 && errno == ECONNREFUSED) { refused = true; break; }
+                /* an answer to this query (its id) */
+                if (r >= 12 && buf[0] == q->query[0] && buf[1] == q->query[1]) break;
+                r = -1;
+            }
+            close(fd);
+            if (r < 12) continue;
+            q->answer = malloc((size_t)r);
+            memcpy(q->answer, buf, (size_t)r);
+            q->answer_len = (size_t)r;
+            q->err = NULL;
+            /* truncated: ask again over TCP */
+            if (buf[2] & 0x02) bm_node_dns_tcp(q, i);
+            return;
+        }
+    }
+    if (refused) q->err = "ECONNREFUSED";
+}
+
+static size_t bm_node_dnsq_done(JSContextRef ctx, bm_node_job *j, JSValueRef *args) {
+    bm_node_dnsq *q = (bm_node_dnsq *)j;
+    if (q->err) {
+        args[0] = str(ctx, q->err);
+        return 1;
+    }
+    args[0] = JSValueMakeNull(ctx);
+    args[1] = bm_js_bytes_copy(q->answer, q->answer_len);
+    return 2;
+}
+
+static void bm_node_dnsq_free(bm_node_job *j) {
+    bm_node_dnsq *q = (bm_node_dnsq *)j;
+    free(q->query);
+    free(q->answer);
+}
+
+/* query(servers [[ip, port], ...], packet, timeout ms, tries, callback(err code, answer bytes)) */
+NATIVE(n_dns_query) {
+    UNUSED;
+    if (n < 5 || !JSValueIsObject(ctx, a[0])) return undef(ctx);
+    bm_node_dnsq *q = calloc(1, sizeof *q);
+    JSObjectRef list = (JSObjectRef)a[0];
+    JSStringRef len_key = JSStringCreateWithUTF8CString("length");
+    int count = (int)JSValueToNumber(ctx, JSObjectGetProperty(ctx, list, len_key, NULL), NULL);
+    JSStringRelease(len_key);
+    for (int i = 0; i < count && q->nservers < 8; i++) {
+        JSValueRef pair = JSObjectGetPropertyAtIndex(ctx, list, (unsigned)i, NULL);
+        if (!JSValueIsObject(ctx, pair)) continue;
+        JSValueRef ipv = JSObjectGetPropertyAtIndex(ctx, (JSObjectRef)pair, 0, NULL);
+        int port = (int)JSValueToNumber(ctx, JSObjectGetPropertyAtIndex(ctx, (JSObjectRef)pair, 1, NULL), NULL);
+        char *ip = arg_cstr(ctx, 1, &ipv, 0);
+        struct sockaddr_storage *ss = &q->servers[q->nservers];
+        memset(ss, 0, sizeof *ss);
+        struct sockaddr_in *v4 = (struct sockaddr_in *)ss;
+        struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)ss;
+        if (ip && inet_pton(AF_INET, ip, &v4->sin_addr) == 1) {
+            v4->sin_family = AF_INET;
+            v4->sin_port = htons((uint16_t)(port ? port : 53));
+            q->lens[q->nservers++] = sizeof *v4;
+        } else if (ip && inet_pton(AF_INET6, ip, &v6->sin6_addr) == 1) {
+            v6->sin6_family = AF_INET6;
+            v6->sin6_port = htons((uint16_t)(port ? port : 53));
+            q->lens[q->nservers++] = sizeof *v6;
+        }
+        free(ip);
+    }
+    uint8_t *p;
+    size_t len;
+    if (!bm_js_bytes_view(a[1], &p, &len)) {
+        free(q);
+        return undef(ctx);
+    }
+    q->query = malloc(len);
+    memcpy(q->query, p, len);
+    q->query_len = len;
+    q->timeout_ms = (int)arg_num(ctx, n, a, 2, 2000);
+    if (q->timeout_ms <= 0) q->timeout_ms = 2000;
+    q->tries = (int)arg_num(ctx, n, a, 3, 4);
+    if (q->tries <= 0) q->tries = 4;
+    q->job.work = bm_node_dnsq_work;
+    q->job.done = bm_node_dnsq_done;
+    q->job.free = bm_node_dnsq_free;
+    bm_node_queue(ctx, &q->job, a[4]);
+    return num(ctx, 0);
+}
+
+static void bm_node_dns_install(JSContextRef ctx, JSObjectRef native) {
+    JSObjectRef d = JSObjectMake(ctx, NULL, NULL);
+    bm_js_def(ctx, d, "getaddrinfo", n_dns_getaddrinfo);
+    bm_js_def(ctx, d, "getnameinfo", n_dns_getnameinfo);
+    bm_js_def(ctx, d, "canonicalizeIP", n_dns_canonicalize);
+    bm_js_def(ctx, d, "ipv6Bytes", n_dns_ipv6_bytes);
+    bm_js_def(ctx, d, "query", n_dns_query);
+    set(ctx, native, "dns", d);
+}
+
 /* ------------------------------------------------------------------ zlib (runtime/compress.c, through
  * bm_zs: there when the program's bundle has zlib) */
 
@@ -1817,4 +2276,5 @@ void bm_node_install(JSContextRef ctx, JSObjectRef native) {
     bm_node_fs_install(ctx, native);
     bm_node_crypto_install(ctx, native);
     bm_node_zlib_install(ctx, native);
+    bm_node_dns_install(ctx, native);
 }
