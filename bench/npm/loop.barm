@@ -1,0 +1,14 @@
+// A million calls into an npm package with an object built per call: the bridge's worst case
+// (each call does little work).
+import { z } from "zod"
+
+const User = try z.object({ name: z.string(), age: z.number() })
+const t0 = performance.now()
+let ok = 0
+for (let i = 0; i < 1000000; i++) {
+  const r = try User.safeParse({ name: "Ada", age: i })
+  if (r.success) {
+    ok++
+  }
+}
+console.log(ok, Math.round(performance.now() - t0))

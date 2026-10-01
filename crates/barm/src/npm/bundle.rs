@@ -16,6 +16,9 @@ pub struct Bundle {
     /// expression, `(function (module, exports, ...) {` + code + `\n})`, starting on the
     /// code's first line so line numbers match the file's.
     pub sources: Vec<(String, String)>,
+    /// Per module, its static requires (`require(spec)` → module id), encoded as
+    /// "spec\x01id\x02spec\x01id...": read when the module is first loaded.
+    pub maps: Vec<String>,
     /// Package specifiers the program imports, in the order given.
     pub entries: Vec<String>,
     /// Number of modules (files, JSON and built-ins) in the bundle.
@@ -153,19 +156,9 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
         }
         sources.push((std::mem::take(&mut m.name), format!("(function ({params}) {{{body}\n}})")));
     }
-    js.push_str("var __barm_names = [");
-    for (name, _) in &sources {
-        let _ = write!(js, "{},", js_string(name));
-    }
-    js.push_str("];\nvar __barm_maps = [");
-    for m in &modules {
-        js.push('{');
-        for (spec, to) in &m.map {
-            let _ = write!(js, "{}:{},", js_string(spec), to);
-        }
-        js.push_str("},");
-    }
-    js.push_str("];\nglobalThis.__barm_npm = {");
+    // each module's static requires, read when it's first loaded: "spec\x01id\x02spec\x01id..."
+    let maps: Vec<String> = modules.iter().map(|m| m.map.iter().map(|(spec, to)| format!("{spec}\u{1}{to}")).collect::<Vec<_>>().join("\u{2}")).collect();
+    js.push_str("globalThis.__barm_npm = {");
     for (spec, id) in specs.iter().zip(&entry_ids) {
         let _ = write!(js, "{}:{},", js_string(spec), id);
     }
@@ -174,7 +167,7 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
         let _ = writeln!(js, "__barm_load({id});");
     }
     js.push_str(RUNTIME_TAIL);
-    Ok(Bundle { prelude: js, sources, entries: specs.to_vec(), modules: modules.len(), warnings })
+    Ok(Bundle { prelude: js, sources, maps, entries: specs.to_vec(), modules: modules.len(), warnings })
 }
 
 impl Bundle {
@@ -186,24 +179,36 @@ impl Bundle {
             js.push_str(src);
             js.push_str(",\n");
         }
-        js.push_str("];\n");
+        // (what runtime/js.c serves from the blob)
+        js.push_str("];\nvar __barm_inline = { names: [");
+        for (name, _) in &self.sources {
+            js.push_str(&js_string(name));
+            js.push(',');
+        }
+        js.push_str("], maps: [");
+        for m in &self.maps {
+            js.push_str(&js_string(m));
+            js.push(',');
+        }
+        js.push_str("] };\nvar __barm_name = function (id) { return __barm_inline.names[id]; };\nvar __barm_map = function (id) { return __barm_inline.maps[id]; };\nvar __barm_count = __barm_inline.names.length;\n");
         js.push_str(&self.prelude);
         js
     }
 
-    /// The bundle as runtime/js.c reads it: a little-endian u32 index — the module count, then
-    /// per module the offsets of its name and source and the source's length — then the
-    /// prelude and the strings, each NUL-terminated. Offsets count from the blob's start.
+    /// The bundle as runtime/js.c reads it: a little-endian u32 index — the module count, the
+    /// prelude's offset, then per module the offsets of its name, its source, the source's
+    /// length and its requires (see `maps`) — then the strings, each NUL-terminated. Offsets
+    /// count from the blob's start.
     pub fn blob(&self) -> Vec<u8> {
         let n = self.sources.len();
-        let header = 4 * (2 + 3 * n);
-        let mut data: Vec<u8> = Vec::with_capacity(self.prelude.len() + self.sources.iter().map(|s| s.0.len() + s.1.len() + 2).sum::<usize>() + 1);
-        let mut index: Vec<u32> = Vec::with_capacity(2 + 3 * n);
+        let header = 4 * (2 + 4 * n);
+        let mut data: Vec<u8> = Vec::with_capacity(self.prelude.len() + self.sources.iter().map(|s| s.0.len() + s.1.len() + 2).sum::<usize>() + self.maps.iter().map(|m| m.len() + 1).sum::<usize>() + 1);
+        let mut index: Vec<u32> = Vec::with_capacity(2 + 4 * n);
         index.push(n as u32);
         index.push(header as u32); // the prelude
         data.extend_from_slice(self.prelude.as_bytes());
         data.push(0);
-        for (name, src) in &self.sources {
+        for ((name, src), map) in self.sources.iter().zip(&self.maps) {
             index.push((header + data.len()) as u32);
             data.extend_from_slice(name.as_bytes());
             data.push(0);
@@ -211,6 +216,9 @@ impl Bundle {
             data.extend_from_slice(src.as_bytes());
             data.push(0);
             index.push(src.len() as u32);
+            index.push((header + data.len()) as u32);
+            data.extend_from_slice(map.as_bytes());
+            data.push(0);
         }
         let mut out = Vec::with_capacity(header + data.len());
         for v in index {
@@ -348,15 +356,31 @@ function __barm_star(to, m) {
 // (inline modules come first, from `Bundle::script`; otherwise the runtime compiles them)
 var __barm_defs = globalThis.__barm_defs || [];
 var __barm_compile = globalThis.__barm_compile;
+// (from runtime/js.c, or inline in a script)
+var __barm_name = globalThis.__barm_name;
+var __barm_map = globalThis.__barm_map;
+var __barm_count = globalThis.__barm_count;
 var __barm_cache = [];
 function __barm_dirname(p) { var i = p.lastIndexOf("/"); return i <= 0 ? "/" : p.slice(0, i); }
+// a module's requires, as an object (from its encoded string)
+function __barm_map_of(id) {
+  var s = __barm_map(id), map = {};
+  if (s) {
+    var parts = s.split("\x02");
+    for (var i = 0; i < parts.length; i++) {
+      var p = parts[i].split("\x01");
+      map[p[0]] = +p[1];
+    }
+  }
+  return map;
+}
 function __barm_load(id) {
   var cached = __barm_cache[id];
   if (cached) return cached.exports;
-  var name = __barm_names[id];
+  var name = __barm_name(id);
   var module = { exports: {}, id: name, filename: name, loaded: false, children: [], paths: [] };
   __barm_cache[id] = module;
-  var map = __barm_maps[id];
+  var map = __barm_map_of(id);
   var require = function (spec) {
     var to = map[spec];
     if (to === undefined) {
@@ -366,7 +390,7 @@ function __barm_load(id) {
     }
     return __barm_load(to);
   };
-  require.resolve = function (spec) { var to = map[spec]; if (to === undefined) throw new Error("Cannot find module '" + spec + "'"); return __barm_names[to]; };
+  require.resolve = function (spec) { var to = map[spec]; if (to === undefined) throw new Error("Cannot find module '" + spec + "'"); return __barm_name(to); };
   require.cache = {};
   require.main = undefined;
   var def = __barm_defs[id] || (__barm_defs[id] = __barm_compile(id));
@@ -377,6 +401,13 @@ function __barm_load(id) {
 "#;
 
 const RUNTIME_TAIL: &str = r#"var entries = globalThis.__barm_npm;
+// (for the `module` built-in's createRequire: the bundle's modules by name)
+// (names and maps whole only when asked for: createRequire)
+var __barm_all_names, __barm_all_maps;
+Object.defineProperty(globalThis, "__barm_modules", { value: {
+  get names() { if (!__barm_all_names) { __barm_all_names = []; for (var i = 0; i < __barm_count; i++) __barm_all_names.push(__barm_name(i)); } return __barm_all_names; },
+  get maps() { if (!__barm_all_maps) { __barm_all_maps = []; for (var i = 0; i < __barm_count; i++) __barm_all_maps.push(__barm_map_of(i)); } return __barm_all_maps; },
+  load: __barm_load, loaded: function (id) { return __barm_cache[id]; } } });
 globalThis.__barm_npm = function (spec) { return __barm_load(entries[spec]); };
 })();
 "#;

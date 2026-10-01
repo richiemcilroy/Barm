@@ -39,10 +39,33 @@ static JSValueRef bm_js_noop_fn(JSContextRef ctx, JSObjectRef f, JSObjectRef sel
 static uint32_t bm_js_u32(const unsigned char *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
 static uint32_t bm_js_nmodules(void) { return bm_js_u32(bm_js_blob); }
 static const char *bm_js_prelude(void) { return (const char *)bm_js_blob + bm_js_u32(bm_js_blob + 4); }
-static const char *bm_js_module_name(uint32_t i) { return (const char *)bm_js_blob + bm_js_u32(bm_js_blob + 8 + 12 * i); }
+static const char *bm_js_module_name(uint32_t i) { return (const char *)bm_js_blob + bm_js_u32(bm_js_blob + 8 + 16 * i); }
 static const char *bm_js_module_src(uint32_t i, size_t *len) {
-    *len = bm_js_u32(bm_js_blob + 16 + 12 * i);
-    return (const char *)bm_js_blob + bm_js_u32(bm_js_blob + 12 + 12 * i);
+    *len = bm_js_u32(bm_js_blob + 16 + 16 * i);
+    return (const char *)bm_js_blob + bm_js_u32(bm_js_blob + 12 + 16 * i);
+}
+static const char *bm_js_module_map(uint32_t i) { return (const char *)bm_js_blob + bm_js_u32(bm_js_blob + 20 + 16 * i); }
+
+static JSStringRef bm_js_string_ref(const char *s, size_t n, bool nul_terminated);
+
+/* globalThis.__barm_name(id) / __barm_map(id): a module's name, and its requires (encoded, see
+ * Bundle::maps), read from the blob when the module is first loaded. */
+static JSValueRef bm_js_blob_string(JSContextRef ctx, size_t n, const JSValueRef a[], const char *(*get)(uint32_t)) {
+    double d = n > 0 ? JSValueToNumber(ctx, a[0], NULL) : -1;
+    if (!(d >= 0 && d < bm_js_nmodules())) return JSValueMakeUndefined(ctx);
+    const char *s = get((uint32_t)d);
+    JSStringRef t = bm_js_string_ref(s, strlen(s), true);
+    JSValueRef v = JSValueMakeString(ctx, t);
+    JSStringRelease(t);
+    return v;
+}
+static JSValueRef bm_js_name_fn(JSContextRef ctx, JSObjectRef f, JSObjectRef self, size_t n, const JSValueRef a[], JSValueRef *exc) {
+    (void)f; (void)self; (void)exc;
+    return bm_js_blob_string(ctx, n, a, bm_js_module_name);
+}
+static JSValueRef bm_js_map_fn(JSContextRef ctx, JSObjectRef f, JSObjectRef self, size_t n, const JSValueRef a[], JSValueRef *exc) {
+    (void)f; (void)self; (void)exc;
+    return bm_js_blob_string(ctx, n, a, bm_js_module_map);
 }
 
 static JSStringRef bm_js_string_ref(const char *s, size_t n, bool nul_terminated);
@@ -122,9 +145,26 @@ static _Noreturn void bm_js_fatal(const char *what, JSValueRef exc) {
     exit(1);
 }
 
+static void bm_js_trace_phase(const char *what, double since) {
+    static int trace = -1;
+    if (trace < 0) trace = getenv("BARM_JS_TRACE") != NULL;
+    if (!trace) return;
+    char line[160];
+    int k = snprintf(line, sizeof line, "barm: %s in %.3f ms (%.3f ms since start)\n", what, bm_performance_now() - since, bm_performance_now());
+    bm_write_fd(2, line, (size_t)k);
+}
+
 JSContextRef bm_js(void) {
     if (bm_js_ctx) return bm_js_ctx;
+    double t0 = bm_performance_now();
+    /* SharedArrayBuffer, which JavaScriptCore leaves out of API contexts unless asked: its
+     * options come from the environment when the first VM starts, and only then (so the program
+     * and its children never see the variable) */
+    bool sab = !getenv("JSC_useSharedArrayBuffer");
+    if (sab) setenv("JSC_useSharedArrayBuffer", "1", 0);
     JSGlobalContextRef ctx = JSGlobalContextCreate(NULL);
+    if (sab) unsetenv("JSC_useSharedArrayBuffer");
+    bm_js_trace_phase("created the JavaScript context", t0);
     bm_js_ctx = ctx;
     /* values made without the engine (js.h): only if it encodes them as expected */
     bm_js_encoded = bm_js_bits(JSValueMakeNumber(ctx, 1.5)) == 0x3ffa000000000000ull && bm_js_bits(JSValueMakeNumber(ctx, -1)) == 0xfffe0000ffffffffull
@@ -138,12 +178,21 @@ JSContextRef bm_js(void) {
     bm_node_install(ctx, native);
     bm_js_def(ctx, global, "__barm_source", bm_js_source_fn);
     bm_js_def(ctx, global, "__barm_compile", bm_js_compile_fn);
+    bm_js_def(ctx, global, "__barm_name", bm_js_name_fn);
+    bm_js_def(ctx, global, "__barm_map", bm_js_map_fn);
+    {
+        JSStringRef k = JSStringCreateWithUTF8CString("__barm_count");
+        JSObjectSetProperty(ctx, global, k, JSValueMakeNumber(ctx, bm_js_nmodules()), kJSPropertyAttributeDontEnum, NULL);
+        JSStringRelease(k);
+    }
     bm_js_noop = JSObjectMakeFunctionWithCallback(ctx, NULL, bm_js_noop_fn);
     JSValueProtect(ctx, bm_js_noop);
     JSStringRef prelude = JSStringCreateWithUTF8CString(bm_js_prelude());
     bm_js_bundle_url = JSStringCreateWithUTF8CString("barm:npm");
     JSValueRef exc = NULL;
+    double t1 = bm_performance_now();
     JSEvaluateScript(ctx, prelude, NULL, bm_js_bundle_url, 1, &exc);
+    bm_js_trace_phase("ran the bundle's prelude (and the globals)", t1);
     JSStringRelease(prelude);
     if (exc) bm_js_fatal("npm packages failed to load: ", exc);
     k = JSStringCreateWithUTF8CString("__barm_npm");
