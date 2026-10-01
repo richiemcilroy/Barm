@@ -497,6 +497,14 @@ bm_int bm_native_httpDefer(void);
  * observable before the next microtask checkpoint, so the task may continue eagerly. */
 void bm_native_spawnTail(void);
 void bm_native_httpRespondTo(bm_int id, bm_int status, bm_str headers, bm_str body, bool typed);
+/* For Node.js's http on these servers (runtime/node.c): raw response bytes for a deferred request
+ * (end: 0 more to come, 1 done, 2 done and close), its connection's fd, the current request's
+ * HTTP version, and taking its connection over as a raw socket (an upgrade). */
+void bm_native_httpWriteRaw(bm_int id, const char *p, size_t n, int end);
+int bm_native_httpFd(bm_int id);
+int bm_native_httpTakeover(bm_int id, bm_sb *rest);
+void bm_native_httpNodeErrors(bm_int id);   /* malformed requests answered in Node.js's form */
+extern bool bm_http_v10;
 bm_int bm_native_headerIndex(bm_str block, bm_str name);   /* offset of the value, or -1 */
 bm_str bm_native_headerValue(bm_str block, bm_int at);
 void bm_http_run(void);   /* after the program: serves registered servers until stopped (no-op if none) */

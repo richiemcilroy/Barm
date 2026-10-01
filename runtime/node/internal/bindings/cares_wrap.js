@@ -16,17 +16,9 @@ function dns() {
   throw e;
 }
 
-let runTicks;
-// a completion from the loop: the callback, then process.nextTick's queue (as Node.js's
-// MakeCallback does)
-function complete(fn) {
-  runTicks ??= require('internal/bindings/task_queue').runTicks;
-  try {
-    fn();
-  } finally {
-    runTicks();
-  }
-}
+// a callback from the loop: then process.nextTick's queue, as Node.js's MakeCallback does
+const { callFromHost } = require('internal/bindings/task_queue');
+const complete = (fn) => callFromHost(fn);
 
 let domainToASCII;
 function ascii(name) {

@@ -28,8 +28,11 @@ const {
 } = primordials;
 
 const { validateInteger, validateObject } = require('internal/validators');
-const httpAgent = require('_http_agent');
-const { ClientRequest } = require('_http_client');
+// (Barm: the client side loads when it's first used, so a server doesn't load it)
+let httpAgentModule;
+let clientModule;
+const lazyAgent = () => (httpAgentModule ??= require('_http_agent'));
+const lazyClient = () => (clientModule ??= require('_http_client'));
 const { methods, parsers } = require('_http_common');
 const { IncomingMessage } = require('_http_incoming');
 const { ERR_PROXY_INVALID_CONFIG } = require('internal/errors').codes;
@@ -48,7 +51,6 @@ const {
   parseProxyUrl,
   getGlobalAgent,
 } = require('internal/http');
-const { URL } = require('internal/url');
 let maxHeaderSize;
 let undici;
 
@@ -107,7 +109,7 @@ function createServer(opts, requestListener) {
  * @returns {ClientRequest}
  */
 function request(url, options, cb) {
-  return new ClientRequest(url, options, cb);
+  return new (lazyClient().ClientRequest)(url, options, cb);
 }
 
 /**
@@ -141,6 +143,7 @@ function setGlobalProxyFromEnv(env = process.env) {
     return () => {};
   }
 
+  const { URL } = require('internal/url');
   if (httpProxy && !URL.canParse(httpProxy)) {
     throw new ERR_PROXY_INVALID_CONFIG(httpProxy);
   }
@@ -161,7 +164,7 @@ function setGlobalProxyFromEnv(env = process.env) {
 
   if (httpProxy) {
     originalHttpAgent = module.exports.globalAgent;
-    module.exports.globalAgent = getGlobalAgent(env, httpAgent.Agent);
+    module.exports.globalAgent = getGlobalAgent(env, lazyAgent().Agent);
   }
   if (httpsProxy && !!process.versions.openssl) {
     const https = require('https');
@@ -187,8 +190,6 @@ module.exports = {
   _connectionListener,
   METHODS: methods.toSorted(),
   STATUS_CODES,
-  Agent: httpAgent.Agent,
-  ClientRequest,
   IncomingMessage,
   OutgoingMessage,
   Server,
@@ -224,12 +225,28 @@ ObjectDefineProperty(module.exports, 'globalAgent', {
   configurable: true,
   enumerable: true,
   get() {
-    return httpAgent.globalAgent;
+    return lazyAgent().globalAgent;
   },
   set(value) {
-    httpAgent.globalAgent = value;
+    lazyAgent().globalAgent = value;
   },
 });
+
+for (const [name, load] of [['Agent', () => lazyAgent().Agent], ['ClientRequest', () => lazyClient().ClientRequest]]) {
+  ObjectDefineProperty(module.exports, name, {
+    __proto__: null,
+    configurable: true,
+    enumerable: true,
+    get() {
+      const value = load();
+      ObjectDefineProperty(module.exports, name, { __proto__: null, value, writable: true, enumerable: true, configurable: true });
+      return value;
+    },
+    set(value) {
+      ObjectDefineProperty(module.exports, name, { __proto__: null, value, writable: true, enumerable: true, configurable: true });
+    },
+  });
+}
 
 ObjectDefineProperty(module.exports, 'WebSocket', {
   __proto__: null,

@@ -3,8 +3,16 @@
 // Node.js's primordials (lib/internal/per_context/primordials.js from Node.js v26.3.0, MIT):
 // the built-ins' original functions, copied before user code can change them. The shims
 // taken from Node.js's lib/ use them as Node does.
+//
+// (Barm: Node.js builds thousands of these into its startup snapshot; built at startup they'd
+// cost megabytes. Here the built-ins' originals are recorded at startup, but each method's
+// primordial (ArrayPrototypePush, MathMax, MapPrototypeGetSize, ...) is made the first time a
+// module asks for it: `primordials` is a proxy that works the name back to its built-in.)
 
-const primordials = {};
+const table = { __proto__: null };   // made so far, and the plain values
+// prefix -> [object, mode]: 'static' (as it is), 'bound' (static, bound to its object), 'proto'
+// (uncurried: the receiver is the first argument)
+const sources = new globalThis.Map();
 
 // (Barm: Symbol.dispose and Symbol.asyncDispose, where the engine lacks them, as Node.js defined
 // them before V8 had them)
@@ -35,13 +43,13 @@ const {
 // and `Function.prototype.call` after it may have been mutated by users.
 const { apply, bind, call } = Function.prototype;
 const uncurryThis = bind.bind(call);
-primordials.uncurryThis = uncurryThis;
+table.uncurryThis = uncurryThis;
 
 // `applyBind` is equivalent to `func => Function.prototype.apply.bind(func)`.
 // It is using `bind.bind(apply)` to avoid using `Function.prototype.bind`
 // and `Function.prototype.apply` after it may have been mutated by users.
 const applyBind = bind.bind(apply);
-primordials.applyBind = applyBind;
+table.applyBind = applyBind;
 
 // Methods that accept a variable number of arguments, and thus it's useful to
 // also create `${prefix}${key}Apply`, which uses `Function.prototype.apply`,
@@ -71,90 +79,88 @@ function getNewKey(key) {
     `${key[0].toUpperCase()}${key.slice(1)}`;
 }
 
-function copyAccessor(dest, prefix, key, { enumerable, get, set }) {
-  ReflectDefineProperty(dest, `${prefix}Get${key}`, {
-    __proto__: null,
-    value: uncurryThis(get),
-    enumerable,
-  });
-  if (set !== undefined) {
-    ReflectDefineProperty(dest, `${prefix}Set${key}`, {
-      __proto__: null,
-      value: uncurryThis(set),
-      enumerable,
-    });
-  }
-}
-
 function copyPropsRenamed(src, dest, prefix) {
-  for (const key of ReflectOwnKeys(src)) {
-    const newKey = getNewKey(key);
-    const desc = ReflectGetOwnPropertyDescriptor(src, key);
-    if ('get' in desc) {
-      copyAccessor(dest, prefix, newKey, desc);
-    } else {
-      const name = `${prefix}${newKey}`;
-      ReflectDefineProperty(dest, name, { __proto__: null, ...desc });
-      if (varargsMethods.includes(name)) {
-        ReflectDefineProperty(dest, `${name}Apply`, {
-          __proto__: null,
-          // `src` is bound as the `this` so that the static `this` points
-          // to the object it was defined on,
-          // e.g.: `ArrayOfApply` gets a `this` of `Array`:
-          value: applyBind(desc.value, src),
-        });
-      }
-    }
-  }
+  sources.set(prefix, [src, 'static']);
 }
 
 function copyPropsRenamedBound(src, dest, prefix) {
-  for (const key of ReflectOwnKeys(src)) {
-    const newKey = getNewKey(key);
-    const desc = ReflectGetOwnPropertyDescriptor(src, key);
-    if ('get' in desc) {
-      copyAccessor(dest, prefix, newKey, desc);
-    } else {
-      const { value } = desc;
-      if (typeof value === 'function') {
-        desc.value = value.bind(src);
-      }
-
-      const name = `${prefix}${newKey}`;
-      ReflectDefineProperty(dest, name, { __proto__: null, ...desc });
-      if (varargsMethods.includes(name)) {
-        ReflectDefineProperty(dest, `${name}Apply`, {
-          __proto__: null,
-          value: applyBind(value, src),
-        });
-      }
-    }
-  }
+  sources.set(prefix, [src, 'bound']);
 }
 
 function copyPrototype(src, dest, prefix) {
-  for (const key of ReflectOwnKeys(src)) {
-    const newKey = getNewKey(key);
-    const desc = ReflectGetOwnPropertyDescriptor(src, key);
-    if ('get' in desc) {
-      copyAccessor(dest, prefix, newKey, desc);
-    } else {
-      const { value } = desc;
-      if (typeof value === 'function') {
-        desc.value = uncurryThis(value);
-      }
+  sources.set(prefix, [src, 'proto']);
+}
 
-      const name = `${prefix}${newKey}`;
-      ReflectDefineProperty(dest, name, { __proto__: null, ...desc });
-      if (varargsMethods.includes(name)) {
-        ReflectDefineProperty(dest, `${name}Apply`, {
-          __proto__: null,
-          value: applyBind(value),
-        });
-      }
+// the property of `src` a renamed key stands for ("Push" -> "push", "SymbolIterator" ->
+// Symbol.iterator), if it has one
+function propertyKey(src, rest) {
+  if (rest.startsWith('Symbol') && rest.length > 6) {
+    const sym = Symbol[`${rest[6].toLowerCase()}${rest.slice(7)}`];
+    if (typeof sym === 'symbol' && ReflectGetOwnPropertyDescriptor(src, sym)) return sym;
+  }
+  const key = `${rest[0].toLowerCase()}${rest.slice(1)}`;
+  if (ReflectGetOwnPropertyDescriptor(src, key)) return key;
+  // (keys that start in capitals: BYTES_PER_ELEMENT, MAX_SAFE_INTEGER, ...)
+  if (ReflectGetOwnPropertyDescriptor(src, rest)) return rest;
+  return undefined;
+}
+
+// the primordial `name` stands for, made now (undefined: there's none)
+function resolve(name) {
+  // the longest registered prefix it starts with
+  let best = null;
+  for (const prefix of sources.keys()) {
+    if (name.length > prefix.length && name.startsWith(prefix) && (best === null || prefix.length > best.length)) best = prefix;
+  }
+  if (best === null) return undefined;
+  const [src, mode] = sources.get(best);
+  let rest = name.slice(best.length);
+  if (rest.endsWith('Apply') && varargsMethods.includes(name.slice(0, -5))) {
+    const key = propertyKey(src, rest.slice(0, -5));
+    if (key === undefined) return undefined;
+    const fn = ReflectGetOwnPropertyDescriptor(src, key).value;
+    return mode === 'proto' ? applyBind(fn) : applyBind(fn, src);
+  }
+  if ((rest.startsWith('Get') || rest.startsWith('Set')) && rest.length > 3) {
+    const key = propertyKey(src, rest.slice(3));
+    const desc = key === undefined ? undefined : ReflectGetOwnPropertyDescriptor(src, key);
+    if (desc && ('get' in desc)) {
+      const accessor = rest.startsWith('Get') ? desc.get : desc.set;
+      if (accessor !== undefined) return uncurryThis(accessor);
     }
   }
+  const key = propertyKey(src, rest);
+  if (key === undefined) return undefined;
+  const desc = ReflectGetOwnPropertyDescriptor(src, key);
+  if ('get' in desc) return undefined;
+  const { value } = desc;
+  if (typeof value !== 'function') return value;
+  if (mode === 'proto') return uncurryThis(value);
+  if (mode === 'bound') return value.bind(src);
+  return value;
 }
+
+const primordials = new globalThis.Proxy(table, {
+  __proto__: null,
+  get(target, name) {
+    if (typeof name !== 'string') return undefined;
+    if (name in target) return target[name];
+    const value = resolve(name);
+    if (value !== undefined) target[name] = value;
+    return value;
+  },
+  has(target, name) {
+    return typeof name === 'string' && (name in target || resolve(name) !== undefined);
+  },
+  set(target, name, value) {
+    target[name] = value;
+    return true;
+  },
+  defineProperty(target, name, desc) {
+    ReflectDefineProperty(target, name, desc);
+    return true;
+  },
+});
 
 // Create copies of configurable value properties of the global object
 [
@@ -757,7 +763,6 @@ primordials.SafeArrayPrototypePushApply = (arr, items) => {
   return ArrayPrototypePushApply(arr, items);
 };
 
-ObjectSetPrototypeOf(primordials, null);
-ObjectFreeze(primordials);
+// (Barm: not frozen, so primordials can be made as they're asked for)
 
 module.exports = primordials;

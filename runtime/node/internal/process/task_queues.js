@@ -16,6 +16,7 @@ const {
   runMicrotasks,
   setTickCallback,
   enqueueMicrotask,
+  setTickScheduled,
 } = internalBinding('task_queue');
 
 const {
@@ -57,6 +58,8 @@ function hasTickScheduled() {
 
 function setHasTickScheduled(value) {
   tickInfo[kHasTickScheduled] = value ? 1 : 0;
+  // (Barm: the binding runs the queue when the host's callback returns, or as a promise job)
+  if (value) setTickScheduled();
 }
 
 const queue = new FixedQueue();

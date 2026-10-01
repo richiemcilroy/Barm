@@ -17,16 +17,9 @@ const streamBaseState = new Int32Array(4);
 
 const kNative = Symbol('kNative');
 
-let runTicks;
 // a callback from the loop: then process.nextTick's queue, as Node.js's MakeCallback does
-function complete(fn) {
-  runTicks ??= require('internal/bindings/task_queue').runTicks;
-  try {
-    fn();
-  } finally {
-    runTicks();
-  }
-}
+const { callFromHost } = require('internal/bindings/task_queue');
+const complete = (fn) => callFromHost(fn);
 
 let setImmediate;
 function later(fn) {

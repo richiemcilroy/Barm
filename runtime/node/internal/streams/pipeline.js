@@ -44,7 +44,8 @@ const {
   isReadableStream,
   isReadableFinished,
 } = require('internal/streams/utils');
-const { AbortController } = require('internal/abort_controller');
+// (Barm: loaded when a pipeline starts)
+let AbortController;
 
 let PassThrough;
 let Readable;
@@ -194,6 +195,7 @@ function pipelineImpl(streams, callback, opts) {
     throw new ERR_MISSING_ARGS('streams');
   }
 
+  AbortController ??= require('internal/abort_controller').AbortController;
   const ac = new AbortController();
   const signal = ac.signal;
   const outerSignal = opts?.signal;

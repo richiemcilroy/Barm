@@ -17,7 +17,8 @@ const {
   CHAR_LOWERCASE_E,
 } = require('internal/constants');
 
-const { URL } = require('internal/url');
+// (Barm: loaded when a proxy URL is parsed)
+let URL;
 const { Buffer } = require('buffer');
 const { isIPv4 } = require('internal/net');
 const { ERR_PROXY_INVALID_CONFIG } = require('internal/errors').codes;
@@ -111,6 +112,7 @@ class ProxyConfig {
   constructor(proxyUrl, keepAlive, noProxyList) {
     let parsedURL;
     try {
+      URL ??= require('internal/url').URL;
       parsedURL = new URL(proxyUrl);
     } catch {
       throw new ERR_PROXY_INVALID_CONFIG(`Invalid proxy URL: ${proxyUrl}`);

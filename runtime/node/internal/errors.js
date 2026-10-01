@@ -45,6 +45,9 @@ const {
   RegExpPrototypeExec,
   SafeArrayIterator,
   SafeMap,
+  Proxy,
+  ReflectOwnKeys,
+  ReflectGetOwnPropertyDescriptor,
   SafeWeakMap,
   String,
   StringPrototypeEndsWith,
@@ -66,7 +69,31 @@ const kIsNodeError = Symbol('kIsNodeError');
 const isWindows = process.platform === 'win32';
 
 const messages = new SafeMap();
-const codes = {};
+// (Barm: an error code's class is made the first time it's asked for: Node.js has all ~400 in
+// its startup snapshot, where they cost nothing, while making them at startup costs megabytes)
+const pendingCodes = new SafeMap();
+const codes = new Proxy({}, {
+  __proto__: null,
+  get(target, sym) {
+    if (typeof sym === 'string' && !ObjectPrototypeHasOwnProperty(target, sym) && pendingCodes.has(sym)) {
+      const args = pendingCodes.get(sym);
+      pendingCodes.delete(sym);
+      target[sym] = makeCode(...args);
+    }
+    return target[sym];
+  },
+  has(target, sym) {
+    return sym in target || pendingCodes.has(sym);
+  },
+  ownKeys(target) {
+    for (const sym of pendingCodes.keys()) codes[sym];
+    return ReflectOwnKeys(target);
+  },
+  getOwnPropertyDescriptor(target, sym) {
+    if (typeof sym === 'string' && pendingCodes.has(sym)) codes[sym];
+    return ReflectGetOwnPropertyDescriptor(target, sym);
+  },
+});
 
 const classRegExp = /^[A-Z][a-zA-Z0-9]*$/;
 
@@ -558,7 +585,11 @@ function E(sym, val, def, ...otherClasses) {
   // Special case for SystemError that formats the error message differently
   // The SystemErrors only have SystemError as their base classes.
   messages.set(sym, val);
+  pendingCodes.set(sym, [sym, def, otherClasses]);
+}
 
+// code sym's class (and its variants), as Node.js's E() makes them
+function makeCode(sym, def, otherClasses) {
   const ErrClass = def === SystemError ?
     makeSystemErrorWithCode(sym) :
     makeNodeErrorWithCode(def, sym);
@@ -584,7 +615,7 @@ function E(sym, val, def, ...otherClasses) {
     ErrClass.HideStackFramesError = makeNodeErrorForHideStackFrame(ErrClass, def);
   }
 
-  codes[sym] = ErrClass;
+  return ErrClass;
 }
 
 function getExpectedArgumentLength(msg) {

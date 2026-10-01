@@ -2579,7 +2579,10 @@ NATIVE(n_stream_read_stop) {
     return num(ctx, 0);
 }
 
-/* write(handle, [bytes...], cb) -> [err, bytes written now, async]: cb(status) only if async */
+/* write(handle, [bytes...], cb) -> [err, bytes written now, async]: cb(status) only if async.
+ * The chunks go out in one writev; what the fd doesn't take waits in the queue. */
+#include <sys/uio.h>
+
 NATIVE(n_stream_write) {
     UNUSED;
     bm_node_stream *s = bm_node_stream_of(ctx, n, a);
@@ -2592,36 +2595,68 @@ NATIVE(n_stream_write) {
     JSStringRef len_key = JSStringCreateWithUTF8CString("length");
     unsigned count = (unsigned)JSValueToNumber(ctx, JSObjectGetProperty(ctx, list, len_key, NULL), NULL);
     JSStringRelease(len_key);
-    double written = 0;
-    int err = 0;
-    bm_sb rest = {0};
-    for (unsigned i = 0; i < count; i++) {
+    struct iovec iov[64];
+    unsigned niov = 0;
+    size_t total = 0;
+    for (unsigned i = 0; i < count && niov < 64; i++) {
         uint8_t *p;
         size_t len;
         JSValueRef v = JSObjectGetPropertyAtIndex(ctx, list, i, NULL);
         if (!bm_js_bytes_view(v, &p, &len) || len == 0) continue;
-        size_t off = 0;
-        /* (behind queued writes, everything waits its turn) */
-        while (!s->wq && rest.len == 0 && off < len) {
-            ssize_t r = write(s->fd, p + off, len - off);
+        iov[niov].iov_base = p;
+        iov[niov].iov_len = len;
+        niov++;
+        total += len;
+    }
+    /* (more than 64 chunks: the rest are joined into the last) */
+    bm_sb extra = {0};
+    for (unsigned i = 64; i < count; i++) {
+        uint8_t *p;
+        size_t len;
+        JSValueRef v = JSObjectGetPropertyAtIndex(ctx, list, i, NULL);
+        if (bm_js_bytes_view(v, &p, &len) && len) bm_sb_add(&extra, (const char *)p, len);
+    }
+    if (extra.len) {
+        bm_sb_add(&extra, "", 0);
+        total += extra.len;
+    }
+    size_t written = 0;
+    int err = 0;
+    /* (behind queued writes, everything waits its turn) */
+    if (!s->wq && !extra.len) {
+        while (written < total) {
+            ssize_t r = writev(s->fd, iov, (int)niov);
             if (r < 0 && errno == EINTR) continue;
             if (r < 0) {
                 if (errno != EAGAIN) err = -errno;
                 break;
             }
-            off += (size_t)r;
+            written += (size_t)r;
+            /* drop what went out */
+            size_t left = (size_t)r;
+            unsigned k = 0;
+            while (k < niov && left >= iov[k].iov_len) left -= iov[k++].iov_len;
+            memmove(iov, iov + k, (niov - k) * sizeof *iov);
+            niov -= k;
+            if (niov) {
+                iov[0].iov_base = (char *)iov[0].iov_base + left;
+                iov[0].iov_len -= left;
+            }
+            if ((size_t)r == 0) break;
         }
-        if (err) break;
-        written += (double)off;
-        if (off < len) bm_sb_add(&rest, (const char *)p + off, len - off);
     }
-    s->bytes_written += written;
-    bool async = rest.len > 0 && !err;
+    s->bytes_written += (double)written;
+    bool async = written < total && !err;
     if (async) {
         bm_node_wreq *w = calloc(1, sizeof *w);
-        w->data = malloc(rest.len);
-        memcpy(w->data, rest.data, rest.len);
-        w->len = rest.len;
+        w->len = total - written;
+        w->data = malloc(w->len);
+        size_t off = 0;
+        for (unsigned k = 0; k < niov; k++) {
+            memcpy(w->data + off, iov[k].iov_base, iov[k].iov_len);
+            off += iov[k].iov_len;
+        }
+        if (extra.len) memcpy(w->data + off, extra.data, extra.len);
         w->cb = (JSObjectRef)a[2];
         JSValueProtect(ctx, a[2]);
         if (s->wq_tail) s->wq_tail->next = w;
@@ -2629,8 +2664,8 @@ NATIVE(n_stream_write) {
         s->wq_tail = w;
         bm_node_stream_update(s);
     }
-    bm_sb_free(&rest);
-    JSValueRef items[3] = { num(ctx, err), num(ctx, written), JSValueMakeBoolean(ctx, async) };
+    bm_sb_free(&extra);
+    JSValueRef items[3] = { num(ctx, err), num(ctx, (double)written), JSValueMakeBoolean(ctx, async) };
     return array(ctx, 3, items);
 }
 
@@ -3192,6 +3227,164 @@ static void bm_node_fetch_install(JSContextRef ctx, JSObjectRef native) {
     set(ctx, native, "fetch", f);
 }
 
+/* ------------------------------------------------------------------ http servers on Barm's native
+ * server (internal/barm/http_server.js): it parses requests and manages connections; each request
+ * is deferred and handed to JavaScript, whose ServerResponse writes the response bytes raw. */
+
+typedef struct {
+    bm_env base;
+    JSObjectRef on_request;
+} bm_node_http_env;
+
+/* bytes as a JS string, one char per byte (latin1: header bytes survive as they are) */
+static JSValueRef bm_node_latin1(JSContextRef ctx, const char *p, size_t n) {
+    JSChar stack[512];
+    JSChar *buf = n <= 512 ? stack : malloc(n * sizeof(JSChar));
+    for (size_t i = 0; i < n; i++) buf[i] = (unsigned char)p[i];
+    JSStringRef s = JSStringCreateWithCharacters(buf, n);
+    if (buf != stack) free(buf);
+    JSValueRef v = JSValueMakeString(ctx, s);
+    JSStringRelease(s);
+    return v;
+}
+
+static void bm_node_http_request(bm_env *env, bm_str method, bm_str target, bm_str headers, bm_str body) {
+    bm_node_http_env *e = (bm_node_http_env *)env;
+    JSContextRef ctx = bm_js_ctx;
+    bm_int id = bm_native_httpDefer();
+    JSValueRef args[6] = {
+        JSValueMakeNumber(ctx, (double)id),
+        bm_node_latin1(ctx, method.p->data, (size_t)method.p->len),
+        bm_node_latin1(ctx, target.p->data, (size_t)target.p->len),
+        bm_node_latin1(ctx, headers.p->data, (size_t)headers.p->len),
+        body.p->len ? (JSValueRef)bm_js_bytes_copy(body.p->data, (size_t)body.p->len) : JSValueMakeNull(ctx),
+        JSValueMakeBoolean(ctx, bm_http_v10),
+    };
+    bm_node_call_args(e->on_request, 6, args);
+}
+
+/* httpListen(port, host, nodeErrors, onRequest(id, method, target, wire headers, body|null, http10)) -> server id, or an
+ * error message (nodeErrors: malformed requests are answered as Node.js answers them) */
+NATIVE(n_http_listen) {
+    UNUSED;
+    if (n < 4 || !JSValueIsObject(ctx, a[3])) return undef(ctx);
+    bm_node_http_env *e = bm_alloc(sizeof *e);
+    memset(e, 0, sizeof *e);
+    e->base.rc = 1;
+    e->on_request = (JSObjectRef)a[3];
+    JSValueProtect(ctx, a[3]);
+    char *host = arg_cstr(ctx, n, a, 1);
+    bm_str h = host ? bm_str_from(host, strlen(host)) : BM_EMPTY_STR;
+    free(host);
+    bm_fn fn = { (void *)bm_node_http_request, &e->base };
+    bm_int id = bm_native_httpListen((bm_int)arg_num(ctx, n, a, 0, 0), h, fn);
+    bm_str_release(h);
+    if (id >= 0 && JSValueToBoolean(ctx, a[2])) bm_native_httpNodeErrors(id);
+    if (id < 0) {
+        bm_str err = bm_native_takeError();
+        JSValueRef msg = bm_node_str_value(ctx, err);
+        return msg;
+    }
+    return num(ctx, (double)id);
+}
+
+/* a JS string's bytes: latin1 (a byte per char) or UTF-8; the caller frees them */
+static char *bm_node_string_bytes(JSContextRef ctx, JSValueRef v, bool latin1, size_t *len) {
+    JSStringRef js = JSValueToStringCopy(ctx, v, NULL);
+    if (!js) {
+        *len = 0;
+        return NULL;
+    }
+    size_t n = JSStringGetLength(js);
+    const JSChar *c = JSStringGetCharactersPtr(js);
+    char *out = malloc(n * 3 + 1);
+    size_t o = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned u = c[i];
+        if (u < 0x80 || latin1) {
+            out[o++] = (char)u;
+        } else if (u < 0x800) {
+            out[o++] = (char)(0xc0 | (u >> 6));
+            out[o++] = (char)(0x80 | (u & 0x3f));
+        } else if (u >= 0xd800 && u <= 0xdbff && i + 1 < n && c[i + 1] >= 0xdc00 && c[i + 1] <= 0xdfff) {
+            unsigned cp = 0x10000 + ((u - 0xd800) << 10) + (c[i + 1] - 0xdc00);
+            i++;
+            out[o++] = (char)(0xf0 | (cp >> 18));
+            out[o++] = (char)(0x80 | ((cp >> 12) & 0x3f));
+            out[o++] = (char)(0x80 | ((cp >> 6) & 0x3f));
+            out[o++] = (char)(0x80 | (cp & 0x3f));
+        } else {
+            if (u >= 0xd800 && u <= 0xdfff) u = 0xfffd;
+            out[o++] = (char)(0xe0 | (u >> 12));
+            out[o++] = (char)(0x80 | ((u >> 6) & 0x3f));
+            out[o++] = (char)(0x80 | (u & 0x3f));
+        }
+    }
+    JSStringRelease(js);
+    *len = o;
+    return out;
+}
+
+/* httpWrite(id, bytes|string|null, end: 0 more | 1 done | 2 done and close, latin1) */
+NATIVE(n_http_write) {
+    UNUSED;
+    bm_int id = (bm_int)arg_num(ctx, n, a, 0, 0);
+    uint8_t *p = NULL;
+    size_t len = 0;
+    char *owned = NULL;
+    if (n > 1 && JSValueIsString(ctx, a[1])) {
+        owned = bm_node_string_bytes(ctx, a[1], n > 3 && JSValueToBoolean(ctx, a[3]), &len);
+        p = (uint8_t *)owned;
+    } else if (n > 1 && JSValueIsObject(ctx, a[1])) {
+        bm_js_bytes_view(a[1], &p, &len);
+    }
+    bm_native_httpWriteRaw(id, (const char *)p, len, (int)arg_num(ctx, n, a, 2, 0));
+    free(owned);
+    return undef(ctx);
+}
+
+/* httpFd(id) -> the connection's fd (-1 if it's gone) */
+NATIVE(n_http_fd) {
+    UNUSED;
+    return num(ctx, bm_native_httpFd((bm_int)arg_num(ctx, n, a, 0, 0)));
+}
+
+/* httpTakeover(id) -> [fd, the bytes after the request] or null */
+NATIVE(n_http_takeover) {
+    UNUSED;
+    bm_sb rest = {0};
+    int fd = bm_native_httpTakeover((bm_int)arg_num(ctx, n, a, 0, 0), &rest);
+    if (fd < 0) {
+        bm_sb_free(&rest);
+        return JSValueMakeNull(ctx);
+    }
+    JSValueRef items[2] = { num(ctx, fd), bm_js_bytes_copy(rest.data ? rest.data : "", rest.len) };
+    bm_sb_free(&rest);
+    return array(ctx, 2, items);
+}
+
+NATIVE(n_http_port) {
+    UNUSED;
+    return num(ctx, (double)bm_native_httpPort((bm_int)arg_num(ctx, n, a, 0, 0)));
+}
+
+NATIVE(n_http_stop) {
+    UNUSED;
+    bm_native_httpStop((bm_int)arg_num(ctx, n, a, 0, 0), n > 1 && JSValueToBoolean(ctx, a[1]));
+    return undef(ctx);
+}
+
+static void bm_node_http_install(JSContextRef ctx, JSObjectRef native) {
+    JSObjectRef h = JSObjectMake(ctx, NULL, NULL);
+    bm_js_def(ctx, h, "listen", n_http_listen);
+    bm_js_def(ctx, h, "write", n_http_write);
+    bm_js_def(ctx, h, "fd", n_http_fd);
+    bm_js_def(ctx, h, "takeover", n_http_takeover);
+    bm_js_def(ctx, h, "port", n_http_port);
+    bm_js_def(ctx, h, "stop", n_http_stop);
+    set(ctx, native, "http", h);
+}
+
 static void bm_node_streams_install(JSContextRef ctx, JSObjectRef native) {
     JSObjectRef st = JSObjectMake(ctx, NULL, NULL);
     bm_js_def(ctx, st, "open", n_stream_open);
@@ -3642,4 +3835,5 @@ void bm_node_install(JSContextRef ctx, JSObjectRef native) {
     bm_js_def(ctx, native, "fatal", n_fatal);
     bm_node_streams_install(ctx, native);
     bm_node_fetch_install(ctx, native);
+    bm_node_http_install(ctx, native);
 }

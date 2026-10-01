@@ -56,10 +56,9 @@ const kRejection = SymbolFor('nodejs.rejection');
 
 const { kEmptyObject, spliceOne } = require('internal/util');
 
-const {
-  inspect,
-  identicalSequenceRange,
-} = require('internal/util/inspect');
+// (Barm: internal/util/inspect, 100KB, loads when something is first formatted)
+const inspect = (...args) => require('internal/util/inspect').inspect(...args);
+const identicalSequenceRange = (...args) => require('internal/util/inspect').identicalSequenceRange(...args);
 
 let FixedQueue;
 let kFirstEventParam;

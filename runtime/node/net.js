@@ -164,11 +164,12 @@ const netClientSocketChannel = dc.channel('net.client.socket');
 const netServerSocketChannel = dc.channel('net.server.socket');
 const netServerListen = dc.tracingChannel('net.server.listen');
 
-const {
-  hasObserver,
-  startPerf,
-  stopPerf,
-} = require('internal/perf/observe');
+// (Barm: internal/perf/observe loads when performance observers are used; whether there are
+// any is the binding's count)
+const { observerCounts: perfObserverCounts } = internalBinding('performance');
+const hasObserver = (type) => perfObserverCounts[type === 'http' ? 1 : type === 'net' ? 3 : type === 'dns' ? 4 : type === 'http2' ? 2 : 0] > 0;
+const startPerf = (...args) => require('internal/perf/observe').startPerf(...args);
+const stopPerf = (...args) => require('internal/perf/observe').stopPerf(...args);
 const { getDefaultHighWaterMark } = require('internal/streams/state');
 
 function getFlags(options) {

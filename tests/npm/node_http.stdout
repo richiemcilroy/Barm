@@ -9,3 +9,6 @@ pipelined "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\
 head 200 "" undefined
 refused ECONNREFUSED connect
 closed
+upgrade "HTTP/1.1 101 Switching Protocols\r\nUpgrade: echo\r\nConnection: Upgrade\r\n\r\nhead=early;LATER"
+watched from 127.0.0.1 number 1
+dual :: IPv6 true IPv6

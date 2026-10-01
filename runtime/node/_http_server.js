@@ -116,11 +116,12 @@ const kUpgradeStream = Symbol('UpgradeStream');
 
 const kOptimizeEmptyRequests = Symbol('OptimizeEmptyRequestsOption');
 
-const {
-  hasObserver,
-  startPerf,
-  stopPerf,
-} = require('internal/perf/observe');
+// (Barm: internal/perf/observe loads when performance observers are used; whether there are
+// any is the binding's count)
+const { observerCounts: perfObserverCounts } = internalBinding('performance');
+const hasObserver = (type) => perfObserverCounts[type === 'http' ? 1 : type === 'net' ? 3 : type === 'dns' ? 4 : type === 'http2' ? 2 : 0] > 0;
+const startPerf = (...args) => require('internal/perf/observe').startPerf(...args);
+const stopPerf = (...args) => require('internal/perf/observe').stopPerf(...args);
 
 const STATUS_CODES = {
   100: 'Continue',                   // RFC 7231 6.2.1
@@ -1448,6 +1449,9 @@ function generateSocketListenerWrapper(originalFnName) {
     return res;
   };
 }
+
+// (Barm) servers listen on Barm's native HTTP server when they can (internal/barm/http_server)
+require('internal/barm/http_server').install(Server, { IncomingMessage, kServerResponse, kIncomingMessage, kUniqueHeaders, continueExpression });
 
 module.exports = {
   STATUS_CODES,

@@ -21,7 +21,10 @@ const {
   CHAR_LOWERCASE_E: kTraceEnd,
   CHAR_LOWERCASE_N: kTraceInstant,
 } = require('internal/constants');
-const { inspect, format, formatWithOptions } = require('internal/util/inspect');
+// (Barm: internal/util/inspect, 100KB, loads when something is first formatted)
+const inspect = (...args) => require('internal/util/inspect').inspect(...args);
+const format = (...args) => require('internal/util/inspect').format(...args);
+const formatWithOptions = (...args) => require('internal/util/inspect').formatWithOptions(...args);
 const { getCategoryEnabledBuffer, trace } = internalBinding('trace_events');
 
 // `debugImpls` and `testEnabled` are deliberately not initialized so any call
