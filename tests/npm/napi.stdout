@@ -1,0 +1,10 @@
+5.5
+héllo, Ada
+{ who: 'Bob', reversed: [ 'c', 'b', 'a' ] }
+RangeError: too big for C
+42 function
+BARM
+5050
+tick 1
+tick 2
+tick 3

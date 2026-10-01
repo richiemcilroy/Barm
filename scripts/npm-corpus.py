@@ -34,7 +34,7 @@ def build():
     os.makedirs(OUT, exist_ok=True)
     sh(["cargo", "build", "-q", "--release"], cwd=ROOT)
     rt = os.path.join(ROOT, "runtime")
-    srcs = [os.path.join(ROOT, "scripts", "npm-corpus-runner.c")] + [os.path.join(rt, f) for f in ("js.c", "node.c", "barm.c")]
+    srcs = [os.path.join(ROOT, "scripts", "npm-corpus-runner.c")] + [os.path.join(rt, f) for f in ("js.c", "node.c", "napi.c", "barm.c")]
     sh(["cc", "-O1", "-std=gnu11", "-w", "-I", rt, *srcs, "-framework", "JavaScriptCore", "-o", RUNNER])
     plist = os.path.join(OUT, "jit.plist")
     with open(plist, "w") as f:

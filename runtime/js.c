@@ -12,6 +12,8 @@
 
 JSGlobalContextRef bm_js_ctx;
 bool bm_js_encoded;
+/* runtime/napi.c (native addons), in programs whose bundle holds one: it sets this */
+void (*bm_js_napi_install)(JSContextRef ctx);
 static JSStringRef bm_js_bundle_url;    /* the prelude's URL */
 static JSObjectRef bm_js_npm;           /* globalThis.__barm_npm (protected) */
 static JSObjectRef bm_js_noop;          /* calling it runs pending microtasks */
@@ -219,6 +221,7 @@ JSContextRef bm_js(void) {
     bm_js_def(ctx, global, "__barm_compile", bm_js_compile_fn);
     bm_js_def(ctx, global, "__barm_name", bm_js_name_fn);
     bm_js_def(ctx, global, "__barm_read_file", bm_js_read_file_fn);
+    if (bm_js_napi_install) bm_js_napi_install(ctx);
     bm_js_def(ctx, global, "__barm_compile_source", bm_js_compile_source_fn);
     bm_js_def(ctx, global, "__barm_map", bm_js_map_fn);
     {

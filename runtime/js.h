@@ -51,6 +51,9 @@ void bm_node_install(JSContextRef ctx, JSObjectRef native);
 /* obj[name] = a function calling fn. */
 void bm_js_def(JSContextRef ctx, JSObjectRef obj, const char *name, JSObjectCallAsFunctionCallback fn);
 
+/* Set by runtime/napi.c when the program links it (native addons). */
+extern void (*bm_js_napi_install)(JSContextRef ctx);
+
 /* Runs JavaScript's pending microtasks (see above). */
 void bm_js_drain(void);
 
