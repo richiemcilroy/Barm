@@ -4159,13 +4159,11 @@ static void bm_http_detach(bm_http_conn *c) {
 /* ---- servers: registered by listen (at any time), served by bm_http_run after the program */
 
 
-/* Other I/O on the loop (the fetch client): its events' udata is a bm_io pointer with bit 0
- * set. bm_io_refs counts what keeps the loop running (requests in flight, DNS lookups); idle
- * pooled connections don't. After each batch of events the loop calls bm_io_after_batch (which
- * frees handles closed during the batch). Not static: nothing binds the loop to the client's
- * code, so programs that never fetch don't link it. */
-typedef struct bm_io bm_io;
-struct bm_io { void (*ready)(bm_io *h, bool readable, bool writable, bool broken); };
+/* Other I/O on the loop (the fetch client, runtime/node.c; bm_io in barm.h): its events' udata
+ * is a bm_io pointer with bit 0 set. bm_io_refs counts what keeps the loop running (requests in
+ * flight, DNS lookups); idle pooled connections don't. After each batch of events the loop calls
+ * bm_io_after_batch (which frees handles closed during the batch). Not static: nothing binds the
+ * loop to the client's code, so programs that never fetch don't link it. */
 int bm_io_refs;
 void (*bm_io_after_batch)(void);
 void (*bm_io_after_fork)(void);
@@ -5050,7 +5048,7 @@ static void bm_dns_ready(bm_io *h, bool readable, bool writable, bool broken);
  * land in clang's merged globals next to the event loop's, and keep all of this linked. */
 static bm_io bm_dns_io;
 
-static void bm_io_add(int fd, bm_io *h, bool read, bool write) {
+void bm_io_add(int fd, bm_io *h, bool read, bool write) {
     int q = bm_loop_queue();
     void *tag = (void *)((uintptr_t)h | 1);
 #ifdef BM_KQUEUE

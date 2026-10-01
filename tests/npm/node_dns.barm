@@ -1,0 +1,6 @@
+import run from "node-dns"
+
+async function main() {
+  // Node.js's dns used by an npm package
+  try await (try run())
+}
