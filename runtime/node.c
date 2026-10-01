@@ -2030,6 +2030,35 @@ NATIVE(n_dns_query) {
     return num(ctx, 0);
 }
 
+/* ------------------------------------------------------------------ the engine's heap (v8's
+ * getHeapStatistics) */
+
+#include <dlfcn.h>
+
+/* heapStats() -> [live bytes, capacity, extra (external) bytes], from JavaScriptCore's
+ * JSGetMemoryUsageStatistics (which walks the heap: not for frequent calls) */
+NATIVE(n_heap_stats) {
+    UNUSED;
+    static JSObjectRef (*stats)(JSContextRef);
+    static bool looked;
+    if (!looked) {
+        looked = true;
+        stats = (JSObjectRef (*)(JSContextRef))dlsym(RTLD_DEFAULT, "JSGetMemoryUsageStatistics");
+    }
+    double v[3] = {0, 0, 0};
+    if (stats) {
+        JSObjectRef o = stats(ctx);
+        const char *keys[3] = { "heapSize", "heapCapacity", "extraMemorySize" };
+        for (int i = 0; i < 3; i++) {
+            JSStringRef k = JSStringCreateWithUTF8CString(keys[i]);
+            v[i] = JSValueToNumber(ctx, JSObjectGetProperty(ctx, o, k, NULL), NULL);
+            JSStringRelease(k);
+        }
+    }
+    JSValueRef items[3] = { num(ctx, v[0]), num(ctx, v[1]), num(ctx, v[2]) };
+    return array(ctx, 3, items);
+}
+
 static void bm_node_dns_install(JSContextRef ctx, JSObjectRef native) {
     JSObjectRef d = JSObjectMake(ctx, NULL, NULL);
     bm_js_def(ctx, d, "getaddrinfo", n_dns_getaddrinfo);
@@ -2038,6 +2067,7 @@ static void bm_node_dns_install(JSContextRef ctx, JSObjectRef native) {
     bm_js_def(ctx, d, "ipv6Bytes", n_dns_ipv6_bytes);
     bm_js_def(ctx, d, "query", n_dns_query);
     set(ctx, native, "dns", d);
+    bm_js_def(ctx, native, "heapStats", n_heap_stats);
 }
 
 /* ------------------------------------------------------------------ zlib (runtime/compress.c, through

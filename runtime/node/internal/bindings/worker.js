@@ -1,13 +1,27 @@
 'use strict';
 
-// internalBinding('worker'): not written yet. Loading it works; using it throws.
-module.exports = new Proxy({}, {
-  get(target, key) {
-    if (typeof key === 'symbol' || key === 'then') return undefined;
-    return target[key] ??= function notImplemented() {
-      const e = new Error(`internalBinding('worker').${String(key)} is not implemented in Barm yet`);
-      e.code = 'ERR_NOT_IMPLEMENTED';
-      throw e;
-    };
-  },
-});
+// internalBinding('worker'): this thread's identity (the main thread, which owns the process) and
+// resource-limit indices. Starting a Worker isn't supported yet: its constructor throws.
+
+class Worker {
+  constructor() {
+    const e = new Error('worker_threads.Worker is not supported by Barm yet');
+    e.code = 'ERR_METHOD_NOT_IMPLEMENTED';
+    throw e;
+  }
+}
+
+module.exports = {
+  Worker,
+  getEnvMessagePort: () => undefined,
+  threadId: 0,
+  threadName: '',
+  isMainThread: true,
+  isInternalThread: false,
+  ownsProcessState: true,
+  kMaxYoungGenerationSizeMb: 0,
+  kMaxOldGenerationSizeMb: 1,
+  kCodeRangeSizeMb: 2,
+  kStackSizeMb: 3,
+  kTotalResourceLimitCount: 4,
+};

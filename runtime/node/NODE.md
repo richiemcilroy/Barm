@@ -19,6 +19,9 @@ Per-context files also get `privateSymbols` and `perIsolateSymbols`.
 - `internal/bindings/*.js` are the bindings:
   - **Written:** `buffer`, `string_decoder`, `types`, `util`, `constants`, `config`, `performance`, `messaging`, `trace_events`, `url`, `zlib`.
   - `cares_wrap` (dns): lookups run the system resolver (`getaddrinfo`, `getnameinfo`) on a work queue in `runtime/node.c` (worker threads; completions arrive on the event loop, as libuv's do). The `resolve*` queries, which Node.js sends with c-ares, are DNS messages built and read in JavaScript. The natives send them over UDP, then TCP when an answer is truncated, to the servers in `/etc/resolv.conf` or those set with `setServers()`. Answers and errors take c-ares's shapes and codes.
+  - `serdes` is V8's ValueSerializer wire format (version 15), written in JavaScript: `v8.serialize` writes what Node.js writes, byte for byte, and each reads the other's.
+  - `v8` reports JavaScriptCore's heap size and capacity (native `heapStats`, from `JSGetMemoryUsageStatistics`). V8's spaces, flags and profilers read as empty; `heap_utils`'s snapshots throw.
+  - `locks` is the Web Locks API's lock manager for this thread. `worker` describes the main thread; starting a `Worker` throws.
   - `tcp_wrap` and `pipe_wrap` are placeholders, so `net` loads (`isIP` and the like) until sockets are written.
   - `zlib` runs the codecs Barm vendors (`runtime/compress.c`, a port of Node.js's `src/node_zlib.cc`): zlib, brotli and zstd, with Node.js's modes, errors and messages. An async write runs on a later loop turn instead of a thread pool. A program whose bundle has `zlib` links the codecs. `CompressionStream` and `DecompressionStream` bring `zlib` into a bundle only when another module requires it.
   - `url` parses with the URL Standard's state machine from whatwg-url, not Ada. It reports the same href offsets Ada does, which `internal/url` slices.
