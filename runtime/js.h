@@ -34,10 +34,10 @@ typedef JSValueRef (*JSObjectCallAsFunctionCallback)(JSContextRef ctx, JSObjectR
 
 /* ------------------------------------------------------------------ the engine */
 
-/* The program's bundle (generated code defines these): the npm packages it imports and the
- * Node.js built-ins they use, as one script that defines globalThis.__barm_npm. */
-extern const char bm_js_bundle[];
-extern const size_t bm_js_bundle_len;
+/* The program's bundle (generated code embeds it): the npm packages it imports and the Node.js
+ * built-ins they use — a prelude that defines globalThis.__barm_npm, and each module's code,
+ * compiled when it's first required (layout: Bundle::blob in crates/barm/src/npm/bundle.rs). */
+extern const unsigned char bm_js_blob[];
 
 /* The context: created on first use, with globalThis.__barm_native (filled by bm_node_install),
  * globalThis.__barm_source, and the bundle evaluated. */

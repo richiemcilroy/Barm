@@ -371,24 +371,31 @@ fn bundle_cmd(args: &[String]) -> ExitCode {
         i += 1;
     }
     let Some((dir, specs)) = rest.split_first() else {
-        eprintln!("usage: barm __bundle <dir> <package>... [-o out.js]");
+        eprintln!("usage: barm __bundle <dir> <package>... [--blob] [-o out.js]");
         return ExitCode::from(2);
     };
+    // --blob: the form programs embed (see runtime/js.c), instead of one script
+    let blob = specs.iter().any(|s| s == "--blob");
+    let specs: Vec<String> = specs.iter().filter(|s| *s != "--blob").cloned().collect();
     let t0 = std::time::Instant::now();
-    match barm::npm::bundle(std::path::Path::new(dir), specs) {
+    match barm::npm::bundle(std::path::Path::new(dir), &specs) {
         Ok(b) => {
             for w in &b.warnings {
                 eprintln!("warning: {w}");
             }
-            eprintln!("bundled {} modules, {} bytes in {:.1} ms", b.modules, b.js.len(), t0.elapsed().as_secs_f64() * 1000.0);
+            let bytes = if blob { b.blob() } else { b.script().into_bytes() };
+            eprintln!("bundled {} modules, {} bytes in {:.1} ms", b.modules, bytes.len(), t0.elapsed().as_secs_f64() * 1000.0);
             match out {
                 Some(p) => {
-                    if let Err(e) = std::fs::write(&p, &b.js) {
+                    if let Err(e) = std::fs::write(&p, &bytes) {
                         eprintln!("error: can't write {p}: {e}");
                         return ExitCode::from(1);
                     }
                 }
-                None => print!("{}", b.js),
+                None => {
+                    use std::io::Write;
+                    let _ = std::io::stdout().write_all(&bytes);
+                }
             }
             ExitCode::SUCCESS
         }
