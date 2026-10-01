@@ -12,6 +12,15 @@ fn main() {
     }
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
     let dir = root.join("tests/npm");
+    // the Node-API fixture: a C addon, compiled here (binaries aren't checked in)
+    let addon = dir.join("node_modules/napi-addon");
+    let built = addon.join("build/addon.node");
+    let stale = std::fs::metadata(&built).and_then(|b| Ok(b.modified()? < std::fs::metadata(addon.join("addon.c"))?.modified()?)).unwrap_or(true);
+    if stale {
+        std::fs::create_dir_all(addon.join("build")).unwrap();
+        let ok = Command::new("cc").args(["-O1", "-bundle", "-undefined", "dynamic_lookup", "-o"]).arg(&built).arg(addon.join("addon.c")).status().map(|s| s.success()).unwrap_or(false);
+        assert!(ok, "can't compile tests/npm/node_modules/napi-addon/addon.c");
+    }
     let mut cases: Vec<PathBuf> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "barm")).collect();
     cases.sort();
     let mut failed = Vec::new();

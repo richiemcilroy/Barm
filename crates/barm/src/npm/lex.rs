@@ -637,10 +637,17 @@ pub fn require_patterns(src: &str) -> Vec<(String, String)> {
         };
         let Some(arg) = toks.get(i + 2) else { continue };
         match arg.kind {
-            // `prefix${x}suffix` (one substitution of a plain name or member chain)
+            // `prefix${expr}suffix` (one substitution)
             Kind::TemplateHead => {
                 let mut j = i + 3;
-                while toks.get(j).is_some_and(|t| t.kind == Kind::Ident || t.text(src) == ".") {
+                let mut depth = 0;
+                while let Some(t) = toks.get(j) {
+                    match t.kind {
+                        Kind::TemplateHead => depth += 1,
+                        Kind::TemplateTail if depth > 0 => depth -= 1,
+                        Kind::TemplateTail | Kind::TemplateMiddle if depth == 0 => break,
+                        _ => {}
+                    }
                     j += 1;
                 }
                 if let (Some(tail), Some(close)) = (toks.get(j), toks.get(j + 1))

@@ -24,6 +24,8 @@ pub struct Bundle {
     /// Number of modules (files, JSON and built-ins) in the bundle.
     pub modules: usize,
     pub warnings: Vec<String>,
+    /// It holds a Node-API addon (`.node`): the program links runtime/napi.c.
+    pub native: bool,
 }
 
 struct Module {
@@ -45,6 +47,7 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
     let mut queue: Vec<(usize, Target)> = Vec::new();
     let mut warnings = Vec::new();
     let mut entry_ids = Vec::new();
+    let mut native = false;
     // Node's globals (`process`, `Buffer`, ...) as a module that runs before the entries
     let globals_id = super::node_shims::shim("__globals").map(|_| add(&mut modules, &mut index, &mut queue, Target::Builtin("internal/bootstrap/globals".into())));
     for spec in specs {
@@ -78,11 +81,15 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
                 let src = match String::from_utf8(bytes) {
                     Ok(src) if !is_binary_ext(path) => src,
                     _ => {
-                        // a native addon or other binary: fails when required, as a failed native
-                        // load does in Node.js (packages that try one usually catch it and fall back)
+                        // a native addon: loaded from where it is (runtime/napi.c); another binary
+                        // fails when required, as in Node.js (packages that try one usually catch
+                        // it and fall back)
                         let name = display(path, root);
-                        let msg = format!("Cannot load {name}: native addons and binary modules aren't supported by Barm");
-                        let body = format!("var e = new Error({}); e.code = \"ERR_DLOPEN_FAILED\"; throw e;", js_string(&msg));
+                        let addon = path.extension().is_some_and(|e| e == "node");
+                        native |= addon;
+                        let msg = format!("Cannot load {name}: binary modules other than Node-API addons aren't supported by Barm");
+                        let fail = format!("var e = new Error({}); e.code = \"ERR_DLOPEN_FAILED\"; throw e;", js_string(&msg));
+                        let body = if addon { format!("if (typeof __barm_dlopen !== \"function\") {{ {fail} }} module.exports = __barm_dlopen({}, module.exports);", js_string(&name)) } else { fail };
                         modules[id].name = name;
                         modules[id].body = body;
                         continue;
@@ -184,7 +191,7 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
         let _ = writeln!(js, "__barm_load({id});");
     }
     js.push_str(RUNTIME_TAIL);
-    Ok(Bundle { prelude: js, sources, maps, entries: specs.to_vec(), modules: modules.len(), warnings })
+    Ok(Bundle { prelude: js, sources, maps, entries: specs.to_vec(), modules: modules.len(), warnings, native })
 }
 
 impl Bundle {
@@ -262,6 +269,25 @@ fn add(modules: &mut Vec<Module>, index: &mut FxMap<Target, usize>, queue: &mut 
 fn expand_pattern(from_dir: &Path, prefix: &str, suffix: &str) -> Vec<String> {
     let (dir_part, name_prefix) = match prefix.rfind('/') {
         Some(i) => (&prefix[..=i], &prefix[i + 1..]),
+        // `require(`lightningcss-${platform}`)`: the installed packages named so
+        None if !prefix.is_empty() && !prefix.starts_with('.') && suffix.is_empty() => {
+            let mut d = Some(from_dir);
+            let mut out = Vec::new();
+            while let Some(x) = d {
+                if let Ok(entries) = std::fs::read_dir(x.join("node_modules")) {
+                    for e in entries.flatten() {
+                        let n = e.file_name().to_string_lossy().into_owned();
+                        if n.starts_with(prefix) && e.path().join("package.json").is_file() && !out.contains(&n) {
+                            out.push(n);
+                        }
+                    }
+                }
+                d = x.parent();
+            }
+            out.sort();
+            out.truncate(200);
+            return out;
+        }
         None => return Vec::new(),
     };
     // the directory: relative to the module, or inside a package in node_modules
@@ -337,7 +363,7 @@ fn expand_pattern(from_dir: &Path, prefix: &str, suffix: &str) -> Vec<String> {
 }
 
 /// (global name, the shim that defines it) for globals globals.js loads by a computed name.
-const LAZY_GLOBALS: &[(&str, &str)] = &[("CompressionStream", "internal/webstreams/compression"), ("DecompressionStream", "internal/webstreams/compression")];
+const LAZY_GLOBALS: &[(&str, &str)] = &[("CompressionStream", "internal/webstreams/compression"), ("DecompressionStream", "internal/webstreams/compression"), ("subtle", "crypto")];
 
 /// The module JSX compiles to calls of: the nearest tsconfig.json's `jsxImportSource` (Solid,
 /// Preact, ...) + `/jsx-runtime`, else React's.

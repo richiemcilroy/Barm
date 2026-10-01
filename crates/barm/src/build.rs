@@ -21,6 +21,8 @@ mod tls_files {
 /// The JavaScript bridge and the Node.js natives: linked by programs that import npm packages.
 const JS_C: &str = include_str!("../../../runtime/js.c");
 const NODE_C: &str = include_str!("../../../runtime/node.c");
+/// Node-API (native addons): linked when the bundle holds one.
+const NAPI_C: &str = include_str!("../../../runtime/napi.c");
 /// Lets JavaScriptCore compile JavaScript to machine code (without it, it only interprets: an
 /// order of magnitude slower). Programs that link it are signed with this.
 const JIT_ENTITLEMENTS: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>com.apple.security.cs.allow-jit</key><true/></dict></plist>\n";
@@ -232,6 +234,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     };
     drop(checker);
     let codegen::Program { c: mut c_src, mut uses_tls, npm } = program;
+    let mut native = false;
     // npm packages: bundled into a blob the program embeds (see runtime/js.c)
     if !npm.is_empty() {
         if !cfg!(target_vendor = "apple") {
@@ -259,6 +262,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
             let tmp = path.with_extension(format!("tmp{}", std::process::id()));
             std::fs::write(&tmp, &blob).and_then(|_| std::fs::rename(&tmp, &path)).map_err(|e| BuildError::Message(format!("can't write {}: {e}", path.display())))?;
         }
+        native = b.native;
         let p = path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
         c_src.push_str(&format!("__asm__(\".section __TEXT,__const\\n.globl _bm_js_blob\\n.p2align 3\\n_bm_js_blob:\\n.incbin \\\"{p}\\\"\\n.byte 0\\n.text\\n\");\n"));
     }
@@ -295,7 +299,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     // A program that fetches links TLS (its code calls bm_tls_install).
     let tls = uses_tls.then(|| TlsArchive::new(&cc, sysroot.as_deref(), &extra));
     // A program importing npm packages links the JavaScript bridge (compiled once per compiler).
-    let js_key = if npm.is_empty() { String::new() } else { hash_hex(&[JS_C.as_bytes(), NODE_C.as_bytes(), codegen::JS_H.as_bytes(), codegen::RUNTIME_H.as_bytes(), cc.as_bytes(), flag_text.as_bytes(), JIT_ENTITLEMENTS.as_bytes()]) };
+    let js_key = if npm.is_empty() { String::new() } else { hash_hex(&[JS_C.as_bytes(), NODE_C.as_bytes(), NAPI_C.as_bytes(), codegen::JS_H.as_bytes(), codegen::RUNTIME_H.as_bytes(), cc.as_bytes(), flag_text.as_bytes(), JIT_ENTITLEMENTS.as_bytes()]) };
     // Link flags (see below) are part of what a cached binary was built with.
     let tls_key = tls.as_ref().map(|t| t.key.clone()).unwrap_or_default();
     let key = hash_hex(&[c_src.as_bytes(), rt_key.as_bytes(), LINK_FLAGS.as_bytes(), tls_key.as_bytes(), js_key.as_bytes()]);
@@ -355,8 +359,16 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     }
     cmd.arg(&rt_obj);
     if !js_key.is_empty() {
-        for obj in js_objects(&cc, &flags_base(&flags, &pch), &c_dir, &js_key)? {
-            cmd.arg(obj);
+        let objs = js_objects(&cc, &flags_base(&flags, &pch), &c_dir, &js_key)?;
+        cmd.arg(&objs[0]).arg(&objs[1]);
+        if native {
+            // native addons find Node-API in the program (they're linked against no library)
+            cmd.arg(&objs[2]);
+            if cfg!(target_vendor = "apple") {
+                cmd.args(["-Wl,-exported_symbol,_napi_*", "-Wl,-exported_symbol,_node_api_*"]);
+            } else {
+                cmd.arg("-rdynamic");
+            }
         }
         cmd.args(["-framework", "JavaScriptCore"]);
     }
@@ -411,24 +423,24 @@ fn flags_base(flags: &[&str], pch: &Option<PathBuf>) -> Vec<String> {
 
 /// runtime/js.c and runtime/node.c compiled once per compiler and flags: (js.o, node.o).
 fn js_objects(cc: &str, flags: &[String], c_dir: &Path, key: &str) -> Result<Vec<PathBuf>, BuildError> {
-    let objs = vec![c_dir.join(format!("js-{key}.o")), c_dir.join(format!("node-{key}.o"))];
+    let objs = vec![c_dir.join(format!("js-{key}.o")), c_dir.join(format!("node-{key}.o")), c_dir.join(format!("napi-{key}.o"))];
     if objs.iter().all(|o| cached(o)) {
         return Ok(objs);
     }
     let fail = |what: String| BuildError::Message(format!("can't build the JavaScript bridge: {what}"));
     let dir = c_dir.join(format!("js-{key}.tmp{}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| fail(e.to_string()))?;
-    for (name, text) in [("barm.h", codegen::RUNTIME_H), ("js.h", codegen::JS_H), ("js.c", JS_C), ("node.c", NODE_C)] {
+    for (name, text) in [("barm.h", codegen::RUNTIME_H), ("js.h", codegen::JS_H), ("js.c", JS_C), ("node.c", NODE_C), ("napi.c", NAPI_C)] {
         std::fs::write(dir.join(name), text).map_err(|e| fail(e.to_string()))?;
     }
-    for (src, obj) in ["js.c", "node.c"].iter().zip(&objs) {
+    for (src, obj) in ["js.c", "node.c", "napi.c"].iter().zip(&objs) {
         let tmp = obj.with_extension(format!("tmp{}.o", std::process::id()));
         let mut cmd = Command::new(cc);
         cmd.args(flags).args(["-ffunction-sections", "-fdata-sections", "-c", "-o"]).arg(&tmp).arg(dir.join(src));
         run_cc(cmd, cc, &dir.join(src))?;
         std::fs::rename(&tmp, obj).map_err(|e| fail(e.to_string()))?;
     }
-    for name in ["barm.h", "js.h", "js.c", "node.c"] {
+    for name in ["barm.h", "js.h", "js.c", "node.c", "napi.c"] {
         let _ = std::fs::remove_file(dir.join(name));
     }
     let _ = std::fs::remove_dir(&dir);

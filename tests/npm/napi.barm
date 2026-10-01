@@ -1,0 +1,23 @@
+// A Node-API addon (tests/npm/node_modules/napi-addon/addon.c).
+import { add, greet, describe, fail, upper, sumAsync, ticks, Counter } from "napi-addon"
+import { Buffer } from "node:buffer"
+
+async function main() {
+  console.log(try add(2, 3.5) as f64)
+  console.log(try greet("Ada") as string)
+  console.log(try describe({ name: "Bob", tags: ["a", "b", "c"] }))
+  try {
+    try fail()
+  } catch (e) {
+    console.log(`${e.name}: ${e.message}`)
+  }
+  const c = try new Counter(40)
+  try c.inc().inc()
+  console.log(c.value as int, typeof Counter)
+  const buf = try upper(try Buffer.from("barm"))
+  console.log(try buf.toString() as string)
+  console.log(try await sumAsync(100) as int)
+  try ticks((n: Js) => {
+    console.log(`tick ${n}`)
+  })
+}
