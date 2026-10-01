@@ -6,6 +6,14 @@
 
 const primordials = {};
 
+// (Barm: Symbol.dispose and Symbol.asyncDispose, where the engine lacks them, as Node.js defined
+// them before V8 had them)
+for (const [name, key] of [['dispose', 'nodejs.dispose'], ['asyncDispose', 'nodejs.asyncDispose']]) {
+  if (typeof Symbol[name] !== 'symbol') {
+    Object.defineProperty(Symbol, name, { __proto__: null, value: Symbol.for(key), writable: false, enumerable: false, configurable: false });
+  }
+}
+
 /* eslint-disable node-core/prefer-primordials */
 
 // This file subclasses and stores the JS builtins that come from the VM

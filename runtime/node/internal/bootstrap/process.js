@@ -135,6 +135,10 @@ process.availableMemory = () => native.memoryUsage().available ?? 0;
 
 // stdio: synchronous writes to fds 1 and 2 (as Node.js does for files, and pipes on macOS)
 function stdioStream(fd) {
+  if (native.isatty(fd)) {
+    const { WriteStream } = require('tty');
+    return new WriteStream(fd);
+  }
   const { Writable } = require('stream');
   const stream = new Writable({
     write(chunk, encoding, cb) {
