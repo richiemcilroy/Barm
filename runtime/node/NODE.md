@@ -26,6 +26,7 @@ Per-context files also get `privateSymbols` and `perIsolateSymbols`.
 
 ## Local edits to Node.js files
 
+- `internal/primordials.js`: defines `Symbol.dispose` and `Symbol.asyncDispose` when the engine lacks them (JavaScriptCore does), as Node.js once did.
 - `internal/util/debuglog.js`: `testEnabled` is initialized on first use when startup hasn't done it.
 - `internal/util.js`: `getInternalGlobal()` returns the primordial `RegExp`, `Object` and `Array` rather than a second realm from `vm` (none yet).
 

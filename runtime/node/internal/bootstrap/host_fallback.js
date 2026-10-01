@@ -66,4 +66,20 @@ module.exports = {
   requestCheck() {
     later(() => onCheck(), 0);
   },
+  // os: what's knowable without the OS (neutral values)
+  os: {
+    getOSInformation: () => ['Darwin', '', '0.0.0', 'arm64'],
+    getHostname: () => 'localhost',
+    getHomeDirectory: () => '/',
+    getUptime: () => Math.floor((clock() - start) / 1000),
+    getTotalMem: () => 0,
+    getFreeMem: () => 0,
+    getLoadAvg: () => [0, 0, 0],
+    getCPUs: () => [],
+    getInterfaceAddresses: () => [],
+    getUserInfo: () => ({ uid: 0, gid: 0, username: 'barm', homedir: '/', shell: null }),
+    getPriority: () => 0,
+    setPriority: () => 0,
+    getAvailableParallelism: () => 1,
+  },
 };
