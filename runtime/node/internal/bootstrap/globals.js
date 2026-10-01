@@ -30,6 +30,8 @@ function lazy(name, load, enumerable = false) {
 
 
 Object.defineProperty(g, 'global', { __proto__: null, value: g, writable: true, enumerable: false, configurable: true });
+// (as Bun has it: the global object under its web name)
+Object.defineProperty(g, 'self', { __proto__: null, value: g, writable: true, enumerable: false, configurable: true });
 
 // V8's Error.prepareStackTrace and CallSites (internal/barm/callsite), for packages that read
 // their callers: while it's a function, Error.captureStackTrace and `new Error()` (the global
