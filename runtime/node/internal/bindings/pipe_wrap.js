@@ -1,11 +1,12 @@
 'use strict';
 
-// internalBinding('pipe_wrap'): a pipe (a socketpair to a child process, or an fd opened with
-// open()) as a libuv stream. Unix domain sockets (bind, listen, connect) aren't written yet.
+// internalBinding('pipe_wrap'): pipes (Node.js's src/pipe_wrap.cc) as libuv streams: a
+// socketpair to a child process, an fd opened with open(), or a unix domain socket (bind,
+// listen, connect by path).
 
-const { LibuvStreamWrap } = require('internal/bindings/stream_wrap');
+const { SocketWrap } = require('internal/bindings/stream_wrap');
 
-class Pipe extends LibuvStreamWrap {
+class Pipe extends SocketWrap {
   constructor(type) {
     super();
     this.type = type;
@@ -15,21 +16,19 @@ class Pipe extends LibuvStreamWrap {
     return this._barmOpen(fd);
   }
 
-  bind() {
-    return -45; // UV_ENOTSUP
+  bind(path) {
+    return this._barmBind(path, 0, 0, false);
   }
 
-  listen() {
-    return -45;
-  }
-
-  connect() {
-    return -45;
+  connect(req, path) {
+    return this._barmConnect(req, path, 0, 0);
   }
 
   fchmod() {
     return 0;
   }
+
+  setPendingInstances() {}
 }
 
 class PipeConnectWrap {}

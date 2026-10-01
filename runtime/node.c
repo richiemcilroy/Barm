@@ -428,6 +428,27 @@ NATIVE(n_kill) {
     return JSValueMakeBoolean(ctx, true);
 }
 
+/* process's 'uncaughtException' (set by internal/bootstrap/process): handler(err) -> whether a
+ * listener took it */
+static JSObjectRef bm_node_fatal_handler;
+
+/* setFatalHandler(fn); fatal(err): report an uncaught exception from JavaScript */
+NATIVE(n_set_fatal_handler) {
+    UNUSED;
+    if (bm_node_fatal_handler) JSValueUnprotect(ctx, bm_node_fatal_handler);
+    bm_node_fatal_handler = n > 0 && JSValueIsObject(ctx, a[0]) ? (JSObjectRef)a[0] : NULL;
+    if (bm_node_fatal_handler) JSValueProtect(ctx, bm_node_fatal_handler);
+    return undef(ctx);
+}
+
+static void bm_node_report(JSValueRef exc);
+
+NATIVE(n_fatal) {
+    UNUSED;
+    bm_node_report(n > 0 ? a[0] : undef(ctx));
+    return undef(ctx);
+}
+
 /* ------------------------------------------------------------------ timers, on Barm's loop
  *
  * One Barm timer stands for all of Node.js's (internal/timers keeps the lists): when it fires,
@@ -438,7 +459,18 @@ static bm_int bm_node_timer_id;     /* the pending Barm timer (0: none) */
 static double bm_node_timer_due;    /* when it fires (ms, bm_performance_now's clock) */
 static bool bm_node_timer_refed = true;
 
+/* an exception nothing caught: to 'uncaughtException' listeners if there are any, else printed,
+ * and the program ends (exit code 1, as Node.js's) */
 static void bm_node_report(JSValueRef exc) {
+    static bool reporting;
+    if (bm_node_fatal_handler && !reporting) {
+        reporting = true;
+        JSValueRef inner = NULL;
+        JSValueRef handled = JSObjectCallAsFunction(bm_js_ctx, bm_node_fatal_handler, NULL, 1, &exc, &inner);
+        reporting = false;
+        if (inner) exc = inner;
+        else if (handled && JSValueToBoolean(bm_js_ctx, handled)) return;
+    }
     bm_str text = bm_js_error_text(exc);
     bm_out_flush();
     bm_err_cstr(text.p->data);
@@ -2352,8 +2384,9 @@ typedef struct bm_node_wreq {
 typedef struct {
     bm_io io;
     int fd;
-    bool reading, closed, refed, counted, watching;
+    bool reading, closed, refed, counted, watching, listening, connecting;
     JSObjectRef self, onread;
+    JSObjectRef onconnection, connect_cb;   /* listen: onconnection(fd | null, err); connect: cb(status) */
     bm_node_wreq *wq, *wq_tail;
     JSObjectRef shutdown_cb;
     double bytes_read, bytes_written;
@@ -2386,8 +2419,8 @@ static void bm_node_stream_ready(bm_io *h, bool readable, bool writable, bool br
 
 /* what the loop watches for, and whether the stream keeps the program running */
 static void bm_node_stream_update(bm_node_stream *s) {
-    bool want_read = s->reading && !s->closed;
-    bool want_write = !s->closed && (s->wq || s->shutdown_cb);
+    bool want_read = (s->reading || s->listening) && !s->closed;
+    bool want_write = !s->closed && (s->wq || s->shutdown_cb || s->connecting);
     if (s->fd >= 0 && !s->closed && (want_read || want_write || s->watching)) {
         s->io.ready = bm_node_stream_ready;
         bm_io_set(s->fd, &s->io, want_read, want_write);
@@ -2451,6 +2484,41 @@ static void bm_node_stream_flush(bm_node_stream *s) {
 static void bm_node_stream_ready(bm_io *h, bool readable, bool writable, bool broken) {
     bm_node_stream *s = (bm_node_stream *)h;
     if (s->closed) return;
+    if (s->connecting && (writable || broken)) {
+        int err = 0;
+        socklen_t len = sizeof err;
+        if (getsockopt(s->fd, SOL_SOCKET, SO_ERROR, &err, &len) != 0) err = errno;
+        s->connecting = false;
+        JSObjectRef cb = s->connect_cb;
+        s->connect_cb = NULL;
+        bm_node_stream_update(s);
+        JSValueRef arg = JSValueMakeNumber(bm_js_ctx, -err);
+        bm_node_call_args(cb, 1, &arg);
+        JSValueUnprotect(bm_js_ctx, cb);
+        return;
+    }
+    if (s->listening && (readable || broken)) {
+        for (int i = 0; i < 64 && s->listening && !s->closed; i++) {
+            int c = accept(s->fd, NULL, NULL);
+            if (c < 0) {
+                if (errno == EINTR) continue;
+                if (errno != EAGAIN && errno != ECONNABORTED) {
+                    JSValueRef args[2] = { JSValueMakeNull(bm_js_ctx), JSValueMakeNumber(bm_js_ctx, -errno) };
+                    bm_node_call_args(s->onconnection, 2, args);
+                }
+                break;
+            }
+            fcntl(c, F_SETFD, FD_CLOEXEC);
+#ifdef SO_NOSIGPIPE
+            int one = 1;
+            setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#endif
+            JSValueRef args[2] = { JSValueMakeNumber(bm_js_ctx, c), JSValueMakeNumber(bm_js_ctx, 0) };
+            bm_node_call_args(s->onconnection, 2, args);
+        }
+        if (!s->closed) bm_node_stream_update(s);
+        return;
+    }
     if (writable || (broken && s->wq)) bm_node_stream_flush(s);
     if ((readable || broken) && s->reading && !s->closed) {
         static uint8_t buf[65536];
@@ -2602,7 +2670,187 @@ NATIVE(n_stream_close) {
     s->shutdown_cb = NULL;
     if (s->onread) JSValueUnprotect(ctx, s->onread);
     s->onread = NULL;
+    if (s->onconnection) JSValueUnprotect(ctx, s->onconnection);
+    s->onconnection = NULL;
+    s->listening = false;
+    if (s->connect_cb) {
+        /* (a connect in progress ends with ECANCELED) */
+        JSObjectRef cb = s->connect_cb;
+        s->connect_cb = NULL;
+        s->connecting = false;
+        JSValueRef arg = JSValueMakeNumber(ctx, -ECANCELED);
+        bm_node_call_args(cb, 1, &arg);
+        JSValueUnprotect(ctx, cb);
+    }
     return undef(ctx);
+}
+
+/* ------------------------------------------------------------------ sockets (tcp_wrap, pipe_wrap's
+ * unix sockets) on the stream handles */
+
+#include <netinet/tcp.h>
+#include <sys/un.h>
+
+/* an address from an ip (4 or 6) or a unix path: its length, 0 if it isn't one */
+static socklen_t bm_node_sockaddr(const char *where, int port, int family, struct sockaddr_storage *ss) {
+    memset(ss, 0, sizeof *ss);
+    if (family == 0) {
+        struct sockaddr_un *un = (struct sockaddr_un *)ss;
+        if (strlen(where) >= sizeof un->sun_path) return 0;
+        un->sun_family = AF_UNIX;
+        strcpy(un->sun_path, where);
+        return (socklen_t)sizeof *un;
+    }
+    if (family == 4) {
+        struct sockaddr_in *v4 = (struct sockaddr_in *)ss;
+        if (inet_pton(AF_INET, where, &v4->sin_addr) != 1) return 0;
+        v4->sin_family = AF_INET;
+        v4->sin_port = htons((uint16_t)port);
+        return (socklen_t)sizeof *v4;
+    }
+    struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)ss;
+    char host[INET6_ADDRSTRLEN + 16];
+    snprintf(host, sizeof host, "%s", where);
+    char *pct = strchr(host, '%');
+    if (pct) {
+        *pct = 0;
+        v6->sin6_scope_id = if_nametoindex(pct + 1);
+    }
+    if (inet_pton(AF_INET6, host, &v6->sin6_addr) != 1) return 0;
+    v6->sin6_family = AF_INET6;
+    v6->sin6_port = htons((uint16_t)port);
+    return (socklen_t)sizeof *v6;
+}
+
+/* socket(family: 4, 6 or 0 for unix) -> fd or -errno */
+NATIVE(n_net_socket) {
+    UNUSED;
+    int family = (int)arg_num(ctx, n, a, 0, 4);
+    int fd = socket(family == 4 ? AF_INET : family == 6 ? AF_INET6 : AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return num(ctx, -errno);
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+#ifdef SO_NOSIGPIPE
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#endif
+    return num(ctx, fd);
+}
+
+/* bind(fd, address, port, family, ipv6Only) -> 0 or -errno */
+NATIVE(n_net_bind) {
+    UNUSED;
+    int fd = (int)arg_num(ctx, n, a, 0, -1);
+    char *where = arg_cstr(ctx, n, a, 1);
+    int family = (int)arg_num(ctx, n, a, 3, 4);
+    struct sockaddr_storage ss;
+    socklen_t len = where ? bm_node_sockaddr(where, (int)arg_num(ctx, n, a, 2, 0), family, &ss) : 0;
+    free(where);
+    if (!len) return num(ctx, -EINVAL);
+    if (family != 0) {
+        int one = 1;
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+        if (family == 6) {
+            int only = n > 4 && JSValueToBoolean(ctx, a[4]) ? 1 : 0;
+            setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &only, sizeof only);
+        }
+    }
+    return num(ctx, bind(fd, (struct sockaddr *)&ss, len) == 0 ? 0 : -errno);
+}
+
+/* listen(handle, backlog, onconnection(fd | null, err)) -> 0 or -errno */
+NATIVE(n_net_listen) {
+    UNUSED;
+    bm_node_stream *s = bm_node_stream_of(ctx, n, a);
+    if (!s || s->closed || n < 3) return num(ctx, -EINVAL);
+    if (listen(s->fd, (int)arg_num(ctx, n, a, 1, 511)) != 0) return num(ctx, -errno);
+    if (s->onconnection) JSValueUnprotect(ctx, s->onconnection);
+    s->onconnection = (JSObjectRef)a[2];
+    JSValueProtect(ctx, a[2]);
+    s->listening = true;
+    bm_node_stream_update(s);
+    return num(ctx, 0);
+}
+
+/* connect(handle, address, port, family, cb(status)) -> 0 or -errno (cb later) */
+NATIVE(n_net_connect) {
+    UNUSED;
+    bm_node_stream *s = bm_node_stream_of(ctx, n, a);
+    if (!s || s->closed || n < 5) return num(ctx, -EINVAL);
+    char *where = arg_cstr(ctx, n, a, 1);
+    struct sockaddr_storage ss;
+    socklen_t len = where ? bm_node_sockaddr(where, (int)arg_num(ctx, n, a, 2, 0), (int)arg_num(ctx, n, a, 3, 4), &ss) : 0;
+    free(where);
+    if (!len) return num(ctx, -EINVAL);
+    int r;
+    while ((r = connect(s->fd, (struct sockaddr *)&ss, len)) != 0 && errno == EINTR) {}
+    int err = r == 0 ? 0 : errno == EINPROGRESS ? EINPROGRESS : errno;
+    /* (an immediate failure: the binding reports it on a later turn, as libuv does) */
+    if (err != 0 && err != EINPROGRESS) return num(ctx, -err);
+    s->connect_cb = (JSObjectRef)a[4];
+    JSValueProtect(ctx, a[4]);
+    s->connecting = true;
+    bm_node_stream_update(s);
+    return num(ctx, 0);
+}
+
+/* name(fd, peer) -> [address, family, port] or -errno */
+NATIVE(n_net_name) {
+    UNUSED;
+    int fd = (int)arg_num(ctx, n, a, 0, -1);
+    bool peer = n > 1 && JSValueToBoolean(ctx, a[1]);
+    struct sockaddr_storage ss;
+    socklen_t len = sizeof ss;
+    int r = peer ? getpeername(fd, (struct sockaddr *)&ss, &len) : getsockname(fd, (struct sockaddr *)&ss, &len);
+    if (r != 0) return num(ctx, -errno);
+    char ip[INET6_ADDRSTRLEN];
+    JSValueRef items[3];
+    if (ss.ss_family == AF_INET) {
+        struct sockaddr_in *v4 = (struct sockaddr_in *)&ss;
+        inet_ntop(AF_INET, &v4->sin_addr, ip, sizeof ip);
+        items[0] = str(ctx, ip);
+        items[1] = str(ctx, "IPv4");
+        items[2] = num(ctx, ntohs(v4->sin_port));
+    } else if (ss.ss_family == AF_INET6) {
+        struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)&ss;
+        inet_ntop(AF_INET6, &v6->sin6_addr, ip, sizeof ip);
+        items[0] = str(ctx, ip);
+        items[1] = str(ctx, "IPv6");
+        items[2] = num(ctx, ntohs(v6->sin6_port));
+    } else {
+        struct sockaddr_un *un = (struct sockaddr_un *)&ss;
+        items[0] = str(ctx, len > offsetof(struct sockaddr_un, sun_path) ? un->sun_path : "");
+        items[1] = str(ctx, "unix");
+        items[2] = num(ctx, 0);
+    }
+    return array(ctx, 3, items);
+}
+
+/* option(fd, "nodelay" | "keepalive", enable, delay seconds) -> 0 or -errno */
+NATIVE(n_net_option) {
+    UNUSED;
+    int fd = (int)arg_num(ctx, n, a, 0, -1);
+    char *what = arg_cstr(ctx, n, a, 1);
+    int on = n > 2 && JSValueToBoolean(ctx, a[2]) ? 1 : 0;
+    int r = 0;
+    if (what && strcmp(what, "nodelay") == 0) {
+        r = setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof on);
+    } else if (what && strcmp(what, "keepalive") == 0) {
+        r = setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof on);
+        int delay = (int)arg_num(ctx, n, a, 3, 0);
+        if (r == 0 && on && delay > 0) {
+#ifdef TCP_KEEPALIVE
+            r = setsockopt(fd, IPPROTO_TCP, TCP_KEEPALIVE, &delay, sizeof delay);
+#else
+            r = setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &delay, sizeof delay);
+#endif
+        }
+    } else if (what && strcmp(what, "reset") == 0) {
+        struct linger l = { 1, 0 };
+        r = setsockopt(fd, SOL_SOCKET, SO_LINGER, &l, sizeof l);
+    }
+    free(what);
+    return num(ctx, r == 0 ? 0 : -errno);
 }
 
 /* release(handle): JS is done with it (after close) */
@@ -2769,6 +3017,12 @@ static void bm_node_streams_install(JSContextRef ctx, JSObjectRef native) {
     bm_js_def(ctx, st, "release", n_stream_release);
     bm_js_def(ctx, st, "ref", n_stream_ref);
     bm_js_def(ctx, st, "info", n_stream_info);
+    bm_js_def(ctx, st, "socket", n_net_socket);
+    bm_js_def(ctx, st, "bind", n_net_bind);
+    bm_js_def(ctx, st, "listen", n_net_listen);
+    bm_js_def(ctx, st, "connect", n_net_connect);
+    bm_js_def(ctx, st, "name", n_net_name);
+    bm_js_def(ctx, st, "option", n_net_option);
     set(ctx, native, "stream", st);
     JSObjectRef pr = JSObjectMake(ctx, NULL, NULL);
     bm_js_def(ctx, pr, "spawn", n_spawn);
@@ -3198,5 +3452,7 @@ void bm_node_install(JSContextRef ctx, JSObjectRef native) {
     bm_node_dns_install(ctx, native);
     bm_node_vm_install(ctx, native);
     bm_js_def(ctx, native, "spawnSync", n_spawn_sync);
+    bm_js_def(ctx, native, "setFatalHandler", n_set_fatal_handler);
+    bm_js_def(ctx, native, "fatal", n_fatal);
     bm_node_streams_install(ctx, native);
 }

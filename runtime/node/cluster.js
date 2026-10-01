@@ -28,4 +28,5 @@ const {
 } = primordials;
 
 const childOrPrimary = ObjectHasOwn(process.env, 'NODE_UNIQUE_ID') ? 'child' : 'primary';
-module.exports = require(`internal/cluster/${childOrPrimary}`);
+// (Barm: literal requires, so the bundler includes them)
+module.exports = childOrPrimary === 'child' ? require('internal/cluster/child') : require('internal/cluster/primary');

@@ -1,0 +1,11 @@
+listening 127.0.0.1 IPv4 true
+echo HELLO
+big 1048576
+concurrent C1,C2,C3,C4,C5
+socket 127.0.0.1 true 127.0.0.1 number IPv4
+closed false
+ipv6 IPv6 SIX
+unix PIPE
+refused ECONNREFUSED connect 127.0.0.1 1
+in use EADDRINUSE listen
+localhost by name
