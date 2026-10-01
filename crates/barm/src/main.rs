@@ -48,6 +48,8 @@ fn main() -> ExitCode {
         Some("run") => run_cmd(&with(&rest[1..]), false),
         Some("test") => build_cmd(&with(&rest[1..]), BuildCmd::Test),
         Some("explain") => explain(rest.get(1).map(|s| s.as_str())),
+        // Internal: bundle npm packages (for testing the bundler): `barm __bundle <dir> <spec>... [-o out.js]`.
+        Some("__bundle") => bundle_cmd(&rest[1..]),
         // Bun's package commands: there's nothing for them to do yet, so say so.
         Some(cmd @ ("install" | "i" | "add" | "remove" | "update")) => {
             eprintln!("error: `barm {cmd}`: Barm has no packages yet, so there's nothing to install");
@@ -351,6 +353,48 @@ fn report(e: barm::build::BuildError) -> ExitCode {
         barm::build::BuildError::Message(m) => {
             eprintln!("error: {m}");
             ExitCode::from(2)
+        }
+    }
+}
+
+fn bundle_cmd(args: &[String]) -> ExitCode {
+    let mut out = None;
+    let mut rest = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "-o" {
+            out = args.get(i + 1).cloned();
+            i += 2;
+            continue;
+        }
+        rest.push(args[i].clone());
+        i += 1;
+    }
+    let Some((dir, specs)) = rest.split_first() else {
+        eprintln!("usage: barm __bundle <dir> <package>... [-o out.js]");
+        return ExitCode::from(2);
+    };
+    let t0 = std::time::Instant::now();
+    match barm::npm::bundle(std::path::Path::new(dir), specs) {
+        Ok(b) => {
+            for w in &b.warnings {
+                eprintln!("warning: {w}");
+            }
+            eprintln!("bundled {} modules, {} bytes in {:.1} ms", b.modules, b.js.len(), t0.elapsed().as_secs_f64() * 1000.0);
+            match out {
+                Some(p) => {
+                    if let Err(e) = std::fs::write(&p, &b.js) {
+                        eprintln!("error: can't write {p}: {e}");
+                        return ExitCode::from(1);
+                    }
+                }
+                None => print!("{}", b.js),
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::from(1)
         }
     }
 }
