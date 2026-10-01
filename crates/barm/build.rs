@@ -6,6 +6,11 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+/// The npm bundler's JavaScript tokenizer: shims are minified here, once.
+#[allow(dead_code)]
+#[path = "src/npm/lex.rs"]
+mod lex;
+
 fn files(dir: &Path, out: &mut Vec<PathBuf>) {
     let mut entries: Vec<PathBuf> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.path()).collect();
     entries.sort();
@@ -71,12 +76,28 @@ fn node_shims(root: &Path) {
     let mut entries: Vec<(String, PathBuf)> =
         files.into_iter().map(|p| (p.strip_prefix(&dir).unwrap().with_extension("").to_string_lossy().replace('\\', "/"), p)).collect();
     entries.sort();
-    let mut code = String::from("/// (module id, source), sorted by id\npub static NODE_SHIMS: &[(&str, &str)] = &[\n");
+    // Each shim is minified (comments and whitespace go; line breaks stay for automatic
+    // semicolons), and its static requires found, here rather than in every bundle.
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("node");
+    let mut code = String::from("/// (module id, minified source), sorted by id\npub static NODE_SHIMS: &[(&str, &str)] = &[\n");
+    let mut requires = String::from("/// The static `require(...)` specifiers of each of NODE_SHIMS\npub static NODE_SHIM_REQUIRES: &[&[&str]] = &[\n");
     for (id, p) in &entries {
-        let _ = writeln!(code, "    ({id:?}, include_str!({:?})),", p.to_string_lossy());
+        let src = std::fs::read_to_string(p).unwrap();
+        let min = lex::minify(&src).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+        let reqs = lex::static_requires(&min).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+        let dest = out.join(format!("{id}.js"));
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        if std::fs::read_to_string(&dest).ok().as_deref() != Some(min.as_str()) {
+            std::fs::write(&dest, &min).unwrap();
+        }
+        let _ = writeln!(code, "    ({id:?}, include_str!({:?})),", dest.to_string_lossy());
+        let _ = writeln!(requires, "    &{reqs:?},");
         println!("cargo:rerun-if-changed={}", p.display());
     }
     code.push_str("];\n");
+    code.push_str(&requires);
+    code.push_str("];\n");
+    println!("cargo:rerun-if-changed=src/npm/lex.rs");
     std::fs::write(PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("node_shims.rs"), code).unwrap();
     println!("cargo:rerun-if-changed={}", dir.display());
 }
