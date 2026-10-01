@@ -105,6 +105,45 @@ static JSValueRef bm_js_compile_fn(JSContextRef ctx, JSObjectRef f, JSObjectRef 
     return r;
 }
 
+/* globalThis.__barm_read_file(path): a file's text (UTF-8), or undefined. For requires of files
+ * the bundle doesn't hold (`require(dir + "/package.json")`): read where the program runs, as
+ * Node.js does. */
+static JSValueRef bm_js_read_file_fn(JSContextRef ctx, JSObjectRef f, JSObjectRef self, size_t n, const JSValueRef a[], JSValueRef *exc) {
+    (void)f; (void)self; (void)exc;
+    if (n == 0 || !JSValueIsString(ctx, a[0])) return JSValueMakeUndefined(ctx);
+    bm_str path = bm_js_to_str(a[0]);
+    FILE *fp = fopen(path.p->data, "rb");
+    bm_str_release(path);
+    if (!fp) return JSValueMakeUndefined(ctx);
+    bm_sb sb = {0};
+    char buf[65536];
+    size_t got;
+    while ((got = fread(buf, 1, sizeof buf, fp)) > 0) bm_sb_push(&sb, buf, got);
+    fclose(fp);
+    JSStringRef t = bm_js_string_ref(sb.data ? sb.data : "", sb.len, false);
+    bm_sb_free(&sb);
+    JSValueRef v = JSValueMakeString(ctx, t);
+    JSStringRelease(t);
+    return v;
+}
+
+/* globalThis.__barm_compile_source(code, url): a CommonJS module function compiled from source
+ * (a file read from disk, see above). */
+static JSValueRef bm_js_compile_source_fn(JSContextRef ctx, JSObjectRef f, JSObjectRef self, size_t n, const JSValueRef a[], JSValueRef *exc) {
+    (void)f; (void)self;
+    if (n < 2) return JSValueMakeUndefined(ctx);
+    JSStringRef code = JSValueToStringCopy(ctx, a[0], exc);
+    JSStringRef url = JSValueToStringCopy(ctx, a[1], exc);
+    if (!code || !url) return NULL;
+    /* (function (module, exports, require, __filename, __dirname) {<code>\n}) */
+    JSStringRef params[5] = {JSStringCreateWithUTF8CString("module"), JSStringCreateWithUTF8CString("exports"), JSStringCreateWithUTF8CString("require"), JSStringCreateWithUTF8CString("__filename"), JSStringCreateWithUTF8CString("__dirname")};
+    JSObjectRef fn = JSObjectMakeFunction(ctx, NULL, 5, params, code, url, 1, exc);
+    for (int i = 0; i < 5; i++) JSStringRelease(params[i]);
+    JSStringRelease(code);
+    JSStringRelease(url);
+    return fn;
+}
+
 /* globalThis.__barm_source(url): the code of the module at `url` (assert reads the failing
  * expression from it), else undefined. */
 static JSValueRef bm_js_source_fn(JSContextRef ctx, JSObjectRef f, JSObjectRef self, size_t n, const JSValueRef a[], JSValueRef *exc) {
@@ -179,6 +218,8 @@ JSContextRef bm_js(void) {
     bm_js_def(ctx, global, "__barm_source", bm_js_source_fn);
     bm_js_def(ctx, global, "__barm_compile", bm_js_compile_fn);
     bm_js_def(ctx, global, "__barm_name", bm_js_name_fn);
+    bm_js_def(ctx, global, "__barm_read_file", bm_js_read_file_fn);
+    bm_js_def(ctx, global, "__barm_compile_source", bm_js_compile_source_fn);
     bm_js_def(ctx, global, "__barm_map", bm_js_map_fn);
     {
         JSStringRef k = JSStringCreateWithUTF8CString("__barm_count");

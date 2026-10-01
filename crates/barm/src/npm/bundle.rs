@@ -127,7 +127,10 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
                 let id = spec.strip_prefix("node:").unwrap_or(&spec).to_string();
                 if super::node_shims::shim(&id).is_some() || super::resolve::BUILTINS.contains(&id.as_str()) { Ok(Target::Builtin(id)) } else { Err(format!("no shim for \"{spec}\"")) }
             } else {
-                resolver.resolve(&dir, &spec)
+                resolver.set_esm(esm);
+                let r = resolver.resolve(&dir, &spec);
+                resolver.set_esm(false);
+                r
             };
             match resolved {
                 Ok(t) => {
@@ -266,6 +269,25 @@ fn expand_pattern(from_dir: &Path, prefix: &str, suffix: &str) -> Vec<String> {
         from_dir.join(dir_part)
     } else if dir_part.starts_with('/') {
         return Vec::new();
+    } else if dir_part.starts_with('@') && dir_part.matches('/').count() == 1 && suffix.is_empty() {
+        // `require(`@babel/plugin-${name}`)`: the scope's packages that match
+        let mut d = Some(from_dir);
+        let mut out = Vec::new();
+        while let Some(x) = d {
+            if let Ok(entries) = std::fs::read_dir(x.join("node_modules").join(dir_part.trim_end_matches('/'))) {
+                for e in entries.flatten() {
+                    let n = e.file_name().to_string_lossy().into_owned();
+                    if n.starts_with(name_prefix) && e.path().join("package.json").is_file() {
+                        out.push(format!("{dir_part}{n}"));
+                    }
+                }
+                break;
+            }
+            d = x.parent();
+        }
+        out.sort();
+        out.truncate(2000);
+        return out;
     } else {
         let mut segs = dir_part.trim_end_matches('/').splitn(if dir_part.starts_with('@') { 3 } else { 2 }, '/');
         let pkg = if dir_part.starts_with('@') { format!("{}/{}", segs.next().unwrap_or(""), segs.next().unwrap_or("")) } else { segs.next().unwrap_or("").to_string() };
@@ -491,6 +513,44 @@ function __barm_find(spec, from) {
   if (to === undefined) to = __barm_by_spec.get(spec.slice(0, 5) === "node:" ? spec.slice(5) : "node:" + spec);
   return to;
 }
+// A file the bundle doesn't hold, read from disk where the program runs (JSON, or CommonJS:
+// `require(path.join(dir, name))`); its own requires go through the same fallbacks.
+var __barm_disk_cache = new Map();
+function __barm_disk(spec, from) {
+  if (typeof __barm_read_file !== "function" || (spec[0] !== "/" && spec[0] !== ".")) return undefined;
+  var p = __barm_join(__barm_dirname(from), spec);
+  var exts = ["", ".js", ".json", ".cjs", "/index.js", "/index.json"];
+  for (var k = 0; k < exts.length; k++) {
+    var file = p + exts[k];
+    var cached = __barm_disk_cache.get(file);
+    if (cached) return cached.exports;
+    if (/\.(mjs|ts|tsx|mts|node|wasm)$/.test(file)) continue;
+    var text = __barm_read_file(file);
+    if (text === undefined) continue;
+    var module = { exports: {}, id: file, filename: file, loaded: false, children: [], paths: [] };
+    __barm_disk_cache.set(file, module);
+    if (/\.json$/.test(file)) {
+      module.exports = JSON.parse(text);
+    } else {
+      var req = function (s) {
+        var to = __barm_find(s, file);
+        if (to !== undefined) return __barm_load(to);
+        var d = __barm_disk(s, file);
+        if (d !== undefined) return d;
+        var e = new Error("Cannot find module '" + s + "' (from " + file + ")");
+        e.code = "MODULE_NOT_FOUND";
+        throw e;
+      };
+      req.resolve = function (s) { return __barm_join(__barm_dirname(file), s); };
+      req.cache = {};
+      req.extensions = __barm_extensions;
+      __barm_compile_source(text.charCodeAt(0) === 35 ? "//" + text.slice(2) : text, file).call(module.exports, module, module.exports, req, file, __barm_dirname(file));
+    }
+    module.loaded = true;
+    return module.exports;
+  }
+  return undefined;
+}
 function __barm_load(id) {
   var cached = __barm_cache[id];
   if (cached) return cached.exports;
@@ -501,6 +561,10 @@ function __barm_load(id) {
   var require = function (spec) {
     var to = map[spec];
     if (to === undefined && typeof spec === "string") to = __barm_find(spec, name);
+    if (to === undefined && typeof spec === "string") {
+      var disk = __barm_disk(spec, name);
+      if (disk !== undefined) return disk;
+    }
     if (to === undefined) {
       var e = new Error("Cannot find module '" + spec + "' (from " + name + ")");
       e.code = "MODULE_NOT_FOUND";
