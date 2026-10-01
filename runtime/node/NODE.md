@@ -27,6 +27,7 @@ Per-context files also get `privateSymbols` and `perIsolateSymbols`.
 ## Local edits to Node.js files
 
 - `internal/util/debuglog.js`: `testEnabled` is initialized on first use when startup hasn't done it.
+- `internal/util.js`: `getInternalGlobal()` returns the primordial `RegExp`, `Object` and `Array` rather than a second realm from `vm` (none yet).
 
 ## Known differences
 

@@ -22,6 +22,7 @@ const loaders = {
   performance: () => require('internal/bindings/performance'),
   permission: () => require('internal/bindings/permission'),
   process_methods: () => require('internal/bindings/process_methods'),
+  stream_wrap: () => require('internal/bindings/stream_wrap'),
   string_decoder: () => require('internal/bindings/string_decoder'),
   symbols: () => require('internal/bindings/symbols'),
   task_queue: () => require('internal/bindings/task_queue'),
@@ -31,6 +32,8 @@ const loaders = {
   url: () => require('internal/bindings/url'),
   url_pattern: () => require('internal/bindings/url_pattern'),
   util: () => require('internal/bindings/util'),
+  uv: () => require('internal/bindings/uv'),
+  worker: () => require('internal/bindings/worker'),
 };
 
 const bindings = { __proto__: null };
