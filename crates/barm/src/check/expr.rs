@@ -2379,7 +2379,12 @@ impl<'a> Checker<'a> {
             ExprKind::Arrow(f) => {
                 let n = f.params.len();
                 let ps = vec![FnParam { ty: JS, inout: false, optional: false }; n];
-                Some(self.types.func(ps, JS))
+                // a block that returns nothing: `void` (JavaScript sees `undefined`)
+                let ret = match f.body {
+                    crate::ast::ArrowBody::Block(b) if !super::returns_value(self.ast(), b) => VOID,
+                    _ => JS,
+                };
+                Some(self.types.func(ps, ret))
             }
             _ => Some(JS),
         };

@@ -2109,7 +2109,7 @@ pub(crate) fn may_throw(ast: &Ast, s: StmtId) -> bool {
 }
 
 /// Does any `return` in this function body (outside nested arrow functions) carry a value?
-fn returns_value(ast: &Ast, s: StmtId) -> bool {
+pub(crate) fn returns_value(ast: &Ast, s: StmtId) -> bool {
     use crate::ast::StmtKind;
     match &ast.stmt(s).kind {
         StmtKind::Return(v) => v.is_some(),
