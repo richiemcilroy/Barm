@@ -1,0 +1,11 @@
+get 200 OK GET /hello?x=1 1.1 127.0.0.1:PORT 33 keep-alive
+chunked part one, part two chunked {"x-trailer":"end"}
+json 201 {"ok":true} a, b application/json
+post got 100000 bytes: yyyyyyyyyyyyyyyyyyyy text/x
+keep-alive reused 1
+raw "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 14\r\n\r\nGET /raw 1.1 x"
+bad "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"
+pipelined "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\nContent-Length: 13\r\n\r\nGET /p1 1.1 xHTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 13\r\n\r\nGET /p2 1.1 x"
+head 200 "" undefined
+refused ECONNREFUSED connect
+closed
