@@ -1,0 +1,5 @@
+// Start, load zod, validate one object, exit.
+import { z } from "zod"
+
+const User = try z.object({ name: z.string(), age: z.number() })
+console.log((try User.safeParse({ name: "Ada", age: 36 })).success as bool)

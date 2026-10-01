@@ -1,0 +1,5 @@
+{
+  "name": "barm-npm-bench",
+  "private": true,
+  "dependencies": { "zod": "3.25.76" }
+}
