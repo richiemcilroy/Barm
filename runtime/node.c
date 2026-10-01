@@ -2059,6 +2059,176 @@ NATIVE(n_heap_stats) {
     return array(ctx, 3, items);
 }
 
+/* ------------------------------------------------------------------ vm (Node.js's node_contextify.cc)
+ *
+ * Scripts run with JSEvaluateScript, in this context or a new one. A new context is a global
+ * context in the same group (values pass freely between them), whose global object's class
+ * forwards lookups and assignments to the sandbox object first, as Node.js's contextified
+ * global does; the sandbox is held on the global under a symbol key. */
+
+static JSValueRef bm_vm_key;      /* the symbol the sandbox is held under */
+
+/* (reading the key comes back through the global's callbacks: those calls find nothing here and
+ * fall through to the property itself) */
+static JSObjectRef bm_vm_sandbox(JSContextRef ctx, JSObjectRef global) {
+    static bool busy;
+    if (!bm_vm_key || busy) return NULL;
+    busy = true;
+    JSValueRef v = JSObjectGetPropertyForKey(ctx, global, bm_vm_key, NULL);
+    busy = false;
+    return v && JSValueIsObject(ctx, v) ? (JSObjectRef)v : NULL;
+}
+
+static JSValueRef bm_vm_get(JSContextRef ctx, JSObjectRef object, JSStringRef name, JSValueRef *exc) {
+    JSObjectRef sandbox = bm_vm_sandbox(ctx, object);
+    if (!sandbox || !JSObjectHasProperty(ctx, sandbox, name)) return NULL;
+    return JSObjectGetProperty(ctx, sandbox, name, exc);
+}
+
+static bool bm_vm_has(JSContextRef ctx, JSObjectRef object, JSStringRef name) {
+    JSObjectRef sandbox = bm_vm_sandbox(ctx, object);
+    return sandbox && JSObjectHasProperty(ctx, sandbox, name);
+}
+
+static bool bm_vm_set(JSContextRef ctx, JSObjectRef object, JSStringRef name, JSValueRef value, JSValueRef *exc) {
+    JSObjectRef sandbox = bm_vm_sandbox(ctx, object);
+    if (!sandbox) return false;
+    JSObjectSetProperty(ctx, sandbox, name, value, kJSPropertyAttributeNone, exc);
+    return true;
+}
+
+static bool bm_vm_delete(JSContextRef ctx, JSObjectRef object, JSStringRef name, JSValueRef *exc) {
+    JSObjectRef sandbox = bm_vm_sandbox(ctx, object);
+    if (sandbox) JSObjectDeleteProperty(ctx, sandbox, name, exc);
+    return false;
+}
+
+static void bm_vm_names(JSContextRef ctx, JSObjectRef object, JSPropertyNameAccumulatorRef names) {
+    JSObjectRef sandbox = bm_vm_sandbox(ctx, object);
+    if (!sandbox) return;
+    JSPropertyNameArrayRef keys = JSObjectCopyPropertyNames(ctx, sandbox);
+    size_t count = JSPropertyNameArrayGetCount(keys);
+    for (size_t i = 0; i < count; i++) JSPropertyNameAccumulatorAddName(names, JSPropertyNameArrayGetNameAtIndex(keys, i));
+    JSPropertyNameArrayRelease(keys);
+}
+
+static void bm_vm_context_finalize(JSObjectRef o) {
+    JSGlobalContextRef c = JSObjectGetPrivate(o);
+    if (c) JSGlobalContextRelease(c);
+}
+
+static JSClassRef bm_vm_context_class(void) {
+    static JSClassRef cls;
+    if (!cls) {
+        JSClassDefinition def = kJSClassDefinitionEmpty;
+        def.className = "VMContext";
+        def.finalize = bm_vm_context_finalize;
+        cls = JSClassCreate(&def);
+    }
+    return cls;
+}
+
+static JSContextRef bm_vm_target(JSContextRef ctx, size_t n, const JSValueRef a[], size_t i) {
+    if (i < n && JSValueIsObjectOfClass(ctx, a[i], bm_vm_context_class())) {
+        JSGlobalContextRef c = JSObjectGetPrivate((JSObjectRef)a[i]);
+        if (c) return c;
+    }
+    return ctx;
+}
+
+/* makeContext(sandbox) -> a context handle; the new global's lookups go to sandbox first */
+NATIVE(n_vm_make_context) {
+    UNUSED;
+    if (n < 1 || !JSValueIsObject(ctx, a[0])) return undef(ctx);
+    static JSClassRef global_class;
+    if (!global_class) {
+        JSClassDefinition def = kJSClassDefinitionEmpty;
+        def.className = "Object";
+        def.getProperty = bm_vm_get;
+        def.hasProperty = bm_vm_has;
+        def.setProperty = bm_vm_set;
+        def.deleteProperty = bm_vm_delete;
+        def.getPropertyNames = bm_vm_names;
+        global_class = JSClassCreate(&def);
+    }
+    if (!bm_vm_key) {
+        JSStringRef d = JSStringCreateWithUTF8CString("vm sandbox");
+        bm_vm_key = JSValueMakeSymbol(ctx, d);
+        JSStringRelease(d);
+        JSValueProtect(ctx, bm_vm_key);
+    }
+    JSGlobalContextRef c = JSGlobalContextCreateInGroup(JSContextGetGroup(ctx), global_class);
+    JSObjectSetPropertyForKey(c, JSContextGetGlobalObject(c), bm_vm_key, a[0], kJSPropertyAttributeDontEnum, NULL);
+    return JSObjectMake(ctx, bm_vm_context_class(), c);
+}
+
+/* the context's global object */
+NATIVE(n_vm_global) {
+    UNUSED;
+    return JSContextGetGlobalObject(bm_vm_target(ctx, n, a, 0));
+}
+
+/* check(code, filename, line) -> null, or the SyntaxError */
+NATIVE(n_vm_check) {
+    UNUSED;
+    JSStringRef code = JSValueToStringCopy(ctx, n > 0 ? a[0] : undef(ctx), exc);
+    if (!code) return undef(ctx);
+    JSStringRef url = n > 1 ? JSValueToStringCopy(ctx, a[1], NULL) : NULL;
+    JSValueRef err = NULL;
+    bool ok = JSCheckScriptSyntax(ctx, code, url, (int)arg_num(ctx, n, a, 2, 1), &err);
+    JSStringRelease(code);
+    if (url) JSStringRelease(url);
+    return ok || !err ? JSValueMakeNull(ctx) : err;
+}
+
+/* run(code, filename, line, context?) -> the script's completion value (or what it throws) */
+NATIVE(n_vm_run) {
+    UNUSED;
+    JSStringRef code = JSValueToStringCopy(ctx, n > 0 ? a[0] : undef(ctx), exc);
+    if (!code) return undef(ctx);
+    JSStringRef url = n > 1 ? JSValueToStringCopy(ctx, a[1], NULL) : NULL;
+    JSContextRef target = bm_vm_target(ctx, n, a, 3);
+    JSValueRef r = JSEvaluateScript(target, code, NULL, url, (int)arg_num(ctx, n, a, 2, 1), exc);
+    JSStringRelease(code);
+    if (url) JSStringRelease(url);
+    return r ? r : undef(ctx);
+}
+
+/* fn(params [names], body, filename, line, context?) -> a function, as new Function makes one */
+NATIVE(n_vm_fn) {
+    UNUSED;
+    if (n < 2) return undef(ctx);
+    JSContextRef target = bm_vm_target(ctx, n, a, 4);
+    JSStringRef names[64];
+    unsigned count = 0;
+    if (JSValueIsObject(ctx, a[0])) {
+        JSStringRef len_key = JSStringCreateWithUTF8CString("length");
+        unsigned len = (unsigned)JSValueToNumber(ctx, JSObjectGetProperty(ctx, (JSObjectRef)a[0], len_key, NULL), NULL);
+        JSStringRelease(len_key);
+        for (unsigned i = 0; i < len && count < 64; i++) {
+            JSValueRef v = JSObjectGetPropertyAtIndex(ctx, (JSObjectRef)a[0], i, NULL);
+            names[count++] = JSValueToStringCopy(ctx, v, NULL);
+        }
+    }
+    JSStringRef body = JSValueToStringCopy(ctx, a[1], exc);
+    JSStringRef url = n > 2 ? JSValueToStringCopy(ctx, a[2], NULL) : NULL;
+    JSObjectRef f = body ? JSObjectMakeFunction(target, NULL, count, names, body, url, (int)arg_num(ctx, n, a, 3, 1), exc) : NULL;
+    for (unsigned i = 0; i < count; i++) JSStringRelease(names[i]);
+    if (body) JSStringRelease(body);
+    if (url) JSStringRelease(url);
+    return f ? (JSValueRef)f : undef(ctx);
+}
+
+static void bm_node_vm_install(JSContextRef ctx, JSObjectRef native) {
+    JSObjectRef v = JSObjectMake(ctx, NULL, NULL);
+    bm_js_def(ctx, v, "makeContext", n_vm_make_context);
+    bm_js_def(ctx, v, "global", n_vm_global);
+    bm_js_def(ctx, v, "check", n_vm_check);
+    bm_js_def(ctx, v, "run", n_vm_run);
+    bm_js_def(ctx, v, "fn", n_vm_fn);
+    set(ctx, native, "vm", v);
+}
+
 static void bm_node_dns_install(JSContextRef ctx, JSObjectRef native) {
     JSObjectRef d = JSObjectMake(ctx, NULL, NULL);
     bm_js_def(ctx, d, "getaddrinfo", n_dns_getaddrinfo);
@@ -2307,4 +2477,5 @@ void bm_node_install(JSContextRef ctx, JSObjectRef native) {
     bm_node_crypto_install(ctx, native);
     bm_node_zlib_install(ctx, native);
     bm_node_dns_install(ctx, native);
+    bm_node_vm_install(ctx, native);
 }

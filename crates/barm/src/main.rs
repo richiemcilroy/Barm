@@ -339,7 +339,11 @@ fn execute(f: Flags, cmd: BuildCmd) -> ExitCode {
     }
     match cmd {
         BuildCmd::Build => {
-            if let Err(e) = std::fs::copy(&built.binary, &dest) {
+            // (a new file, renamed over the old one: macOS kills a signed binary rewritten in place,
+            // since it keeps the old file's signature)
+            let tmp = dest.with_file_name(format!(".{}.tmp{}", dest.file_name().map_or("barm".into(), |n| n.to_string_lossy()), std::process::id()));
+            if let Err(e) = std::fs::copy(&built.binary, &tmp).and_then(|_| std::fs::rename(&tmp, &dest)) {
+                let _ = std::fs::remove_file(&tmp);
                 eprintln!("error: can't write {}: {e}", dest.display());
                 return ExitCode::from(2);
             }

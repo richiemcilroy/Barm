@@ -1,0 +1,13 @@
+this context 3 object
+var leaks to global 42
+isContext true false true
+sandbox 20 set ["undefined","function","number"]
+runInNewContext 3
+script twice 2 2
+separate realm false true
+syntax SyntaxError
+thrown TypeError inside
+compileFunction 3undefined
+contextExtensions 42
+parsingContext from context
+keys p,q

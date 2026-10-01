@@ -22,6 +22,8 @@ Per-context files also get `privateSymbols` and `perIsolateSymbols`.
   - `serdes` is V8's ValueSerializer wire format (version 15), written in JavaScript: `v8.serialize` writes what Node.js writes, byte for byte, and each reads the other's.
   - `v8` reports JavaScriptCore's heap size and capacity (native `heapStats`, from `JSGetMemoryUsageStatistics`). V8's spaces, flags and profilers read as empty; `heap_utils`'s snapshots throw.
   - `locks` is the Web Locks API's lock manager for this thread. `worker` describes the main thread; starting a `Worker` throws.
+  - `contextify` (vm) runs scripts with JavaScriptCore's `JSEvaluateScript` and makes functions with `JSObjectMakeFunction` (`runtime/node.c`). A context is a new global context in the same context group. Its global object's class looks names up in the sandbox first and assigns to it, as Node.js's contextified global does. V8's code cache, script timeouts and SIGINT watchdogs have no counterpart: cached data is rejected and a timeout doesn't stop a script.
+  - `http_parser` has the method lists and `HTTPParser`'s constants, so `http` and `https` load. `crypto` has what `tls` needs to load (cipher lists, certificate loading).
   - `tcp_wrap` and `pipe_wrap` are placeholders, so `net` loads (`isIP` and the like) until sockets are written.
   - `zlib` runs the codecs Barm vendors (`runtime/compress.c`, a port of Node.js's `src/node_zlib.cc`): zlib, brotli and zstd, with Node.js's modes, errors and messages. An async write runs on a later loop turn instead of a thread pool. A program whose bundle has `zlib` links the codecs. `CompressionStream` and `DecompressionStream` bring `zlib` into a bundle only when another module requires it.
   - `url` parses with the URL Standard's state machine from whatwg-url, not Ada. It reports the same href offsets Ada does, which `internal/url` slices.
@@ -43,6 +45,7 @@ Per-context files also get `privateSymbols` and `perIsolateSymbols`.
 - `internal/util/types.js`: `isKeyObject` and `isCryptoKey` answer false without loading `internal/crypto/keys` (Barm's crypto has neither yet).
 - `internal/primordials.js`: defines `Symbol.dispose` and `Symbol.asyncDispose` when the engine lacks them (JavaScriptCore does), as Node.js once did.
 - `internal/url.js`: blob URLs get their UUIDs from `internal/barm/random` rather than `internal/crypto/random`, so `URL` doesn't bring `crypto` into every bundle.
+- `internal/tls/wrap.js`: `internal/crypto/x509` loads when a peer certificate is asked for, so `tls` and `https` load without Node.js's key objects.
 - `internal/util/debuglog.js`: `testEnabled` is initialized on first use when startup hasn't done it.
 - `internal/util.js`: `getInternalGlobal()` returns the primordial `RegExp`, `Object` and `Array` rather than a second realm from `vm` (none yet).
 

@@ -95,9 +95,12 @@ const {
   validateString,
   validateUint32,
 } = require('internal/validators');
-const {
-  InternalX509Certificate,
-} = require('internal/crypto/x509');
+// (Barm: loaded when a peer's certificate is asked for, so tls loads without crypto's keys)
+let x509;
+const InternalX509Certificate = function(cert) {
+  x509 ??= require('internal/crypto/x509');
+  return new x509.InternalX509Certificate(cert);
+};
 const traceTls = getOptionValue('--trace-tls');
 const tlsKeylog = getOptionValue('--tls-keylog');
 const { appendFile } = require('fs');
