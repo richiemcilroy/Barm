@@ -38,6 +38,7 @@ const loaders = {
   util: () => require('internal/bindings/util'),
   uv: () => require('internal/bindings/uv'),
   worker: () => require('internal/bindings/worker'),
+  zlib: () => require('internal/bindings/zlib'),
 };
 
 const bindings = { __proto__: null };

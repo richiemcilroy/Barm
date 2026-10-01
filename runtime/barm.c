@@ -5141,6 +5141,7 @@ enum { BM_FETCH_DECOMPRESS = 1, BM_FETCH_INSECURE = 2 };
 const bm_tls_ops *bm_tls_impl;
 const bm_codec_ops *bm_codec;
 const bm_crypto_ops *bm_crypto;
+const bm_zs_ops *bm_zs;
 
 typedef struct bm_fr {
     bm_int id;

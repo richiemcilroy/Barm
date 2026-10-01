@@ -145,8 +145,14 @@ lazy('ByteLengthQueuingStrategy', () => require('internal/webstreams/queuingstra
 lazy('CountQueuingStrategy', () => require('internal/webstreams/queuingstrategies').CountQueuingStrategy);
 lazy('TextEncoderStream', () => require('internal/webstreams/encoding').TextEncoderStream);
 lazy('TextDecoderStream', () => require('internal/webstreams/encoding').TextDecoderStream);
-lazy('CompressionStream', () => require('internal/webstreams/compression').CompressionStream);
-lazy('DecompressionStream', () => require('internal/webstreams/compression').DecompressionStream);
+// (zlib: in the bundle only when the program's code names these, so the codecs aren't linked into
+// every program)
+function compression() {
+  const id = 'internal/webstreams/compression';
+  return require(id);
+}
+lazy('CompressionStream', () => compression().CompressionStream);
+lazy('DecompressionStream', () => compression().DecompressionStream);
 lazy('Blob', () => require('internal/blob').Blob);
 lazy('performance', () => require('perf_hooks').performance);
 lazy('PerformanceEntry', () => require('perf_hooks').PerformanceEntry);
