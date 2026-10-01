@@ -35,6 +35,7 @@ Object.defineProperty(g, 'global', { __proto__: null, value: g, writable: true, 
 // loading as it's used
 require('internal/bootstrap/process');
 
+lazy('console', () => require('internal/console/global'));
 lazy('Buffer', () => require('buffer').Buffer);
 lazy('atob', () => require('buffer').atob);
 lazy('btoa', () => require('buffer').btoa);
