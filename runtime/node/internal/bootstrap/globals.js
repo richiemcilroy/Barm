@@ -31,18 +31,9 @@ function lazy(name, load, enumerable = false) {
 
 Object.defineProperty(g, 'global', { __proto__: null, value: g, writable: true, enumerable: false, configurable: true });
 
-// process first: the rest may look at it
-const process = require('internal/bootstrap/process');
-Object.defineProperty(g, 'process', { __proto__: null, value: process, writable: true, enumerable: false, configurable: true });
-require('internal/util/debuglog').initializeDebugEnv(process.env.NODE_DEBUG);
-
-// the tick queue, and the timers the loop drives (Node.js's bootstrap/node.js does the same)
-const { nextTick, runNextTicks } = require('internal/process/task_queues').setupTaskQueue();
-process.nextTick = nextTick;
-{
-  const { processImmediate, processTimers } = require('internal/timers').getTimerCallbacks(runNextTicks);
-  require('internal/bindings/timers').setupTimers(processImmediate, processTimers);
-}
+// process: a plain object (it sets the global itself), with the rest of Node.js's process
+// loading as it's used
+require('internal/bootstrap/process');
 
 lazy('Buffer', () => require('buffer').Buffer);
 lazy('atob', () => require('buffer').atob);
@@ -84,10 +75,14 @@ lazy('DecompressionStream', () => require('internal/webstreams/compression').Dec
 lazy('Blob', () => require('internal/blob').Blob);
 lazy('File', () => require('internal/file').File);
 
-// timers: Barm's event loop drives them (the natives); `timers` adds the Node.js objects
-lazy('setTimeout', () => require('timers').setTimeout);
-lazy('clearTimeout', () => require('timers').clearTimeout);
-lazy('setInterval', () => require('timers').setInterval);
-lazy('clearInterval', () => require('timers').clearInterval);
-lazy('setImmediate', () => require('timers').setImmediate);
-lazy('clearImmediate', () => require('timers').clearImmediate);
+// timers: Barm's event loop drives them (the natives); internal/bindings/timers wires them up
+// on the first one
+function timers() {
+  return require('timers');
+}
+lazy('setTimeout', () => timers().setTimeout);
+lazy('clearTimeout', () => timers().clearTimeout);
+lazy('setInterval', () => timers().setInterval);
+lazy('clearInterval', () => timers().clearInterval);
+lazy('setImmediate', () => timers().setImmediate);
+lazy('clearImmediate', () => timers().clearImmediate);

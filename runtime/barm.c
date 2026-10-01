@@ -3488,6 +3488,18 @@ static void bm_fire_timers(void) {
 
 static bool bm_http_busy(void);
 
+/* Node.js's check phase (setImmediate), for npm code (runtime/node.c): while pending, the loop
+ * runs bm_loop_check once per turn, after timers and I/O, and doesn't block; a ref'd one keeps the
+ * program running. */
+void (*bm_loop_check)(void);
+bool bm_loop_check_pending, bm_loop_check_ref;
+
+static void bm_loop_run_check(void) {
+    if (!bm_loop_check_pending || !bm_loop_check) return;
+    bm_loop_check_pending = false;
+    bm_loop_check();
+}
+
 void bm_async_run(void) {
     for (;;) {
         bm_run_microtasks();
@@ -3497,9 +3509,12 @@ void bm_async_run(void) {
             continue;
         }
         while (bm_ntimers && !bm_timers[0].cb.fn) (void)bm_timer_pop();
-        if (!bm_live_timers) return;
-        if (bm_timers[0].when > bm_loop_update()) bm_sleep_until(bm_timers[0].when);
-        bm_fire_timers();
+        bool check = bm_loop_check_pending;
+        if (!bm_live_timers && !(check && bm_loop_check_ref)) return;
+        if (bm_ntimers && !check && bm_timers[0].when > bm_loop_update()) bm_sleep_until(bm_timers[0].when);
+        if (bm_ntimers) bm_fire_timers();
+        bm_run_microtasks();
+        bm_loop_run_check();
     }
 }
 
@@ -4297,7 +4312,7 @@ static void bm_http_loop(void) {
         if (kevent(bm_http_q, &ev, 1, NULL, 0, NULL) != 0) _exit(0);
     }
 #endif
-    while (bm_http_active > 0 || bm_http_conns || bm_io_refs > 0) {
+    while (bm_http_active > 0 || bm_http_conns || bm_io_refs > 0 || (bm_loop_check_pending && bm_loop_check_ref)) {
         bm_run_microtasks();
         /* connections whose late responses are ready */
         while (bm_http_dirty) {
@@ -4307,7 +4322,7 @@ static void bm_http_loop(void) {
             bm_http_service(c, false, false);
             bm_run_microtasks();
         }
-        if (!(bm_http_active > 0 || bm_http_conns || bm_io_refs > 0)) break;
+        if (!(bm_http_active > 0 || bm_http_conns || bm_io_refs > 0 || (bm_loop_check_pending && bm_loop_check_ref))) break;
         if (bm_out_len) bm_out_flush(); /* handler logs reach pipes and files promptly */
         while (bm_ntimers && !bm_timers[0].cb.fn) (void)bm_timer_pop();
         /* wait for I/O, or until the next timer is due */
@@ -4324,10 +4339,12 @@ static void bm_http_loop(void) {
             EV_SET(&tch, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT, NOTE_NSECONDS | NOTE_CRITICAL, (int64_t)wait, &bm_http_timer_tag);
             nch = 1;
         }
-        int n = kevent(bm_http_q, &tch, nch, events, 256, timed && due <= now_ms ? &zero : NULL);
+        /* (a pending check phase doesn't wait) */
+        int n = kevent(bm_http_q, &tch, nch, events, 256, (timed && due <= now_ms) || bm_loop_check_pending ? &zero : NULL);
 #else
         int timeout = -1;
         if (timed) timeout = due > now_ms ? (int)(due - now_ms) : 0;
+        if (bm_loop_check_pending) timeout = 0; /* (a pending check phase doesn't wait) */
         int n = epoll_wait(bm_http_q, events, 256, timeout);
 #endif
         if (n < 0) { if (errno == EINTR) continue; break; }
@@ -4373,6 +4390,8 @@ static void bm_http_loop(void) {
             }
         }
         if (bm_io_after_batch) bm_io_after_batch();
+        bm_run_microtasks();
+        bm_loop_run_check();
     }
     /* the queue stays: pooled client connections are still registered with it */
 }

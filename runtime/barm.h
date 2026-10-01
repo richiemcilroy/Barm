@@ -392,6 +392,11 @@ void bm_queue_microtask(bm_fn callback);        /* queueMicrotask(cb) (retains c
 bm_promise *bm_promise_all(struct bm_arr ps, const bm_type *et, const bm_type *arr_t);
 bm_promise *bm_promise_race(struct bm_arr ps, const bm_type *et);
 bm_int bm_set_timer(bm_fn callback, double ms, bool repeat);   /* setTimeout/setInterval (retains cb) */
+/* Node.js's check phase (setImmediate) for npm code: set bm_loop_check_pending and the loop runs
+ * bm_loop_check once, after timers and I/O, without blocking; bm_loop_check_ref: it keeps the
+ * program running. */
+extern void (*bm_loop_check)(void);
+extern bool bm_loop_check_pending, bm_loop_check_ref;
 void bm_clear_timer(bm_int id);
 /* Runs the event loop until nothing is left: microtasks, timers and servers. */
 void bm_async_run(void);

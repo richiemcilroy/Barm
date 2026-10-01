@@ -1,13 +1,15 @@
 'use strict';
 
-// The `process` global: an EventEmitter with Node.js's properties, over Barm's natives
-// (globalThis.__barm_native, which runtime/node.c installs). The natives this uses:
+// The `process` global, over Barm's natives (globalThis.__barm_native, which runtime/node.c
+// installs). It costs one native call to make: the fields are plain values, and everything that
+// needs another module (EventEmitter, nextTick, warnings, stdio) loads it on first use, so a
+// package that only reads process.env starts nothing else. The natives this uses:
 //   info()          { argv, execArgv, execPath, pid, ppid, platform, arch, env, title }
 //   cwd() / chdir(path) / exit(code) / umask(mask)
-//   hrtime()        nanoseconds since an arbitrary start (a number)
+//   hrtime()        nanoseconds since the program started (a number)
 //   write(fd, data) data is a string or a Uint8Array; returns bytes written
 //   isatty(fd) / windowSize(fd) -> [columns, rows]
-//   memoryUsage()   { rss, heapTotal, heapUsed, external, arrayBuffers }
+//   memoryUsage()   { rss, heapTotal, heapUsed, external, arrayBuffers, available }
 //   cpuUsage()      [user µs, system µs]
 //   kill(pid, signal) / ids() -> [uid, gid, euid, egid]
 
@@ -17,11 +19,25 @@ const info = native.info();
 
 const VERSION = 'v26.3.0';
 
-// The object exists (as the global) before any module loads: modules read process.platform,
-// process.env and process.versions as they load, events among them. It becomes an
-// EventEmitter at the end.
 const process = {};
 Object.defineProperty(globalThis, 'process', { __proto__: null, value: process, writable: true, enumerable: false, configurable: true });
+Object.defineProperty(process, Symbol.toStringTag, { __proto__: null, value: 'process', writable: false, enumerable: false, configurable: true });
+
+function lazyProperty(name, make) {
+  Object.defineProperty(process, name, {
+    __proto__: null,
+    enumerable: true,
+    configurable: true,
+    get() {
+      const value = make();
+      Object.defineProperty(process, name, { __proto__: null, value, writable: true, enumerable: true, configurable: true });
+      return value;
+    },
+    set(value) {
+      Object.defineProperty(process, name, { __proto__: null, value, writable: true, enumerable: true, configurable: true });
+    },
+  });
+}
 
 process.title = info.title ?? 'barm';
 process.version = VERSION;
@@ -49,11 +65,11 @@ process.ppid = info.ppid;
 process.exitCode = undefined;
 process.config = { target_defaults: {}, variables: { node_shared_openssl: false, v8_enable_i18n_support: 0 } };
 process.features = { inspector: false, debug: false, uv: true, ipv6: true, tls_alpn: true, tls_sni: true, tls_ocsp: false, tls: true, cached_builtins: true, require_module: true, typescript: false };
-process.allowedNodeEnvironmentFlags = new Set();
 process.debugPort = 9229;
 process.throwDeprecation = false;
 process.noDeprecation = false;
 process.traceDeprecation = false;
+lazyProperty('allowedNodeEnvironmentFlags', () => new Set());
 
 process.cwd = () => native.cwd();
 process.chdir = (dir) => {
@@ -90,6 +106,8 @@ process.resourceUsage = () => {
   const [userCPUTime, systemCPUTime] = native.cpuUsage();
   return { userCPUTime, systemCPUTime, maxRSS: Math.round(native.memoryUsage().rss / 1024) };
 };
+process.constrainedMemory = () => 0;
+process.availableMemory = () => native.memoryUsage().available ?? 0;
 
 const ids = () => native.ids();
 process.getuid = () => ids()[0];
@@ -108,14 +126,19 @@ process.exit = (code) => {
   const exitCode = process.exitCode ?? 0;
   if (!process._exiting) {
     process._exiting = true;
-    process.emit('exit', exitCode);
+    if (emitter) process.emit('exit', exitCode);
   }
   native.exit(process.exitCode ?? exitCode);
 };
 process.reallyExit = (code) => native.exit(code);
 process.abort = () => native.exit(134);
 
-// (nextTick: globals.js, which sets up the tick queue and timers together)
+// nextTick: the tick queue starts on first use
+process.nextTick = function nextTick(...args) {
+  const { nextTick } = require('internal/bootstrap/ticks')();
+  process.nextTick = nextTick;
+  return nextTick(...args);
+};
 
 process.emitWarning = (...args) => require('internal/process/warning').emitWarning(...args);
 process.binding = (name) => {
@@ -129,9 +152,39 @@ process.getActiveResourcesInfo = () => [];
 process.setUncaughtExceptionCaptureCallback = (fn) => { process._uncaughtCapture = fn; };
 process.hasUncaughtExceptionCaptureCallback = () => typeof process._uncaughtCapture === 'function';
 process.setSourceMapsEnabled = () => {};
-process.report = { getReport: () => ({}) };
-process.constrainedMemory = () => 0;
-process.availableMemory = () => native.memoryUsage().available ?? 0;
+lazyProperty('report', () => ({ getReport: () => ({}) }));
+
+// EventEmitter: process becomes one (events loads) when first used as one
+const emitterMethods = [
+  'on', 'once', 'off', 'addListener', 'removeListener', 'removeAllListeners', 'emit', 'listeners',
+  'rawListeners', 'listenerCount', 'prependListener', 'prependOnceListener', 'eventNames',
+  'setMaxListeners', 'getMaxListeners',
+];
+let emitter = false;
+function becomeEmitter() {
+  if (emitter) return;
+  emitter = true;
+  const EventEmitter = require('events');
+  for (const m of emitterMethods) delete process[m];
+  Object.setPrototypeOf(process, Object.create(EventEmitter.prototype, {
+    [Symbol.toStringTag]: { value: 'process', configurable: true },
+  }));
+  EventEmitter.init.call(process);
+}
+for (const m of emitterMethods) {
+  Object.defineProperty(process, m, {
+    __proto__: null,
+    enumerable: false,
+    configurable: true,
+    writable: true,
+    value: function (...args) {
+      becomeEmitter();
+      return process[m](...args);
+    },
+  });
+}
+// for the host: whether anything can be listening (to 'exit' and 'beforeExit')
+Object.defineProperty(process, '_barmEmitter', { __proto__: null, get: () => emitter, enumerable: false, configurable: true });
 
 // stdio: synchronous writes to fds 1 and 2 (as Node.js does for files, and pipes on macOS)
 function stdioStream(fd) {
@@ -148,35 +201,14 @@ function stdioStream(fd) {
     decodeStrings: false,
   });
   stream.fd = fd;
-  stream._type = native.isatty(fd) ? 'tty' : 'fs';
-  stream.isTTY = native.isatty(fd) || undefined;
-  if (stream.isTTY) {
-    const size = () => native.windowSize(fd);
-    Object.defineProperty(stream, 'columns', { get: () => size()[0], enumerable: true, configurable: true });
-    Object.defineProperty(stream, 'rows', { get: () => size()[1], enumerable: true, configurable: true });
-    stream.getWindowSize = size;
-    stream.hasColors = (count = 16) => count <= 256 && !('NO_COLOR' in process.env);
-    stream.getColorDepth = () => ('NO_COLOR' in process.env ? 1 : 8);
-  }
+  stream._type = 'fs';
   stream._isStdio = true;
   stream.destroySoon = stream.destroy;
   stream._destroy = (err, cb) => cb(err);
   return stream;
 }
-
-let stdout, stderr, stdin;
-Object.defineProperty(process, 'stdout', { get: () => (stdout ??= stdioStream(1)), enumerable: true, configurable: true });
-Object.defineProperty(process, 'stderr', { get: () => (stderr ??= stdioStream(2)), enumerable: true, configurable: true });
-Object.defineProperty(process, 'stdin', {
-  get: () => (stdin ??= native.stdin ? native.stdin() : new (require('stream').Readable)({ read() { this.push(null); } })),
-  enumerable: true,
-  configurable: true,
-});
-
-const EventEmitter = require('events');
-Object.setPrototypeOf(process, Object.create(EventEmitter.prototype, {
-  [Symbol.toStringTag]: { value: 'process', configurable: true },
-}));
-EventEmitter.init.call(process);
+lazyProperty('stdout', () => stdioStream(1));
+lazyProperty('stderr', () => stdioStream(2));
+lazyProperty('stdin', () => (native.stdin ? native.stdin() : new (require('stream').Readable)({ read() { this.push(null); } })));
 
 module.exports = process;

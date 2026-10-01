@@ -11,9 +11,10 @@
 const kHasTickScheduled = 0;
 const kHasRejectionToWarn = 1;
 
-const enqueue = typeof globalThis.queueMicrotask === 'function' && !globalThis.queueMicrotask.__barm
-  ? globalThis.queueMicrotask.bind(globalThis)
-  : (fn) => { Promise.resolve().then(fn); };
+// (promise jobs: JavaScriptCore has no queueMicrotask of its own, and globalThis.queueMicrotask
+// is Node.js's, which is built on this)
+const resolved = Promise.resolve();
+const enqueue = (fn) => { resolved.then(fn); };
 
 let tickCallback = null;
 let drainQueued = false;
