@@ -3006,6 +3006,192 @@ NATIVE(n_proc_release) {
     return undef(ctx);
 }
 
+/* ------------------------------------------------------------------ fetch (Barm's HTTP client,
+ * barm.c, for the fetch() global's Request and Response in internal/barm/fetch.js): a request is
+ * a handle whose finalizer frees it; each wait calls back from the loop once its promise settles */
+
+static void bm_node_fetch_finalize(JSObjectRef o) {
+    bm_int *id = JSObjectGetPrivate(o);
+    if (!id) return;
+    bm_native_fetchFree(*id);
+    free(id);
+}
+
+static JSClassRef bm_node_fetch_class(void) {
+    static JSClassRef cls;
+    if (!cls) {
+        JSClassDefinition def = kJSClassDefinitionEmpty;
+        def.className = "FetchRequest";
+        def.finalize = bm_node_fetch_finalize;
+        cls = JSClassCreate(&def);
+    }
+    return cls;
+}
+
+static bm_int bm_node_fetch_id(JSContextRef ctx, size_t n, const JSValueRef a[]) {
+    if (n < 1 || !JSValueIsObjectOfClass(ctx, a[0], bm_node_fetch_class())) return 0;
+    bm_int *id = JSObjectGetPrivate((JSObjectRef)a[0]);
+    return id ? *id : 0;
+}
+
+static bm_str bm_node_arg_str(JSContextRef ctx, size_t n, const JSValueRef a[], size_t i) {
+    uint8_t *p;
+    size_t len;
+    if (i < n && JSValueIsObject(ctx, a[i]) && bm_js_bytes_view(a[i], &p, &len)) return bm_str_from((const char *)p, len);
+    char *s = i < n && !JSValueIsNull(ctx, a[i]) && !JSValueIsUndefined(ctx, a[i]) ? arg_cstr(ctx, n, a, i) : NULL;
+    bm_str r = s ? bm_str_from(s, strlen(s)) : BM_EMPTY_STR;
+    free(s);
+    return r;
+}
+
+/* fetchStart(method, url, wire headers, body bytes|string|null, redirect, flags, ca, unix, proxy) -> handle */
+NATIVE(n_fetch_start) {
+    UNUSED;
+    bm_str args[9];
+    for (size_t i = 0; i < 9; i++) args[i] = i == 4 || i == 5 ? BM_EMPTY_STR : bm_node_arg_str(ctx, n, a, i);
+    bm_int id = bm_native_fetchStart(args[0], args[1], args[2], args[3], (bm_int)arg_num(ctx, n, a, 4, 0), (bm_int)arg_num(ctx, n, a, 5, 1),
+                                     args[6], args[7], args[8]);
+    for (size_t i = 0; i < 9; i++) bm_str_release(args[i]);
+    bm_int *box = malloc(sizeof *box);
+    *box = id;
+    return JSObjectMake(ctx, bm_node_fetch_class(), box);
+}
+
+/* a promise's int result to a JS callback */
+typedef struct {
+    bm_promise *p;
+    JSObjectRef cb;
+} bm_node_fetch_wait;
+
+static void bm_node_fetch_settled(void *a, void *b) {
+    (void)b;
+    bm_node_fetch_wait *w = a;
+    double v = w->p->state == BM_FULFILLED ? (double)*(bm_int *)bm_promise_value(w->p) : -1;
+    bm_promise_release(w->p);
+    bm_io_refs--;
+    JSObjectRef cb = w->cb;
+    free(w);
+    JSValueRef arg = JSValueMakeNumber(bm_js_ctx, v);
+    bm_node_call_args(cb, 1, &arg);
+    JSValueUnprotect(bm_js_ctx, cb);
+}
+
+static JSValueRef bm_node_fetch_on(JSContextRef ctx, bm_promise *p, JSValueRef cb) {
+    bm_node_fetch_wait *w = malloc(sizeof *w);
+    w->p = p;
+    w->cb = (JSObjectRef)cb;
+    JSValueProtect(ctx, cb);
+    /* (pending JS callbacks keep the program running) */
+    bm_io_refs++;
+    bm_promise_on(p, bm_node_fetch_settled, w, NULL);
+    return undef(ctx);
+}
+
+/* fetchWait(handle, cb(0 head in | -1 failed | -2 aborted)) */
+NATIVE(n_fetch_wait) {
+    UNUSED;
+    bm_int id = bm_node_fetch_id(ctx, n, a);
+    if (!id || n < 2) return undef(ctx);
+    return bm_node_fetch_on(ctx, bm_native_fetchWait(id), a[1]);
+}
+
+/* fetchBodyWait(handle, cb(0 | -1 | -2)): the whole body is in */
+NATIVE(n_fetch_body_wait) {
+    UNUSED;
+    bm_int id = bm_node_fetch_id(ctx, n, a);
+    if (!id || n < 2) return undef(ctx);
+    return bm_node_fetch_on(ctx, bm_native_fetchBodyWait(id), a[1]);
+}
+
+/* fetchRead(handle, cb(bytes waiting > 0 | 0 the end | < 0 failed)) */
+NATIVE(n_fetch_read) {
+    UNUSED;
+    bm_int id = bm_node_fetch_id(ctx, n, a);
+    if (!id || n < 2) return undef(ctx);
+    return bm_node_fetch_on(ctx, bm_native_fetchRead(id), a[1]);
+}
+
+/* fetchTake(handle) -> the bytes that have arrived */
+NATIVE(n_fetch_take) {
+    UNUSED;
+    bm_int id = bm_node_fetch_id(ctx, n, a);
+    bm_arr arr = id ? bm_native_fetchTake(id) : BM_EMPTY_ARR;
+    JSValueRef r = bm_js_bytes_copy(arr.p ? arr.p->data : (const unsigned char *)"", (size_t)arr.len);
+    bm_arr_release(arr, &bm_type_u8);
+    return r;
+}
+
+/* fetchBody(handle) -> the whole body (moved out) */
+NATIVE(n_fetch_body) {
+    UNUSED;
+    bm_int id = bm_node_fetch_id(ctx, n, a);
+    if (!id) return bm_js_bytes_copy("", 0);
+    bm_str body = bm_native_fetchBody(id);
+    JSValueRef r = bm_js_bytes_copy(body.p->data, (size_t)body.p->len);
+    bm_str_release(body);
+    return r;
+}
+
+static JSValueRef bm_node_str_value(JSContextRef ctx, bm_str s) {
+    JSStringRef js = JSStringCreateWithUTF8CString(s.p->data);
+    JSValueRef v = JSValueMakeString(ctx, js);
+    JSStringRelease(js);
+    bm_str_release(s);
+    return v;
+}
+
+/* fetchInfo(handle) -> [status, statusText, wire headers, url, redirected] */
+NATIVE(n_fetch_info) {
+    UNUSED;
+    bm_int id = bm_node_fetch_id(ctx, n, a);
+    if (!id) return undef(ctx);
+    JSValueRef items[5] = {
+        num(ctx, (double)bm_native_fetchStatus(id)),
+        bm_node_str_value(ctx, bm_native_fetchStatusText(id)),
+        bm_node_str_value(ctx, bm_native_fetchHeaders(id)),
+        bm_node_str_value(ctx, bm_native_fetchUrl(id)),
+        JSValueMakeBoolean(ctx, bm_native_fetchRedirected(id)),
+    };
+    return array(ctx, 5, items);
+}
+
+/* fetchError(handle) -> [code, message] */
+NATIVE(n_fetch_error) {
+    UNUSED;
+    bm_int id = bm_node_fetch_id(ctx, n, a);
+    if (!id) return undef(ctx);
+    JSValueRef items[2] = { bm_node_str_value(ctx, bm_native_fetchErrorCode(id)), bm_node_str_value(ctx, bm_native_fetchErrorMessage(id)) };
+    return array(ctx, 2, items);
+}
+
+NATIVE(n_fetch_abort) {
+    UNUSED;
+    bm_int id = bm_node_fetch_id(ctx, n, a);
+    if (id) bm_native_fetchAbort(id);
+    return undef(ctx);
+}
+
+/* tls: whether the program links Barm's TLS client (https works) */
+NATIVE(n_fetch_tls) {
+    UNUSED;
+    return JSValueMakeBoolean(ctx, bm_tls_impl != NULL);
+}
+
+static void bm_node_fetch_install(JSContextRef ctx, JSObjectRef native) {
+    JSObjectRef f = JSObjectMake(ctx, NULL, NULL);
+    bm_js_def(ctx, f, "start", n_fetch_start);
+    bm_js_def(ctx, f, "wait", n_fetch_wait);
+    bm_js_def(ctx, f, "bodyWait", n_fetch_body_wait);
+    bm_js_def(ctx, f, "read", n_fetch_read);
+    bm_js_def(ctx, f, "take", n_fetch_take);
+    bm_js_def(ctx, f, "body", n_fetch_body);
+    bm_js_def(ctx, f, "info", n_fetch_info);
+    bm_js_def(ctx, f, "error", n_fetch_error);
+    bm_js_def(ctx, f, "abort", n_fetch_abort);
+    bm_js_def(ctx, f, "tls", n_fetch_tls);
+    set(ctx, native, "fetch", f);
+}
+
 static void bm_node_streams_install(JSContextRef ctx, JSObjectRef native) {
     JSObjectRef st = JSObjectMake(ctx, NULL, NULL);
     bm_js_def(ctx, st, "open", n_stream_open);
@@ -3455,4 +3641,5 @@ void bm_node_install(JSContextRef ctx, JSObjectRef native) {
     bm_js_def(ctx, native, "setFatalHandler", n_set_fatal_handler);
     bm_js_def(ctx, native, "fatal", n_fatal);
     bm_node_streams_install(ctx, native);
+    bm_node_fetch_install(ctx, native);
 }

@@ -156,6 +156,17 @@ function compression() {
 lazy('CompressionStream', () => compression().CompressionStream);
 lazy('DecompressionStream', () => compression().DecompressionStream);
 lazy('Blob', () => require('internal/blob').Blob);
+// fetch() and its classes (internal/barm/fetch, over Barm's HTTP client): in the bundle only
+// when the program's code names them, so the TLS client isn't linked into every program
+function fetchModule() {
+  const id = 'internal/barm/fetch';
+  return require(id);
+}
+lazy('fetch', () => fetchModule().fetch);
+lazy('Headers', () => fetchModule().Headers);
+lazy('Request', () => fetchModule().Request);
+lazy('Response', () => fetchModule().Response);
+lazy('FormData', () => fetchModule().FormData);
 lazy('performance', () => require('perf_hooks').performance);
 lazy('PerformanceEntry', () => require('perf_hooks').PerformanceEntry);
 lazy('PerformanceMark', () => require('perf_hooks').PerformanceMark);

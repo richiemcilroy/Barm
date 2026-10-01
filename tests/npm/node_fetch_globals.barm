@@ -1,0 +1,6 @@
+import run from "node-fetch-globals"
+
+async function main() {
+  // fetch() used by an npm package
+  try await (try run())
+}

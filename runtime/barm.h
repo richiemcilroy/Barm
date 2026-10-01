@@ -363,6 +363,7 @@ static inline void bm_promise_release(bm_promise *p) { if (p && --p->rc == 0) bm
 void bm_promise_resolve(bm_promise *p, const void *value);     /* copies and retains the value */
 void bm_promise_resolve_move(bm_promise *p, void *value);      /* takes the value (no retain) */
 void bm_promise_reject(bm_promise *p, void *err);              /* takes the error */
+void bm_promise_on(bm_promise *p, void (*fn)(void *, void *), void *a, void *b);  /* fn(a, b) as a microtask once p settles */
 static inline void *bm_promise_value(bm_promise *p) { return p->value; }
 bm_env *bm_promise_resolver(bm_promise *p);                     /* env of a `resolve`/`reject` closure: holds p */
 static inline bm_promise *bm_resolver_promise(bm_env *env) { return *(bm_promise **)(env + 1); }

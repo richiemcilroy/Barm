@@ -3134,6 +3134,8 @@ static void bm_promise_react(bm_promise *p, void (*fn)(void *, void *), void *a,
     p->more[p->nmore++] = (bm_reaction){fn, a, b};
 }
 
+void bm_promise_on(bm_promise *p, void (*fn)(void *, void *), void *a, void *b) { bm_promise_react(p, fn, a, b); }
+
 void bm_promise_resolve(bm_promise *p, const void *value) {
     if (p->state != BM_PENDING) return;
     size_t size = p->vt ? p->vt->size : 0;
