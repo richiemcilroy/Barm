@@ -158,8 +158,23 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
         // carry them): bundled when a package's code mentions one, and mapped there (a require
         // the bundler didn't see finds a module through another's map).
         if !in_shim {
+            // (the code's tokens, once a name shows up in its text: comments, strings and
+            // `obj.fetch` don't count)
+            let mut toks: Option<Vec<super::lex::Tok>> = None;
             for (global, shim) in LAZY_GLOBALS {
-                if body.contains(global) && super::node_shims::shim(shim).is_some() && !map.iter().any(|(s, _)| s == shim) {
+                if !body.contains(global) || map.iter().any(|(s, _)| s == shim) || super::node_shims::shim(shim).is_none() {
+                    continue;
+                }
+                let toks = toks.get_or_insert_with(|| super::lex::tokenize(&body).unwrap_or_default());
+                // `subtle` is reached as `crypto.subtle`; the others are globals of their own
+                let member = *global == "subtle";
+                let named = toks.iter().enumerate().any(|(i, t)| {
+                    t.kind == super::lex::Kind::Ident && t.text(&body) == *global && {
+                        let after_dot = i > 0 && matches!(toks[i - 1].text(&body), "." | "?.");
+                        after_dot == member
+                    }
+                });
+                if named {
                     let to = add(&mut modules, &mut index, &mut queue, Target::Builtin(shim.to_string()));
                     map.push((shim.to_string(), to));
                 }
