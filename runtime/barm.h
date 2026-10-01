@@ -563,6 +563,29 @@ typedef struct bm_crypto_ops {
 extern const bm_crypto_ops *bm_crypto;
 extern const bm_crypto_ops bm_crypto_table;
 void bm_crypto_install(void);
+/* Compression streams for npm packages' `zlib` (runtime/compress.c, in the same archive): set by
+ * bm_zlib_install. A stream is opened in one of Node.js's modes (1 deflate, 2 inflate, 3 gzip,
+ * 4 gunzip, 5 deflate raw, 6 inflate raw, 7 unzip, 8 brotli decode, 9 brotli encode, 10 zstd
+ * compress, 11 zstd decompress), initialized for its kind, then written: each write runs the
+ * codec over in into out with the flush value, reports what's left of each, and check() then
+ * says whether it failed, with Node.js's message and code. A failed init, params or reset
+ * returns the error (message NULL: none). */
+typedef struct bm_zstream bm_zstream;
+typedef struct bm_zs_error { const char *message; const char *code; int err; } bm_zs_error;
+typedef struct bm_zs_ops {
+    bm_zstream *(*open)(int mode);
+    void (*init_zlib)(bm_zstream *z, int window_bits, int level, int mem_level, int strategy, const uint8_t *dict, size_t n);
+    bm_zs_error (*init_brotli)(bm_zstream *z, const uint32_t *params, size_t n, const uint8_t *dict, size_t dict_len);
+    bm_zs_error (*init_zstd)(bm_zstream *z, const uint32_t *params, size_t n, uint64_t pledged, const uint8_t *dict, size_t dict_len);
+    void (*write)(bm_zstream *z, int flush, const uint8_t *in, uint32_t in_len, uint8_t *out, uint32_t out_len, uint32_t *avail_in, uint32_t *avail_out);
+    bm_zs_error (*check)(bm_zstream *z);
+    bm_zs_error (*params)(bm_zstream *z, int level, int strategy);
+    bm_zs_error (*reset)(bm_zstream *z);
+    void (*close)(bm_zstream *z);
+    uint32_t (*crc32)(uint32_t crc, const uint8_t *p, size_t n);
+} bm_zs_ops;
+extern const bm_zs_ops *bm_zs;
+void bm_zlib_install(void);
 void bm_tls_install(void);
 bm_str bm_native_bytesToString(bm_arr bytes);
 bm_arr bm_native_stringToBytes(bm_str s);

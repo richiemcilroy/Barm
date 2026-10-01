@@ -161,7 +161,7 @@ function lazyBlob() {
 
 function lazyCryptoRandom() {
   try {
-    cryptoRandom ??= require('internal/crypto/random');
+    cryptoRandom ??= require('internal/barm/random');
   } catch {
     // If Node.js built without crypto support, we'll fall
     // through here and handle it later.

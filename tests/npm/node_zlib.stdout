@@ -1,0 +1,23 @@
+deflateSync true true
+gzipSync true true
+deflateRawSync true true
+brotliCompressSync true true
+zstdCompressSync true true
+deflate bytes 789c4b4c4a0600024d0127 4b4c4a0600 1f8b0800
+brotli bytes 0b018061626303 0b018061626303
+zstd bytes 28b52ffd2003190000616263
+unzip g d
+multi-member one two
+dictionary true
+bad data Error Z_DATA_ERROR -3 incorrect header check
+truncated Error Z_BUF_ERROR -5 unexpected end of file
+missing dict Error Z_NEED_DICT 2 Missing dictionary
+bad brotli Error Z_BUF_ERROR -5 unexpected end of file
+bad zstd Error ZSTD_error_prefix_unknown 10 Unknown frame descriptor
+bad level RangeError ERR_OUT_OF_RANGE undefined The value of "options.level" is out of range. It must be >= -1 and <= 9. Received 42
+crc32 907060870 2217769622
+constants 9 2 number -3
+async deflate null true
+promisified true
+async error Z_DATA_ERROR incorrect header check
+stream streamed chunks

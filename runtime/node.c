@@ -1581,6 +1581,181 @@ NATIVE(n_crypto_equal) {
     return JSValueMakeBoolean(ctx, d == 0);
 }
 
+/* ------------------------------------------------------------------ zlib (runtime/compress.c, through
+ * bm_zs: there when the program's bundle has zlib) */
+
+static void bm_node_zs_finalize(JSObjectRef o) {
+    bm_zstream *z = JSObjectGetPrivate(o);
+    if (z && bm_zs) bm_zs->close(z);
+}
+
+static JSClassRef bm_node_zs_class(void) {
+    static JSClassRef cls;
+    if (!cls) {
+        JSClassDefinition def = kJSClassDefinitionEmpty;
+        def.className = "ZlibHandle";
+        def.finalize = bm_node_zs_finalize;
+        cls = JSClassCreate(&def);
+    }
+    return cls;
+}
+
+static bm_zstream *bm_node_zs_of(JSContextRef ctx, size_t n, const JSValueRef a[]) {
+    if (n < 1 || !JSValueIsObjectOfClass(ctx, a[0], bm_node_zs_class())) return NULL;
+    return JSObjectGetPrivate((JSObjectRef)a[0]);
+}
+
+/* an error as [message, code, errno], or null for none */
+static JSValueRef bm_node_zs_error(JSContextRef ctx, bm_zs_error e) {
+    if (!e.message) return JSValueMakeNull(ctx);
+    JSValueRef items[3] = { str(ctx, e.message), str(ctx, e.code ? e.code : ""), num(ctx, e.err) };
+    return array(ctx, 3, items);
+}
+
+/* open(mode) -> handle */
+NATIVE(n_zlib_open) {
+    UNUSED;
+    if (!bm_zs) {
+        JSValueRef msg = str(ctx, "zlib is not available in this program (it was built without the codecs)");
+        *exc = JSObjectMakeError(ctx, 1, &msg, NULL);
+        return undef(ctx);
+    }
+    bm_zstream *z = bm_zs->open((int)arg_num(ctx, n, a, 0, 0));
+    return JSObjectMake(ctx, bm_node_zs_class(), z);
+}
+
+/* initZlib(handle, windowBits, level, memLevel, strategy, dictionary?) */
+NATIVE(n_zlib_init_zlib) {
+    UNUSED;
+    bm_zstream *z = bm_node_zs_of(ctx, n, a);
+    if (!z) return undef(ctx);
+    uint8_t *dict = NULL;
+    size_t dl = 0;
+    if (n > 5) bm_js_bytes_view(a[5], &dict, &dl);
+    bm_zs->init_zlib(z, (int)arg_num(ctx, n, a, 1, 15), (int)arg_num(ctx, n, a, 2, -1), (int)arg_num(ctx, n, a, 3, 8), (int)arg_num(ctx, n, a, 4, 0),
+                     dict, dict ? dl : 0);
+    return undef(ctx);
+}
+
+/* (a Uint32Array's values) */
+static uint32_t *bm_node_u32s(JSValueRef v, size_t *count) {
+    uint8_t *p;
+    size_t len;
+    if (!bm_js_bytes_view(v, &p, &len)) {
+        *count = 0;
+        return NULL;
+    }
+    *count = len / 4;
+    return (uint32_t *)p;
+}
+
+/* initBrotli(handle, params Uint32Array, dictionary?) -> error or null */
+NATIVE(n_zlib_init_brotli) {
+    UNUSED;
+    bm_zstream *z = bm_node_zs_of(ctx, n, a);
+    if (!z || n < 2) return undef(ctx);
+    size_t count;
+    uint32_t *params = bm_node_u32s(a[1], &count);
+    uint8_t *dict = NULL;
+    size_t dl = 0;
+    if (n > 2) bm_js_bytes_view(a[2], &dict, &dl);
+    return bm_node_zs_error(ctx, bm_zs->init_brotli(z, params, count, dict, dict ? dl : 0));
+}
+
+/* initZstd(handle, params Uint32Array, pledgedSrcSize (-1: unknown), dictionary?) -> error or null */
+NATIVE(n_zlib_init_zstd) {
+    UNUSED;
+    bm_zstream *z = bm_node_zs_of(ctx, n, a);
+    if (!z || n < 2) return undef(ctx);
+    size_t count;
+    uint32_t *params = bm_node_u32s(a[1], &count);
+    double pledged = arg_num(ctx, n, a, 2, -1);
+    uint8_t *dict = NULL;
+    size_t dl = 0;
+    if (n > 3) bm_js_bytes_view(a[3], &dict, &dl);
+    return bm_node_zs_error(ctx, bm_zs->init_zstd(z, params, count, pledged < 0 ? UINT64_MAX : (uint64_t)pledged, dict, dict ? dl : 0));
+}
+
+/* write(handle, flush, in|null, inOff, inLen, out, outOff, outLen, state Uint32Array) -> error or
+ * null; state gets [avail out, avail in] */
+NATIVE(n_zlib_write) {
+    UNUSED;
+    bm_zstream *z = bm_node_zs_of(ctx, n, a);
+    if (!z || n < 9) return undef(ctx);
+    uint8_t *in = NULL, *out, *state;
+    size_t in_cap = 0, out_cap, state_len;
+    if (!JSValueIsNull(ctx, a[2])) bm_js_bytes_view(a[2], &in, &in_cap);
+    if (!bm_js_bytes_view(a[5], &out, &out_cap) || !bm_js_bytes_view(a[8], &state, &state_len) || state_len < 8) return undef(ctx);
+    size_t in_off = in ? (size_t)arg_num(ctx, n, a, 3, 0) : 0, in_len = in ? (size_t)arg_num(ctx, n, a, 4, 0) : 0;
+    size_t out_off = (size_t)arg_num(ctx, n, a, 6, 0), out_len = (size_t)arg_num(ctx, n, a, 7, 0);
+    if (in_off > in_cap || in_len > in_cap - in_off || out_off > out_cap || out_len > out_cap - out_off) {
+        JSValueRef msg = str(ctx, "zlib: write out of bounds");
+        *exc = JSObjectMakeError(ctx, 1, &msg, NULL);
+        return undef(ctx);
+    }
+    uint32_t avail_in, avail_out;
+    bm_zs->write(z, (int)arg_num(ctx, n, a, 1, 0), in ? in + in_off : NULL, (uint32_t)in_len, out + out_off, (uint32_t)out_len, &avail_in, &avail_out);
+    uint32_t *st = (uint32_t *)state;
+    st[0] = avail_out;
+    st[1] = avail_in;
+    return bm_node_zs_error(ctx, bm_zs->check(z));
+}
+
+/* params(handle, level, strategy) -> error or null */
+NATIVE(n_zlib_params) {
+    UNUSED;
+    bm_zstream *z = bm_node_zs_of(ctx, n, a);
+    if (!z) return undef(ctx);
+    return bm_node_zs_error(ctx, bm_zs->params(z, (int)arg_num(ctx, n, a, 1, 0), (int)arg_num(ctx, n, a, 2, 0)));
+}
+
+/* reset(handle) -> error or null */
+NATIVE(n_zlib_reset) {
+    UNUSED;
+    bm_zstream *z = bm_node_zs_of(ctx, n, a);
+    if (!z) return undef(ctx);
+    return bm_node_zs_error(ctx, bm_zs->reset(z));
+}
+
+/* close(handle): frees the stream now */
+NATIVE(n_zlib_close) {
+    UNUSED;
+    bm_zstream *z = bm_node_zs_of(ctx, n, a);
+    if (!z) return undef(ctx);
+    JSObjectSetPrivate((JSObjectRef)a[0], NULL);
+    bm_zs->close(z);
+    return undef(ctx);
+}
+
+/* crc32(bytes or string, value) -> number */
+NATIVE(n_zlib_crc32) {
+    UNUSED;
+    uint32_t value = (uint32_t)arg_num(ctx, n, a, 1, 0);
+    if (!bm_zs || n < 1) return num(ctx, value);
+    uint8_t *p;
+    size_t len;
+    if (bm_js_bytes_view(a[0], &p, &len)) return num(ctx, bm_zs->crc32(value, p, len));
+    char *s = arg_cstr(ctx, n, a, 0);
+    uint32_t r = s ? bm_zs->crc32(value, (const uint8_t *)s, strlen(s)) : value;
+    free(s);
+    return num(ctx, r);
+}
+
+static void bm_node_zlib_install(JSContextRef ctx, JSObjectRef native) {
+    JSObjectRef z = JSObjectMake(ctx, NULL, NULL);
+    set(ctx, z, "available", JSValueMakeBoolean(ctx, bm_zs != NULL));
+    bm_js_def(ctx, z, "open", n_zlib_open);
+    bm_js_def(ctx, z, "initZlib", n_zlib_init_zlib);
+    bm_js_def(ctx, z, "initBrotli", n_zlib_init_brotli);
+    bm_js_def(ctx, z, "initZstd", n_zlib_init_zstd);
+    bm_js_def(ctx, z, "write", n_zlib_write);
+    bm_js_def(ctx, z, "params", n_zlib_params);
+    bm_js_def(ctx, z, "reset", n_zlib_reset);
+    bm_js_def(ctx, z, "close", n_zlib_close);
+    bm_js_def(ctx, z, "crc32", n_zlib_crc32);
+    set(ctx, native, "zlib", z);
+}
+
 static void bm_node_crypto_install(JSContextRef ctx, JSObjectRef native) {
     JSObjectRef c = JSObjectMake(ctx, NULL, NULL);
     set(ctx, c, "available", JSValueMakeBoolean(ctx, bm_crypto != NULL));
@@ -1641,4 +1816,5 @@ void bm_node_install(JSContextRef ctx, JSObjectRef native) {
 
     bm_node_fs_install(ctx, native);
     bm_node_crypto_install(ctx, native);
+    bm_node_zlib_install(ctx, native);
 }
