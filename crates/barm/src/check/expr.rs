@@ -743,6 +743,24 @@ impl<'a> Checker<'a> {
     }
 
     fn assign_inner(&mut self, op: AssignOp, target: ExprId, value: ExprId, span: Span) -> TyId {
+        // `js.name = v`, `js[k] op= v`: a JavaScript property (assigned by JavaScript's rules)
+        let js_obj = match self.ast().expr(target).kind {
+            ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } => Some(obj),
+            _ => None,
+        };
+        if let Some(obj) = js_obj
+            && self.expr_type_peek(obj) == Some(JS)
+        {
+            self.expr(target, None);
+            let v = self.expr(value, Some(JS));
+            if !self.js_convertible(v) {
+                let shown = self.show(v);
+                let s = self.ast().expr(value).span;
+                self.report(Diagnostic::new("T0901", s, format!("a `{shown}` can't be passed to JavaScript")));
+            }
+            let _ = (op, span);
+            return JS;
+        }
         let Some(place) = self.place(target, false) else {
             self.expr(value, None);
             return ERROR;
@@ -2312,6 +2330,27 @@ impl<'a> Checker<'a> {
                 th == NEVER && ps.iter().all(|p| p.ty == JS && !p.inout) && self.js_convertible(r)
             }
             _ => false,
+        }
+    }
+
+    /// The type of `e` if it's a plain name (a local, or an npm import): enough to tell a
+    /// JavaScript object without checking `e` twice. Other expressions: `None` (checked normally).
+    fn expr_type_peek(&mut self, e: ExprId) -> Option<TyId> {
+        match self.ast().expr(e).kind {
+            ExprKind::Ident(s) => match self.lookup(s) {
+                Some((_, t)) => Some(self.types.without_undefined(t)),
+                None => match self.scopes[self.cur as usize].values.get(&s).map(|d| d.0) {
+                    Some(Decl::Npm(..)) => Some(JS),
+                    Some(Decl::Const(m, i)) => {
+                        let t = self.const_type(m, i);
+                        Some(self.types.without_undefined(t))
+                    }
+                    _ => None,
+                },
+            },
+            ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } => (self.expr_type_peek(obj) == Some(JS)).then_some(JS),
+            ExprKind::Paren(x) => self.expr_type_peek(x),
+            _ => None,
         }
     }
 

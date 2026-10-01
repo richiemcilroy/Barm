@@ -438,6 +438,61 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 }
 
+// ------------------------------------------------------------ assignment and iteration
+
+impl<'c, 'a> Gen<'c, 'a> {
+    /// `obj.name op= value` / `obj[key] op= value` on a JavaScript object: one engine call
+    /// (`(o, v) => (o.name op= v)`), with JavaScript's semantics for the operator.
+    pub(crate) fn js_assign(&mut self, op: &str, target: ExprId, value: ExprId, ty: TyId, span: Span) -> Val {
+        self.js_used();
+        let m = self.cur_m();
+        let mut f = Fused::default();
+        f.src.push_str("return (");
+        match &self.ast(m).expr(target).kind {
+            ExprKind::Member { obj, name, .. } => {
+                let (obj, name) = (*obj, *name);
+                self.js_fuse_operand(obj, &mut f);
+                let text = self.sym(name).to_string();
+                js_access(&mut f.src, &text, false);
+            }
+            ExprKind::Index { obj, index, .. } => {
+                let (obj, index) = (*obj, *index);
+                self.js_fuse_operand(obj, &mut f);
+                f.src.push('[');
+                self.js_fuse(index, &mut f);
+                f.src.push(']');
+            }
+            _ => unreachable!("a JavaScript assignment target"),
+        }
+        let _ = write!(f.src, " {op} ");
+        self.js_fuse(value, &mut f);
+        f.src.push(')');
+        let slot = self.fresh("bmgjf");
+        let _ = writeln!(self.lits, "static JSObjectRef {slot};");
+        let argv = if f.params.is_empty() { "NULL".to_string() } else { format!("(JSValueRef[]){{{}}}", f.params.join(", ")) };
+        let (x, r) = (self.fresh("jx"), self.fresh("jr"));
+        let src = c_string(f.src.as_bytes());
+        let loc = self.loc(span);
+        self.line(format!("JSValueRef {x} = NULL; JSValueRef {r} = bm_js_thunk(&{slot}, {src}, {}, {argv}, &{x}); if (!{r}) bm_js_throw_trap({x}, {loc});", f.params.len()));
+        self.coerce(Val::plain(r, JS), ty)
+    }
+
+    /// A JavaScript iterable as an array to index (`Array.from` unless it is one); held until
+    /// the enclosing scope ends.
+    pub(crate) fn js_array_of(&mut self, v: &str, span: Span) -> String {
+        self.js_used();
+        let slot = self.fresh("bmgjf");
+        let _ = writeln!(self.lits, "static JSObjectRef {slot};");
+        let (x, a) = (self.fresh("jx"), self.fresh("ja"));
+        let loc = self.loc(span);
+        self.line(format!(
+            "JSValueRef {x} = NULL; JSValueRef {a} = bm_js_thunk(&{slot}, \"return Array.isArray(a0) ? a0 : Array.from(a0)\", 1, (JSValueRef[]){{{v}}}, &{x}); if (!{a}) bm_js_throw_trap({x}, {loc}); bm_js_retain({a});"
+        ));
+        self.b().scopes.last_mut().unwrap().releases.push(format!("bm_js_release({a});"));
+        a
+    }
+}
+
 // ------------------------------------------------------------ fusion
 //
 // A JavaScript expression tree in Barm code (`User.safeParse({ name: n, age: a }).success`) is

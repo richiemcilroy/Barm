@@ -25,9 +25,9 @@ pub(crate) struct Local {
     pub ty: TyId,
 }
 
-struct Scope {
+pub(crate) struct Scope {
     /// Release statements for variables declared in this scope, in declaration order.
-    releases: Vec<String>,
+    pub(crate) releases: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -44,7 +44,7 @@ pub(crate) struct Body {
     out: String,
     indent: usize,
     pub locals: FxMap<u32, Local>,
-    scopes: Vec<Scope>,
+    pub(crate) scopes: Vec<Scope>,
     pub(crate) temps: Vec<Vec<(String, TyId)>>,
     ret: TyId,
     /// (continue label, scope depth at loop body entry)
@@ -1335,6 +1335,15 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let uniq = self.fresh("");
                 let var = format!("v_{}_{}", self.sym(*name), uniq);
                 match self.tget(coll_ty) {
+                    Ty::Js => {
+                        let span = self.ast(m).stmt(s).span;
+                        let arr = self.js_array_of(&sn, span);
+                        let (idx, n) = (self.fresh("i"), self.fresh("n"));
+                        let loc = self.loc(span);
+                        self.line(format!("uint32_t {n} = bm_js_length({arr});"));
+                        self.open(&format!("for (uint32_t {idx} = 0; {idx} < {n}; {idx}++) {{"));
+                        self.line(format!("JSValueRef {var} = bm_js_at_or_trap({arr}, (double){idx}, {loc});"));
+                    }
                     Ty::Set(_) => {
                         let kd = self.desc(elem);
                         let cur = self.fresh("i");
@@ -3094,6 +3103,19 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     fn assign(&mut self, op: AssignOp, target: ExprId, value: ExprId, span: Span) -> Val {
+        // a JavaScript property: assigned in JavaScript
+        let m = self.cur_m();
+        if let ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } = self.ast(m).expr(target).kind {
+            let ot = self.ty(obj);
+            if self.c.types.without_undefined(ot) == JS {
+                let js_op = match op {
+                    AssignOp::Assign => "=".to_string(),
+                    AssignOp::Op(b) => format!("{}=", b.as_str()),
+                };
+                let ty = self.ty(target);
+                return self.js_assign(&js_op, target, value, ty, span);
+            }
+        }
         match op {
             AssignOp::Assign => {
                 let v = self.expr(value);
