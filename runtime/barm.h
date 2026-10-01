@@ -539,6 +539,30 @@ typedef struct bm_codec_ops {
 } bm_codec_ops;
 extern const bm_codec_ops *bm_codec;
 extern const bm_codec_ops bm_codecs;
+/* Hashes, HMAC, random bytes and key derivation (runtime/crypto.c, in the same archive), for npm
+ * packages' `crypto`: set by bm_crypto_install (which links only BoringSSL's libcrypto, not the
+ * TLS client), and by bm_tls_install too. Digests go by Node.js's names ("sha256",
+ * "SHA-256", "RSA-SHA256"); *_new return NULL for an unknown one. *_final write up to 64 bytes. */
+typedef struct bm_crypto_ops {
+    int (*digest_size)(const char *name);   /* -1: unknown */
+    void *(*hash_new)(const char *name);
+    void *(*hash_copy)(void *h);
+    void (*hash_update)(void *h, const uint8_t *p, size_t n);
+    size_t (*hash_final)(void *h, uint8_t *out);
+    void (*hash_free)(void *h);
+    void *(*hmac_new)(const char *name, const uint8_t *key, size_t n);
+    void (*hmac_update)(void *h, const uint8_t *p, size_t n);
+    size_t (*hmac_final)(void *h, uint8_t *out);
+    void (*hmac_free)(void *h);
+    void (*random)(uint8_t *out, size_t n);
+    bool (*pbkdf2)(const char *digest, const uint8_t *pass, size_t plen, const uint8_t *salt, size_t slen, uint32_t iter, uint8_t *out, size_t outlen);
+    bool (*scrypt)(const uint8_t *pass, size_t plen, const uint8_t *salt, size_t slen, uint64_t N, uint64_t r, uint64_t p, size_t maxmem, uint8_t *out, size_t outlen);
+    bool (*hkdf)(const char *digest, const uint8_t *key, size_t klen, const uint8_t *salt, size_t slen, const uint8_t *info, size_t ilen, uint8_t *out, size_t outlen);
+    bool (*equal)(const uint8_t *a, const uint8_t *b, size_t n);   /* constant time */
+} bm_crypto_ops;
+extern const bm_crypto_ops *bm_crypto;
+extern const bm_crypto_ops bm_crypto_table;
+void bm_crypto_install(void);
 void bm_tls_install(void);
 bm_str bm_native_bytesToString(bm_arr bytes);
 bm_arr bm_native_stringToBytes(bm_str s);

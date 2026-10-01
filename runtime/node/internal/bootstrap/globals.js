@@ -36,6 +36,22 @@ Object.defineProperty(g, 'global', { __proto__: null, value: g, writable: true, 
 require('internal/bootstrap/process');
 
 lazy('console', () => require('internal/console/global'));
+// the global `crypto` (Web Crypto): random values without the rest of crypto; `subtle` brings
+// crypto in when the program's bundle has it
+lazy('crypto', () => {
+  const { getRandomValues, randomUUID } = require('internal/barm/random');
+  const webcrypto = { getRandomValues, randomUUID };
+  Object.defineProperty(webcrypto, 'subtle', {
+    __proto__: null,
+    enumerable: true,
+    configurable: true,
+    get() {
+      const id = 'crypto';
+      return require(id).subtle;
+    },
+  });
+  return webcrypto;
+});
 lazy('Buffer', () => require('buffer').Buffer);
 lazy('atob', () => require('buffer').atob);
 lazy('btoa', () => require('buffer').btoa);

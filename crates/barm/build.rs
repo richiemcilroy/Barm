@@ -32,6 +32,7 @@ fn main() {
     }
     list.push(root.join("runtime/tls.c"));
     list.push(root.join("runtime/codecs.c"));
+    list.push(root.join("runtime/crypto.c"));
     let (mut a, mut b): (u64, u64) = (0xcbf29ce484222325, 0x84222325cbf29ce4);
     let mut code = String::from("/// (path relative to the repository, contents)\npub static TLS_FILES: &[(&str, &[u8])] = &[\n");
     for p in &list {
@@ -49,6 +50,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", vendor.display());
     println!("cargo:rerun-if-changed={}", root.join("runtime/tls.c").display());
     println!("cargo:rerun-if-changed={}", root.join("runtime/codecs.c").display());
+    println!("cargo:rerun-if-changed={}", root.join("runtime/crypto.c").display());
     for p in &list {
         println!("cargo:rerun-if-changed={}", p.display());
     }

@@ -376,4 +376,5 @@ static const bm_tls_ops bm_tls_table = {
 void bm_tls_install(void) {
     bm_tls_impl = &bm_tls_table;
     bm_codec = &bm_codecs;
+    bm_crypto = &bm_crypto_table;
 }

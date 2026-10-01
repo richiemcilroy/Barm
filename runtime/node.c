@@ -1391,6 +1391,213 @@ void bm_node_fs_install(JSContextRef ctx, JSObjectRef native) {
     set(ctx, native, "fs", fs);
 }
 
+/* ------------------------------------------------------------------ crypto (runtime/crypto.c, through
+ * bm_crypto: there when the program links the TLS archive) */
+
+typedef struct { void *ctx; bool hmac; } bm_node_mac;
+
+static void bm_node_mac_finalize(JSObjectRef o) {
+    bm_node_mac *m = JSObjectGetPrivate(o);
+    if (!m) return;
+    if (m->ctx && bm_crypto) (m->hmac ? bm_crypto->hmac_free : bm_crypto->hash_free)(m->ctx);
+    free(m);
+}
+
+static JSClassRef bm_node_mac_class(void) {
+    static JSClassRef cls;
+    if (!cls) {
+        JSClassDefinition def = kJSClassDefinitionEmpty;
+        def.className = "CryptoHandle";
+        def.finalize = bm_node_mac_finalize;
+        cls = JSClassCreate(&def);
+    }
+    return cls;
+}
+
+static JSValueRef bm_node_crypto_missing(JSContextRef ctx, JSValueRef *exc) {
+    JSValueRef msg = str(ctx, "crypto is not available in this program (it was built without the TLS library)");
+    *exc = JSObjectMakeError(ctx, 1, &msg, NULL);
+    return undef(ctx);
+}
+
+static bm_node_mac *bm_node_mac_of(JSContextRef ctx, size_t n, const JSValueRef a[]) {
+    if (n < 1 || !JSValueIsObjectOfClass(ctx, a[0], bm_node_mac_class())) return NULL;
+    return JSObjectGetPrivate((JSObjectRef)a[0]);
+}
+
+static JSValueRef bm_node_mac_new(JSContextRef ctx, void *c, bool hmac) {
+    bm_node_mac *m = malloc(sizeof *m);
+    m->ctx = c;
+    m->hmac = hmac;
+    return JSObjectMake(ctx, bm_node_mac_class(), m);
+}
+
+/* hashNew(name) -> handle, or null for a digest BoringSSL doesn't have */
+NATIVE(n_crypto_hash_new) {
+    UNUSED;
+    if (!bm_crypto) return bm_node_crypto_missing(ctx, exc);
+    char *name = arg_cstr(ctx, n, a, 0);
+    void *c = name ? bm_crypto->hash_new(name) : NULL;
+    free(name);
+    return c ? bm_node_mac_new(ctx, c, false) : JSValueMakeNull(ctx);
+}
+
+/* hmacNew(name, key bytes) -> handle, or null */
+NATIVE(n_crypto_hmac_new) {
+    UNUSED;
+    if (!bm_crypto) return bm_node_crypto_missing(ctx, exc);
+    char *name = arg_cstr(ctx, n, a, 0);
+    uint8_t *k = NULL;
+    size_t kl = 0;
+    if (n > 1) bm_js_bytes_view(a[1], &k, &kl);
+    void *c = name ? bm_crypto->hmac_new(name, k ? k : (const uint8_t *)"", kl) : NULL;
+    free(name);
+    return c ? bm_node_mac_new(ctx, c, true) : JSValueMakeNull(ctx);
+}
+
+/* macUpdate(handle, bytes) */
+NATIVE(n_crypto_update) {
+    UNUSED;
+    bm_node_mac *m = bm_node_mac_of(ctx, n, a);
+    uint8_t *p;
+    size_t len;
+    if (!m || !m->ctx || n < 2 || !bm_js_bytes_view(a[1], &p, &len)) return undef(ctx);
+    (m->hmac ? bm_crypto->hmac_update : bm_crypto->hash_update)(m->ctx, p, len);
+    return undef(ctx);
+}
+
+/* macDigest(handle) -> Uint8Array (the handle is spent) */
+NATIVE(n_crypto_digest) {
+    UNUSED;
+    bm_node_mac *m = bm_node_mac_of(ctx, n, a);
+    if (!m || !m->ctx) return undef(ctx);
+    uint8_t out[64];
+    size_t len = (m->hmac ? bm_crypto->hmac_final : bm_crypto->hash_final)(m->ctx, out);
+    (m->hmac ? bm_crypto->hmac_free : bm_crypto->hash_free)(m->ctx);
+    m->ctx = NULL;
+    return bm_js_bytes_copy(out, len);
+}
+
+/* hashCopy(handle) -> a handle with the same state */
+NATIVE(n_crypto_hash_copy) {
+    UNUSED;
+    bm_node_mac *m = bm_node_mac_of(ctx, n, a);
+    if (!m || !m->ctx || m->hmac) return JSValueMakeNull(ctx);
+    void *c = bm_crypto->hash_copy(m->ctx);
+    return c ? bm_node_mac_new(ctx, c, false) : JSValueMakeNull(ctx);
+}
+
+NATIVE(n_crypto_digest_size) {
+    UNUSED;
+    if (!bm_crypto) return num(ctx, -1);
+    char *name = arg_cstr(ctx, n, a, 0);
+    int size = name ? bm_crypto->digest_size(name) : -1;
+    free(name);
+    return num(ctx, size);
+}
+
+/* randomFill(view): fills it with cryptographically secure bytes */
+NATIVE(n_crypto_random_fill) {
+    UNUSED;
+    uint8_t *p;
+    size_t len;
+    if (n < 1 || !bm_js_bytes_view(a[0], &p, &len)) return undef(ctx);
+    if (bm_crypto) bm_crypto->random(p, len);
+    else arc4random_buf(p, len);
+    return undef(ctx);
+}
+
+static bool bm_node_bytes_arg(size_t n, const JSValueRef a[], size_t i, uint8_t **p, size_t *len) {
+    static uint8_t empty;
+    if (i < n && bm_js_bytes_view(a[i], p, len)) return true;
+    *p = &empty;
+    *len = 0;
+    return false;
+}
+
+/* pbkdf2(digest, password, salt, iterations, keylen) -> Uint8Array, or null for an unknown digest */
+NATIVE(n_crypto_pbkdf2) {
+    UNUSED;
+    if (!bm_crypto) return bm_node_crypto_missing(ctx, exc);
+    char *digest = arg_cstr(ctx, n, a, 0);
+    uint8_t *pass, *salt;
+    size_t pl, sl;
+    bm_node_bytes_arg(n, a, 1, &pass, &pl);
+    bm_node_bytes_arg(n, a, 2, &salt, &sl);
+    size_t keylen = (size_t)arg_num(ctx, n, a, 4, 0);
+    uint8_t *out = malloc(keylen ? keylen : 1);
+    bool ok = digest && bm_crypto->pbkdf2(digest, pass, pl, salt, sl, (uint32_t)arg_num(ctx, n, a, 3, 1), out, keylen);
+    free(digest);
+    JSValueRef r = ok ? bm_js_bytes_copy(out, keylen) : JSValueMakeNull(ctx);
+    free(out);
+    return r;
+}
+
+/* scrypt(password, salt, N, r, p, maxmem, keylen) -> Uint8Array, or null if the parameters fail */
+NATIVE(n_crypto_scrypt) {
+    UNUSED;
+    if (!bm_crypto) return bm_node_crypto_missing(ctx, exc);
+    uint8_t *pass, *salt;
+    size_t pl, sl;
+    bm_node_bytes_arg(n, a, 0, &pass, &pl);
+    bm_node_bytes_arg(n, a, 1, &salt, &sl);
+    size_t keylen = (size_t)arg_num(ctx, n, a, 6, 0);
+    uint8_t *out = malloc(keylen ? keylen : 1);
+    bool ok = bm_crypto->scrypt(pass, pl, salt, sl, (uint64_t)arg_num(ctx, n, a, 2, 16384), (uint64_t)arg_num(ctx, n, a, 3, 8),
+                                (uint64_t)arg_num(ctx, n, a, 4, 1), (size_t)arg_num(ctx, n, a, 5, 32 << 20), out, keylen);
+    JSValueRef r = ok ? bm_js_bytes_copy(out, keylen) : JSValueMakeNull(ctx);
+    free(out);
+    return r;
+}
+
+/* hkdf(digest, key, salt, info, keylen) -> Uint8Array, or null */
+NATIVE(n_crypto_hkdf) {
+    UNUSED;
+    if (!bm_crypto) return bm_node_crypto_missing(ctx, exc);
+    char *digest = arg_cstr(ctx, n, a, 0);
+    uint8_t *key, *salt, *info;
+    size_t kl, sl, il;
+    bm_node_bytes_arg(n, a, 1, &key, &kl);
+    bm_node_bytes_arg(n, a, 2, &salt, &sl);
+    bm_node_bytes_arg(n, a, 3, &info, &il);
+    size_t keylen = (size_t)arg_num(ctx, n, a, 4, 0);
+    uint8_t *out = malloc(keylen ? keylen : 1);
+    bool ok = digest && bm_crypto->hkdf(digest, key, kl, salt, sl, info, il, out, keylen);
+    free(digest);
+    JSValueRef r = ok ? bm_js_bytes_copy(out, keylen) : JSValueMakeNull(ctx);
+    free(out);
+    return r;
+}
+
+/* timingSafeEqual(a, b): same-length byte views, compared in constant time */
+NATIVE(n_crypto_equal) {
+    UNUSED;
+    uint8_t *x, *y;
+    size_t xl, yl;
+    if (!bm_node_bytes_arg(n, a, 0, &x, &xl) || !bm_node_bytes_arg(n, a, 1, &y, &yl) || xl != yl) return JSValueMakeBoolean(ctx, false);
+    if (bm_crypto) return JSValueMakeBoolean(ctx, bm_crypto->equal(x, y, xl));
+    unsigned char d = 0;
+    for (size_t i = 0; i < xl; i++) d |= x[i] ^ y[i];
+    return JSValueMakeBoolean(ctx, d == 0);
+}
+
+static void bm_node_crypto_install(JSContextRef ctx, JSObjectRef native) {
+    JSObjectRef c = JSObjectMake(ctx, NULL, NULL);
+    set(ctx, c, "available", JSValueMakeBoolean(ctx, bm_crypto != NULL));
+    bm_js_def(ctx, c, "digestSize", n_crypto_digest_size);
+    bm_js_def(ctx, c, "hashNew", n_crypto_hash_new);
+    bm_js_def(ctx, c, "hmacNew", n_crypto_hmac_new);
+    bm_js_def(ctx, c, "update", n_crypto_update);
+    bm_js_def(ctx, c, "digest", n_crypto_digest);
+    bm_js_def(ctx, c, "hashCopy", n_crypto_hash_copy);
+    bm_js_def(ctx, c, "randomFill", n_crypto_random_fill);
+    bm_js_def(ctx, c, "pbkdf2", n_crypto_pbkdf2);
+    bm_js_def(ctx, c, "scrypt", n_crypto_scrypt);
+    bm_js_def(ctx, c, "hkdf", n_crypto_hkdf);
+    bm_js_def(ctx, c, "timingSafeEqual", n_crypto_equal);
+    set(ctx, native, "crypto", c);
+}
+
 /* ------------------------------------------------------------------ install */
 
 
@@ -1433,4 +1640,5 @@ void bm_node_install(JSContextRef ctx, JSObjectRef native) {
     set(ctx, native, "os", os);
 
     bm_node_fs_install(ctx, native);
+    bm_node_crypto_install(ctx, native);
 }

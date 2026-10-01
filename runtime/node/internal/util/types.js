@@ -96,11 +96,9 @@ ObjectDefineProperties(module.exports, {
         return false;
       }
 
-      if (!isKeyObject) {
-        ({ isKeyObject } = require('internal/crypto/keys'));
-      }
-
-      return isKeyObject(obj);
+      // (Barm: its crypto has no KeyObject or CryptoKey yet; loading internal/crypto/keys
+      // would pull Node.js's whole crypto into every bundle)
+      return false;
     },
   },
   isCryptoKey: {
@@ -112,11 +110,9 @@ ObjectDefineProperties(module.exports, {
         return false;
       }
 
-      if (!isCryptoKey) {
-        ({ isCryptoKey } = require('internal/crypto/keys'));
-      }
-
-      return isCryptoKey(obj);
+      // (Barm: its crypto has no KeyObject or CryptoKey yet; loading internal/crypto/keys
+      // would pull Node.js's whole crypto into every bundle)
+      return false;
     },
   },
 });
