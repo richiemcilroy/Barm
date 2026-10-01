@@ -47,19 +47,26 @@ pub struct LexError {
 const REGEX_AFTER: &[&str] = &["return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw", "case", "do", "else", "yield", "await", "extends"];
 
 pub fn tokenize(src: &str) -> Result<Vec<Tok>, LexError> {
-    let b = src.as_bytes();
-    let n = b.len();
-    let mut toks: Vec<Tok> = Vec::with_capacity(n / 4);
-    let mut i = 0usize;
-    // `#!` line at the very start.
-    if b.starts_with(b"#!") {
-        while i < n && b[i] != b'\n' {
-            i += 1;
+    let mut start = 0;
+    if src.as_bytes().starts_with(b"#!") {
+        while start < src.len() && src.as_bytes()[start] != b'\n' {
+            start += 1;
         }
     }
-    // For each open `{`: whether it opened a template substitution `${`.
-    let mut braces: Vec<bool> = Vec::new();
-    let mut nl = false;
+    tokenize_from(src, start, Vec::new(), None, false)
+}
+
+/// Tokenizes `src` from byte `from`, with `braces` the open braces there (true: a template
+/// substitution). `slash` forces how a `/` at `from` is read (true: a regular expression), for
+/// the parser to correct the regex/division guess. `nl` is the line-break flag for the first token.
+pub fn tokenize_from(src: &str, from: usize, braces: Vec<bool>, slash: Option<bool>, nl: bool) -> Result<Vec<Tok>, LexError> {
+    let b = src.as_bytes();
+    let n = b.len();
+    let mut toks: Vec<Tok> = Vec::with_capacity((n - from) / 4);
+    let mut i = from;
+    let mut braces = braces;
+    let mut nl = nl;
+    let mut slash = slash;
     let err = |pos: usize, message: &'static str| LexError { pos: pos as u32, message };
     while i < n {
         let c = b[i];
@@ -232,7 +239,8 @@ pub fn tokenize(src: &str) -> Result<Vec<Tok>, LexError> {
             continue;
         }
         // regular expressions
-        if c == b'/' && regex_allowed(src, &toks) {
+        let forced = if i == from { slash.take() } else { None };
+        if c == b'/' && forced.unwrap_or_else(|| regex_allowed(src, &toks)) {
             i += 1;
             let mut class = false;
             loop {
