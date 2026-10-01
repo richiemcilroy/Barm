@@ -30,6 +30,18 @@ fn app() -> Router {
     Router::new().route("/", get(hello)).route("/json", get(json)).route("/echo", post(echo)).fallback(not_found)
 }
 
+/// Serves the app. NODELAY=1 sets TCP_NODELAY on each connection, so responses are sent at once
+/// (as Barm sends them); by default axum leaves Nagle's algorithm on, which holds a response
+/// while earlier data is unacknowledged.
+async fn serve(listener: tokio::net::TcpListener) {
+    if std::env::var("NODELAY").is_ok_and(|v| v == "1") {
+        use axum::serve::ListenerExt;
+        axum::serve(listener.tap_io(|tcp| { let _ = tcp.set_nodelay(true); }), app()).await.unwrap();
+    } else {
+        axum::serve(listener, app()).await.unwrap();
+    }
+}
+
 /// One current-thread runtime serving its own SO_REUSEPORT listener (thread-per-core).
 fn serve_current_thread(port: u16, reuse: bool) {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -41,7 +53,7 @@ fn serve_current_thread(port: u16, reuse: bool) {
         }
         sock.bind(([0, 0, 0, 0], port).into()).unwrap();
         let listener = sock.listen(4096).unwrap();
-        axum::serve(listener, app()).await.unwrap();
+        serve(listener).await;
     });
 }
 
@@ -64,6 +76,6 @@ fn main() {
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(workers).enable_all().build().unwrap();
     rt.block_on(async move {
         let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await.unwrap();
-        axum::serve(listener, app()).await.unwrap();
+        serve(listener).await;
     });
 }

@@ -25,5 +25,5 @@ docker run --rm -v "$root:/barm" -w /barm/bench/http -e BIN_DIR=/barm/bench/http
   set -e
   gcc -O2 -o $BIN_DIR/load load.c -lpthread
   gcc -std=gnu11 -O2 -w -ffp-contract=off -o $BIN_DIR/barm-server $BIN_DIR/barm-server.c -lm -lpthread
-  python3 run.py --no-build --only barm,rust,rust-tpc,bun "$@"
+  python3 run.py --no-build --only barm,rust,rust-tpc,rust-nodelay,bun "$@"
 ' sh "$@"
