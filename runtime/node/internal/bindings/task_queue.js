@@ -3,10 +3,11 @@
 // internalBinding('task_queue'): microtasks, and the hook that runs process.nextTick's queue.
 //
 // In Node.js, C++ calls the tick callback (processTicksAndRejections) when a callback into JS
-// returns, so ticks run before that turn's promise jobs. Here, scheduling a tick (setting
-// tickInfo[kHasTickScheduled]) queues one run of the callback as a microtask. A Barm program's
-// event loop will also run it right after each callback it makes into JS, before the engine
-// drains promise jobs, which gives Node.js's order.
+// returns, so ticks run before that turn's promise jobs. Here every callback from Barm's loop
+// goes through callFromHost(), which runs the tick queue when the callback returns, in the same
+// call. A tick scheduled outside one (in a promise job, say) queues one run of the queue as a
+// promise job instead. internal/process/task_queues tells this binding when a tick is scheduled
+// (setTickScheduled).
 
 const kHasTickScheduled = 0;
 const kHasRejectionToWarn = 1;
@@ -18,11 +19,12 @@ const enqueue = (fn) => { resolved.then(fn); };
 
 let tickCallback = null;
 let drainQueued = false;
-const fields = new Int32Array(2);
+let hostDepth = 0;
+const tickInfo = new Int32Array(2);
 
 function drain() {
   drainQueued = false;
-  if (tickCallback === null || fields[kHasTickScheduled] !== 1) return;
+  if (tickCallback === null || tickInfo[kHasTickScheduled] !== 1) return;
   try {
     tickCallback();
   } catch (e) {
@@ -33,20 +35,24 @@ function drain() {
   }
 }
 
-const tickInfo = new Proxy(fields, {
-  set(target, key, value) {
-    target[key] = value;
-    if (Number(key) === kHasTickScheduled && value === 1 && !drainQueued) {
-      drainQueued = true;
-      enqueue(drain);
-    }
-    return true;
-  },
-  get(target, key) {
-    const v = target[key];
-    return typeof v === 'function' ? v.bind(target) : v;
-  },
-});
+// a tick was scheduled: the queue runs when the host's callback returns, else as a promise job
+function setTickScheduled() {
+  if (hostDepth === 0 && !drainQueued) {
+    drainQueued = true;
+    enqueue(drain);
+  }
+}
+
+// a callback from the host (Barm's loop): fn(...args), then the tick queue
+function callFromHost(fn, a, b, c, d, e, f) {
+  hostDepth++;
+  try {
+    return fn(a, b, c, d, e, f);
+  } finally {
+    hostDepth--;
+    if (hostDepth === 0 && tickInfo[kHasTickScheduled] === 1) drain();
+  }
+}
 
 let promiseRejectCallback = null;
 
@@ -71,6 +77,8 @@ module.exports = {
   getPromiseRejectCallback: () => promiseRejectCallback,
   // for the host: run pending ticks now (after a callback into JS returns)
   runTicks: drain,
+  setTickScheduled,
+  callFromHost,
   kHasTickScheduled,
   kHasRejectionToWarn,
 };

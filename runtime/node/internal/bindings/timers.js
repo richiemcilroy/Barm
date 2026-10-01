@@ -20,7 +20,6 @@ const kHasOutstanding = 2;
 let processImmediate = null;
 let processTimers = null;
 let checkRequested = false;
-let runTicks = null;
 
 // Wires internal/timers to the loop: on the first timer or immediate (whether it came through
 // the globals or require('timers')), as Node.js's bootstrap does at startup.
@@ -28,8 +27,8 @@ function ensureSetup() {
   if (processTimers !== null) return;
   const queue = require('internal/bootstrap/ticks')();
   ({ processImmediate, processTimers } = require('internal/timers').getTimerCallbacks(queue.runNextTicks));
-  runTicks = require('internal/bindings/task_queue').runTicks;
-  native.timerSetup(onTimer, onCheck);
+  const { callFromHost } = require('internal/bindings/task_queue');
+  native.timerSetup(() => callFromHost(onTimer), () => callFromHost(onCheck));
 }
 
 function requestCheck() {
@@ -56,8 +55,20 @@ const immediateInfo = new Proxy(immediateFields, {
 
 const timeoutInfo = new Int32Array(1);
 
-// (each runs the tick queue when it's done: Node.js runs it after every callback from the loop,
-// before promise jobs)
+// The loop's time, as libuv caches it: read once per callback from the loop (and reset when
+// its microtasks run), not on every timer change
+let cachedNow = -1;
+const resetNow = () => { cachedNow = -1; };
+function getLibuvNow() {
+  if (cachedNow < 0) {
+    cachedNow = native.now();
+    queueMicrotask(resetNow);
+  }
+  return cachedNow;
+}
+
+// (the loop calls them through callFromHost, which runs the tick queue when they return, as
+// Node.js does after every callback from the loop, before promise jobs)
 function onTimer() {
   const now = native.now();
   const next = processTimers(now);
@@ -68,7 +79,6 @@ function onTimer() {
     native.timerSchedule(due > 0 ? due : 1);
     native.timerRef(next > 0);
   }
-  runTicks();
 }
 
 function onCheck() {
@@ -76,19 +86,18 @@ function onCheck() {
   if (immediateFields[kCount] === 0) return;
   processImmediate();
   if (immediateFields[kCount] > 0) requestCheck();
-  runTicks();
 }
 
 module.exports = {
   immediateInfo,
   timeoutInfo,
-  getLibuvNow: () => native.now(),
+  getLibuvNow,
   setupTimers(pi, pt) {
     if (processTimers !== null) return;
     processImmediate = pi;
     processTimers = pt;
-    runTicks = require('internal/bindings/task_queue').runTicks;
-    native.timerSetup(onTimer, onCheck);
+    const { callFromHost } = require('internal/bindings/task_queue');
+    native.timerSetup(() => callFromHost(onTimer), () => callFromHost(onCheck));
   },
   scheduleTimer(ms) {
     ensureSetup();

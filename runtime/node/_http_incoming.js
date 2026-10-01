@@ -31,7 +31,8 @@ const {
 
 const { Readable, finished } = require('stream');
 
-const { AbortController } = require('internal/abort_controller');
+// (Barm: loaded when a request's signal is first asked for)
+let AbortController;
 
 const kHeaders = Symbol('kHeaders');
 const kHeadersDistinct = Symbol('kHeadersDistinct');
@@ -195,6 +196,7 @@ ObjectDefineProperty(IncomingMessage.prototype, 'signal', {
   configurable: true,
   get: function() {
     if (this[kAbortController] === null) {
+      AbortController ??= require('internal/abort_controller').AbortController;
       const ac = new AbortController();
       this[kAbortController] = ac;
       if (this.destroyed) {

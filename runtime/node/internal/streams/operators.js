@@ -15,7 +15,9 @@ const {
   Symbol,
 } = primordials;
 
-const { AbortController, AbortSignal } = require('internal/abort_controller');
+// (Barm: loaded when an operator runs, so `stream` doesn't load AbortController, EventTarget,
+// webidl, util and inspect)
+const abortController = () => require('internal/abort_controller');
 
 const {
   AbortError,
@@ -30,7 +32,8 @@ const {
   validateObject,
   validateFunction,
 } = require('internal/validators');
-const { kWeakHandler, kResistStopPropagation } = require('internal/event_target');
+// (Barm: internal/event_target loads when an operator first watches a signal)
+const eventTarget = () => require('internal/event_target');
 const { finished } = require('internal/streams/end-of-stream');
 
 const kEmpty = Symbol('kEmpty');
@@ -61,7 +64,7 @@ function map(fn, options) {
   highWaterMark += concurrency;
 
   return async function* map() {
-    const signal = AbortSignal.any([options?.signal].filter(Boolean));
+    const signal = abortController().AbortSignal.any([options?.signal].filter(Boolean));
     const stream = this;
     const queue = [];
     const signalOpt = { signal };
@@ -251,10 +254,10 @@ async function reduce(reducer, initialValue, options) {
     await finished(this.destroy(err));
     throw err;
   }
-  const ac = new AbortController();
+  const ac = new (abortController().AbortController)();
   const signal = ac.signal;
   if (options?.signal) {
-    const opts = { once: true, [kWeakHandler]: this, [kResistStopPropagation]: true };
+    const opts = { once: true, [eventTarget().kWeakHandler]: this, [eventTarget().kResistStopPropagation]: true };
     options.signal.addEventListener('abort', () => ac.abort(), opts);
   }
   let gotAnyItemFromStream = false;

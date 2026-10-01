@@ -6,15 +6,9 @@
 
 const native = globalThis.__barm_native?.process;
 
-let runTicks;
-function complete(fn) {
-  runTicks ??= require('internal/bindings/task_queue').runTicks;
-  try {
-    fn();
-  } finally {
-    runTicks();
-  }
-}
+// a callback from the loop: then process.nextTick's queue, as Node.js's MakeCallback does
+const { callFromHost } = require('internal/bindings/task_queue');
+const complete = (fn) => callFromHost(fn);
 
 // (runtime/node.c's stdio kinds)
 const IGNORE = 0;

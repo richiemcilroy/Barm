@@ -3558,6 +3558,7 @@ typedef struct bm_http_conn {
     bool in_shared, out_shared;
     bool eof;             /* the client closed its side */
     bool dirty;           /* on bm_http_dirty: a late response is ready to write */
+    bool taken;           /* handed to its handler as a raw socket (an upgrade): leave the fd open */
     struct bm_http_conn *dirty_next;
     /* Requests answered later (async handlers), in request order; see bm_http_req. */
     struct bm_http_req *pend_head, *pend_tail;
@@ -3572,6 +3573,7 @@ typedef struct bm_http_req {
     bm_http_conn *c;      /* NULL once the connection has closed */
     bm_int id;            /* 0: answered already, waiting for the ones ahead of it */
     bool keep, head, ready;
+    bool streaming;       /* raw output so far goes out as soon as it's this request's turn */
     bm_sb out;            /* the response, once ready */
 } bm_http_req;
 
@@ -3590,6 +3592,7 @@ typedef struct bm_http_server {
     int fd;              /* -1 once stopped */
     bm_int port;
     bm_fn handler;
+    bool node_errors;    /* malformed requests are answered as Node.js's http answers them */
 } bm_http_server;
 
 #define BM_HTTP_MAX_SERVERS 64
@@ -3601,6 +3604,8 @@ static bm_http_conn *bm_http_conns;      /* open connections (for stop) */
 static bm_http_conn *bm_http_cur;       /* the connection whose request is being handled */
 static bool bm_http_keep;               /* the current request allows keep-alive */
 static bool bm_http_head;               /* the current request is HEAD: send headers only */
+bool bm_http_v10;                       /* the current request is HTTP/1.0 */
+static size_t bm_http_rest_off;         /* the current request's end in its connection's input */
 static char bm_http_date[64];           /* "date: ...\r\n", refreshed once a second */
 static time_t bm_http_date_at;
 /* With several workers, each process accepts only while it holds no more connections than
@@ -3731,8 +3736,14 @@ static void bm_http_enqueue(bm_http_conn *c, bm_http_req *r) {
     c->npending++;
 }
 
-/* Writes the ready responses at the front of c's queue, in order. */
+/* Writes the ready responses at the front of c's queue, in order (and what a streaming one
+ * has so far, once it's at the front). */
 static void bm_http_drain(bm_http_conn *c) {
+    if (c->pend_head && !c->pend_head->ready && c->pend_head->streaming && c->pend_head->out.len) {
+        bm_http_req *r = c->pend_head;
+        bm_http_out(c, r->out.data, r->out.len);
+        r->out.len = 0;
+    }
     while (c->pend_head && c->pend_head->ready) {
         bm_http_req *r = c->pend_head;
         if (r->out.len) bm_http_out(c, r->out.data, r->out.len);
@@ -3810,6 +3821,80 @@ void bm_native_httpRespondTo(bm_int id, bm_int status, bm_str headers, bm_str bo
     r->ready = true;
     bm_http_drain(c);   /* writes (in order) and frees what's ready, r included */
     bm_http_mark_dirty(c);
+}
+
+/* Raw output for deferred request id: bytes already formatted as an HTTP response (Node.js's
+ * http writes its own). They go out as soon as it's this request's turn; end: 0 more is coming,
+ * 1 that's all (the connection stays open), 2 that's all and the connection closes after it. */
+void bm_native_httpWriteRaw(bm_int id, const char *p, size_t n, int end) {
+    if (id <= 0 || id > bm_http_ndeferred) return;
+    bm_http_req *r = bm_http_deferred[id];
+    if (!r || (uintptr_t)r <= (uintptr_t)bm_http_ndeferred) return;
+    if (end) {
+        bm_http_deferred[id] = (bm_http_req *)(intptr_t)bm_http_deferred_free;
+        bm_http_deferred_free = id;
+        r->id = 0;
+    }
+    if (!r->c) {   /* the client went away */
+        if (end) {
+            bm_sb_free(&r->out);
+            bm_async_free(r, sizeof *r);
+        }
+        return;
+    }
+    bm_http_conn *c = r->c;
+    r->streaming = true;
+    if (c->pend_head == r && !r->out.len) {
+        if (n) bm_http_out(c, p, n);
+    } else if (n) {
+        bm_sb_push(&r->out, p, n);
+    }
+    if (end) {
+        if (end == 2) r->keep = false;
+        r->ready = true;
+    }
+    bm_http_drain(c);
+    bm_http_mark_dirty(c);
+}
+
+/* The fd of deferred request id's connection (-1 if it's gone), for its addresses. */
+int bm_native_httpFd(bm_int id) {
+    if (id <= 0 || id > bm_http_ndeferred) return -1;
+    bm_http_req *r = bm_http_deferred[id];
+    if (!r || (uintptr_t)r <= (uintptr_t)bm_http_ndeferred || !r->c) return -1;
+    return r->c->fd;
+}
+
+/* Hands deferred request id's connection to the caller as a raw socket (an upgrade): returns its
+ * fd, and the bytes that followed the request in *rest; the server forgets the connection once
+ * the handler returns. Only while the request is being handled, and the only one waiting. */
+int bm_native_httpTakeover(bm_int id, bm_sb *rest) {
+    if (id <= 0 || id > bm_http_ndeferred) return -1;
+    bm_http_req *r = bm_http_deferred[id];
+    if (!r || (uintptr_t)r <= (uintptr_t)bm_http_ndeferred || !r->c) return -1;
+    bm_http_conn *c = r->c;
+    if (c->npending != 1 || c->pend_head != r || c->taken) return -1;
+    if (bm_http_rest_off < c->in_len) bm_sb_push(rest, c->in + bm_http_rest_off, c->in_len - bm_http_rest_off);
+    c->in_len = 0;
+    c->taken = true;
+    /* the server stops watching the fd now, before its new owner watches it (the same fd and
+     * filters: a later delete would undo the new owner's) */
+#ifdef BM_KQUEUE
+    struct kevent ev[2];
+    EV_SET(&ev[0], c->fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+    EV_SET(&ev[1], c->fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
+    kevent(bm_http_q, ev, 1 + (c->want_write ? 1 : 0), NULL, 0, NULL);
+#else
+    epoll_ctl(bm_http_q, EPOLL_CTL_DEL, c->fd, NULL);
+#endif
+    c->want_read = c->want_write = false;
+    bm_http_deferred[id] = (bm_http_req *)(intptr_t)bm_http_deferred_free;
+    bm_http_deferred_free = id;
+    c->pend_head = c->pend_tail = NULL;
+    c->npending = 0;
+    bm_sb_free(&r->out);
+    bm_async_free(r, sizeof *r);
+    return c->fd;
 }
 
 bm_int bm_native_headerIndex(bm_str block, bm_str name) {
@@ -3899,7 +3984,8 @@ BM_STR_LIT(bm_lit_post, "POST");
 /* A canned error response; the connection closes after it is written. */
 static void bm_http_fail(bm_http_conn *c, const char *status) {
     char buf[160];
-    int n = snprintf(buf, sizeof buf, "HTTP/1.1 %s\r\ncontent-length: 0\r\nconnection: close\r\n\r\n", status);
+    int n = c->srv->node_errors ? snprintf(buf, sizeof buf, "HTTP/1.1 %s\r\nConnection: close\r\n\r\n", status)
+                                : snprintf(buf, sizeof buf, "HTTP/1.1 %s\r\ncontent-length: 0\r\nconnection: close\r\n\r\n", status);
     bm_http_out(c, buf, (size_t)n);
     c->close_after = true;
 }
@@ -4042,6 +4128,8 @@ static bool bm_http_process(bm_http_conn *c) {
         bm_str hdrs = bm_str_from(headers, (size_t)(headers_end - headers));
         bm_http_cur = c;
         bm_http_keep = keep;
+        bm_http_v10 = http10;
+        bm_http_rest_off = pos + consumed;
         bm_http_head = mlen == 4 && memcmp(start, "HEAD", 4) == 0;
         ((void (*)(void *, bm_str, bm_str, bm_str, bm_str))h.fn)(h.env, method, target, hdrs, body);
         if (bm_http_cur) bm_native_httpRespond(500, BM_EMPTY_STR, BM_EMPTY_STR, false); /* no response */
@@ -4051,6 +4139,8 @@ static bool bm_http_process(bm_http_conn *c) {
         bm_str_release(hdrs);
         bm_str_release(body);
         pos += consumed;
+        /* taken over (an upgrade): what followed is the handler's now */
+        if (c->taken) return true;
         if (!keep) c->close_after = true;
     }
     if (pos) {
@@ -4076,7 +4166,12 @@ static bool bm_http_flush(bm_http_conn *c) {
 
 static bm_http_conn bm_http_dead;   /* stands in for connections closed earlier in an event batch */
 
-static void bm_http_close(bm_http_conn *c) {
+static void bm_http_release(bm_http_conn *c, bool close_fd);
+
+static void bm_http_close(bm_http_conn *c) { bm_http_release(c, true); }
+
+/* Forgets connection c (closing its fd unless it was taken over). */
+static void bm_http_release(bm_http_conn *c, bool close_fd) {
     bm_http_load_add(-1);
     if (c->dirty) {
         for (bm_http_conn **pp = &bm_http_dirty; *pp; pp = &(*pp)->dirty_next)
@@ -4094,7 +4189,8 @@ static void bm_http_close(bm_http_conn *c) {
     }
     if (c->prev) c->prev->next = c->next; else bm_http_conns = c->next;
     if (c->next) c->next->prev = c->prev;
-    close(c->fd);
+    /* (a connection taken over left the loop's watch when it was taken: see httpTakeover) */
+    if (close_fd) close(c->fd);
     if (!c->in_shared) bm_free(c->in);
     if (!c->out_shared) bm_free(c->out);
     bm_free(c);
@@ -4259,6 +4355,11 @@ static bool bm_http_service(bm_http_conn *c, bool readable, bool broken) {
     /* handle, write, and handle again while flushing unblocks pipelined requests */
     while (ok) {
         if (c->in_len && !c->close_after && c->npending < BM_HTTP_MAX_PENDING) ok = bm_http_process(c);
+        if (c->taken) {
+            bm_http_detach(c);
+            bm_http_release(c, false);
+            return false;
+        }
         if (ok && c->out_len) ok = bm_http_flush(c);
         if (!(ok && c->stalled && c->out_len == 0)) break;
     }
@@ -4522,18 +4623,32 @@ void bm_http_run(void) {
 bm_int bm_native_httpListen(bm_int port, bm_str host, bm_fn handler) {
     signal(SIGPIPE, SIG_IGN);
     if (bm_http_nservers == BM_HTTP_MAX_SERVERS) { bm_sb_push_cstr(&bm_native_err, "too many servers"); return -1; }
-    int lfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (lfd < 0) { bm_native_fail(errno, "socket", host); return -1; }
-    int one = 1;
-    setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof addr);
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons((uint16_t)port);
     const char *h = host.p->len ? host.p->data : "0.0.0.0";
     if (strcmp(h, "localhost") == 0) h = "127.0.0.1";
-    if (inet_pton(AF_INET, h, &addr.sin_addr) != 1) { bm_native_fail(EINVAL, "listen", host); close(lfd); return -1; }
-    if (bind(lfd, (struct sockaddr *)&addr, sizeof addr) != 0) {
+    /* an IPv6 address (with "::" both IPv6 and IPv4, as Node.js listens by default) */
+    bool v6 = strchr(h, ':') != NULL;
+    struct sockaddr_storage ss;
+    memset(&ss, 0, sizeof ss);
+    socklen_t slen;
+    if (v6) {
+        struct sockaddr_in6 *a6 = (struct sockaddr_in6 *)&ss;
+        a6->sin6_family = AF_INET6;
+        a6->sin6_port = htons((uint16_t)port);
+        if (inet_pton(AF_INET6, h, &a6->sin6_addr) != 1) { bm_native_fail(EINVAL, "listen", host); return -1; }
+        slen = sizeof *a6;
+    } else {
+        struct sockaddr_in *a4 = (struct sockaddr_in *)&ss;
+        a4->sin_family = AF_INET;
+        a4->sin_port = htons((uint16_t)port);
+        if (inet_pton(AF_INET, h, &a4->sin_addr) != 1) { bm_native_fail(EINVAL, "listen", host); return -1; }
+        slen = sizeof *a4;
+    }
+    int lfd = socket(v6 ? AF_INET6 : AF_INET, SOCK_STREAM, 0);
+    if (lfd < 0) { bm_native_fail(errno, "socket", host); return -1; }
+    int one = 1, zero = 0;
+    setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    if (v6) setsockopt(lfd, IPPROTO_IPV6, IPV6_V6ONLY, &zero, sizeof zero);
+    if (bind(lfd, (struct sockaddr *)&ss, slen) != 0) {
         bm_sb_push_cstr(&bm_native_err, errno == EADDRINUSE ? "Failed to start server. Is port " : "Failed to start server on port ");
         bm_sb_push_int(&bm_native_err, port);
         bm_sb_push_cstr(&bm_native_err, errno == EADDRINUSE ? " in use?" : "");
@@ -4542,15 +4657,18 @@ bm_int bm_native_httpListen(bm_int port, bm_str host, bm_fn handler) {
     }
     if (listen(lfd, 4096) != 0) { bm_native_fail(errno, "listen", host); close(lfd); return -1; }
     fcntl(lfd, F_SETFL, fcntl(lfd, F_GETFL) | O_NONBLOCK);
-    socklen_t len = sizeof addr;
-    getsockname(lfd, (struct sockaddr *)&addr, &len);
+    socklen_t len = sizeof ss;
+    getsockname(lfd, (struct sockaddr *)&ss, &len);
+    uint16_t bound = v6 ? ((struct sockaddr_in6 *)&ss)->sin6_port : ((struct sockaddr_in *)&ss)->sin_port;
     int id = bm_http_nservers++;
     bm_env_retain(handler.env); /* kept for the life of the program */
-    bm_http_servers[id] = (bm_http_server){ .fd = lfd, .port = ntohs(addr.sin_port), .handler = handler };
+    bm_http_servers[id] = (bm_http_server){ .fd = lfd, .port = ntohs(bound), .handler = handler };
     bm_http_active++;
     if (bm_http_q >= 0) bm_http_watch_listener(&bm_http_servers[id]); /* started from a handler */
     return id;
 }
+
+void bm_native_httpNodeErrors(bm_int id) { if (id >= 0 && id < bm_http_nservers) bm_http_servers[id].node_errors = true; }
 
 bm_int bm_native_httpPort(bm_int id) { return id >= 0 && id < bm_http_nservers ? bm_http_servers[id].port : 0; }
 
@@ -4560,15 +4678,13 @@ void bm_native_httpStop(bm_int id, bool force) {
     close(bm_http_servers[id].fd);
     bm_http_servers[id].fd = -1;
     bm_http_active--;
-    for (bm_http_conn *c = bm_http_conns, *next; c; c = next) {
-        next = c->next;
+    /* Connections close from the loop, not here: stop can run mid-batch (from a handler or a
+     * callback), with events for them still to come. An idle one (or every one, when forced)
+     * is shut down, and closes at its next event; the rest close after the request in hand. */
+    for (bm_http_conn *c = bm_http_conns; c; c = c->next) {
         if (c->srv != &bm_http_servers[id]) continue;
-        if (force || (c->in_len == 0 && c->out_len == 0 && c != bm_http_cur)) {
-            if (c == bm_http_cur) { c->close_after = true; continue; }
-            bm_http_close(c);
-        } else {
-            c->close_after = true;
-        }
+        c->close_after = true;
+        if (force || (c->in_len == 0 && c->out_len == 0 && c->npending == 0 && c != bm_http_cur)) shutdown(c->fd, SHUT_RDWR);
     }
 }
 

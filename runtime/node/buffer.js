@@ -108,9 +108,8 @@ const {
   isUint8Array,
   isTypedArray,
 } = require('internal/util/types');
-const {
-  inspect: utilInspect,
-} = require('internal/util/inspect');
+// (Barm: internal/util/inspect, 100KB, loads when something is first formatted)
+const utilInspect = (...args) => require('internal/util/inspect').inspect(...args);
 
 const {
   codes: {

@@ -47,6 +47,11 @@ Per-context files also get `privateSymbols` and `perIsolateSymbols`.
 - `internal/url.js`: blob URLs get their UUIDs from `internal/barm/random` rather than `internal/crypto/random`, so `URL` doesn't bring `crypto` into every bundle.
 - `internal/tls/wrap.js`: `internal/crypto/x509` loads when a peer certificate is asked for, so `tls` and `https` load without Node.js's key objects.
 - `cluster.js`: requires `internal/cluster/child` and `internal/cluster/primary` by name, not through a template string, so the bundler sees them.
+- `internal/process/task_queues.js`: `setHasTickScheduled` tells the `task_queue` binding when a tick is scheduled, so it can run the queue when the host's callback returns.
+- `_http_server.js`: servers listen on Barm's native HTTP server when they can (`internal/barm/http_server`).
+- `internal/primordials.js`: each method's primordial is made the first time a module asks for it (`primordials` is a proxy that works the name back to its built-in), not all at startup. Node.js builds them into its snapshot.
+- `internal/errors.js`: each error code's class is made the first time it's asked for (`codes` is a proxy), not all ~400 at startup.
+- Startup: modules that Node.js loads from its snapshot at no cost load here only when they're used. `http` loads its client side (agent, ClientRequest, url) on first use; `events`, `buffer`, `internal/timers`, `internal/util/debuglog` and `internal/abort_controller` load `inspect` when something is formatted; `net` and `_http_server` check for performance observers through the binding's counts and load `internal/perf/observe` only to record; `_http_incoming`, `internal/streams/pipeline` and `internal/streams/operators` load AbortController (and with it EventTarget, webidl, util and inspect) when a signal is used.
 - `internal/util/debuglog.js`: `testEnabled` is initialized on first use when startup hasn't done it.
 - `internal/util.js`: `getInternalGlobal()` returns the primordial `RegExp`, `Object` and `Array` rather than a second realm from `vm` (none yet).
 
