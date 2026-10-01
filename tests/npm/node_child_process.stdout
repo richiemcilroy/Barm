@@ -1,0 +1,21 @@
+spawnSync 3 null out err true 3
+encoding "a b"
+input fed in
+execSync "hi\n"
+execFileSync x-y
+cwd /
+exit code 7 Command failed: exit 7
+timeout null SIGTERM ETIMEDOUT
+maxBuffer SIGTERM ENOBUFS
+missing ENOENT spawnSync nonexistent-cmd-barm nonexistent-cmd-barm null 0
+ignore [null,null,null]
+signal null SIGKILL
+spawn "got:hello\n" "warn\n" spawn,exit 4 null,close 4 true 4
+execFile {"stdout":"file","stderr":""}
+exec "42\n" ""
+exec error 2 "fail\n" Command failed: echo fail >&2; exit 2
+killed null SIGTERM true SIGTERM
+spawn error ENOENT spawn does-not-exist-barm does-not-exist-barm
+big output 300000
+big input 500000
+inherit 0

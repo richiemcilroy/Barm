@@ -2059,6 +2059,725 @@ NATIVE(n_heap_stats) {
     return array(ctx, 3, items);
 }
 
+/* ------------------------------------------------------------------ child processes (libuv's uv_spawn)
+ *
+ * bm_node_spawn starts a program as libuv does: found on the child's PATH, its stdio set up from
+ * a spec per fd (a socketpair for a pipe, /dev/null, an inherited or given fd), in cwd, in a
+ * new session if detached. spawnSync runs one to the end, feeding input and collecting output
+ * with a timeout and a size limit, as Node.js's spawn_sync.cc does. */
+
+#include <spawn.h>
+#include <sys/wait.h>
+
+enum { BM_STDIO_IGNORE, BM_STDIO_PIPE, BM_STDIO_INHERIT, BM_STDIO_FD };
+
+typedef struct {
+    int type;
+    int fd;          /* inherit/fd: the parent's fd; pipe: the parent's end, once made */
+} bm_node_stdio;
+
+/* the program's path on PATH (from the child's environment, else ours), or NULL */
+static char *bm_node_which(const char *file, char **env) {
+    if (strchr(file, '/')) return strdup(file);
+    const char *path = NULL;
+    for (char **e = env ? env : environ; e && *e; e++)
+        if (strncmp(*e, "PATH=", 5) == 0) path = *e + 5;
+    if (!path) path = "/usr/bin:/bin";
+    size_t fl = strlen(file);
+    for (const char *p = path;; ) {
+        const char *end = strchr(p, ':');
+        size_t dl = end ? (size_t)(end - p) : strlen(p);
+        char *cand = malloc(dl + fl + 2);
+        if (dl == 0) memcpy(cand, ".", 1), dl = 1;
+        else memcpy(cand, p, dl);
+        cand[dl] = '/';
+        memcpy(cand + dl + 1, file, fl + 1);
+        struct stat st;
+        if (access(cand, X_OK) == 0 && stat(cand, &st) == 0 && S_ISREG(st.st_mode)) return cand;
+        free(cand);
+        if (!end) break;
+        p = end + 1;
+    }
+    return NULL;
+}
+
+/* starts file with argv/env (NULL: ours); stdio[i] pipes get the parent's end in .fd. -> pid, or
+ * -errno */
+static pid_t bm_node_spawn(const char *file, char **argv, char **env, const char *cwd, bm_node_stdio *stdio, int nstdio, bool detached) {
+    char *path = bm_node_which(file, env);
+    if (!path) return -ENOENT;
+    int child_fds[64];
+    int nfds = nstdio < 64 ? nstdio : 64;
+    for (int i = 0; i < nfds; i++) child_fds[i] = -1;
+    pid_t pid = 0;
+    int err = 0;
+    for (int i = 0; i < nfds && !err; i++) {
+        if (stdio[i].type == BM_STDIO_PIPE) {
+            int sv[2];
+            if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) { err = errno; break; }
+            fcntl(sv[0], F_SETFD, FD_CLOEXEC);
+            fcntl(sv[1], F_SETFD, FD_CLOEXEC);
+            stdio[i].fd = sv[0];
+            child_fds[i] = sv[1];
+        } else if (stdio[i].type == BM_STDIO_IGNORE) {
+            child_fds[i] = open("/dev/null", (i == 0 ? O_RDONLY : O_RDWR) | O_CLOEXEC);
+        } else {
+            child_fds[i] = stdio[i].fd;
+        }
+    }
+    posix_spawn_file_actions_t fa;
+    posix_spawnattr_t attr;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawnattr_init(&attr);
+    short flags = POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF;
+#ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
+    flags |= POSIX_SPAWN_CLOEXEC_DEFAULT;
+#endif
+#ifdef POSIX_SPAWN_SETSID
+    if (detached) flags |= POSIX_SPAWN_SETSID;
+#endif
+    posix_spawnattr_setflags(&attr, flags);
+    sigset_t none, all;
+    sigemptyset(&none);
+    sigfillset(&all);
+    posix_spawnattr_setsigmask(&attr, &none);
+    posix_spawnattr_setsigdefault(&attr, &all);
+    if (!err) {
+        for (int i = 0; i < nfds; i++) {
+            if (child_fds[i] >= 0) posix_spawn_file_actions_adddup2(&fa, child_fds[i], i);
+        }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        if (cwd) posix_spawn_file_actions_addchdir_np(&fa, cwd);
+#pragma clang diagnostic pop
+        err = posix_spawn(&pid, path, &fa, &attr, argv, env ? env : environ);
+    }
+    posix_spawn_file_actions_destroy(&fa);
+    posix_spawnattr_destroy(&attr);
+    free(path);
+    for (int i = 0; i < nfds; i++) {
+        if (stdio[i].type == BM_STDIO_PIPE || stdio[i].type == BM_STDIO_IGNORE) {
+            if (child_fds[i] >= 0) close(child_fds[i]);
+        }
+        if (err && stdio[i].type == BM_STDIO_PIPE && stdio[i].fd >= 0) {
+            close(stdio[i].fd);
+            stdio[i].fd = -1;
+        }
+    }
+    /* (a missing cwd shows up as ENOENT, as libuv reports it) */
+    return err ? -err : pid;
+}
+
+/* a JS array of strings as a NULL-terminated C array */
+static char **bm_node_strings(JSContextRef ctx, JSValueRef v) {
+    if (!v || !JSValueIsObject(ctx, v)) return NULL;
+    JSObjectRef arr = (JSObjectRef)v;
+    JSStringRef len_key = JSStringCreateWithUTF8CString("length");
+    size_t len = (size_t)JSValueToNumber(ctx, JSObjectGetProperty(ctx, arr, len_key, NULL), NULL);
+    JSStringRelease(len_key);
+    char **out = calloc(len + 1, sizeof *out);
+    for (size_t i = 0; i < len; i++) {
+        JSValueRef e = JSObjectGetPropertyAtIndex(ctx, arr, (unsigned)i, NULL);
+        out[i] = arg_cstr(ctx, 1, &e, 0);
+        if (!out[i]) out[i] = strdup("");
+    }
+    return out;
+}
+
+static void bm_node_strings_free(char **s) {
+    if (!s) return;
+    for (char **p = s; *p; p++) free(*p);
+    free(s);
+}
+
+/* stdio specs from [[type, fd], ...] */
+static int bm_node_stdio_specs(JSContextRef ctx, JSValueRef v, bm_node_stdio *out, int max) {
+    if (!JSValueIsObject(ctx, v)) return 0;
+    JSObjectRef arr = (JSObjectRef)v;
+    int n = 0;
+    for (; n < max; n++) {
+        JSValueRef e = JSObjectGetPropertyAtIndex(ctx, arr, (unsigned)n, NULL);
+        if (!JSValueIsObject(ctx, e)) break;
+        out[n].type = (int)JSValueToNumber(ctx, JSObjectGetPropertyAtIndex(ctx, (JSObjectRef)e, 0, NULL), NULL);
+        out[n].fd = (int)JSValueToNumber(ctx, JSObjectGetPropertyAtIndex(ctx, (JSObjectRef)e, 1, NULL), NULL);
+    }
+    return n;
+}
+
+static const char *bm_node_signal_name(int sig) {
+    for (size_t i = 0; i < sizeof bm_signals / sizeof *bm_signals; i++)
+        if (bm_signals[i].sig == sig) return bm_signals[i].name;
+    return NULL;
+}
+
+/* spawnSync(file, args, env|null, cwd|null, stdio [[type, fd]], inputs [bytes|null], timeout ms,
+ * maxBuffer, killSignal, detached) -> [pid, status|null, signal name|null, errno (0: none),
+ * [output per fd: bytes|null]] */
+NATIVE(n_spawn_sync) {
+    UNUSED;
+    if (n < 10) return undef(ctx);
+    char *file = arg_cstr(ctx, n, a, 0);
+    char **argv = bm_node_strings(ctx, a[1]);
+    char **env = JSValueIsNull(ctx, a[2]) ? NULL : bm_node_strings(ctx, a[2]);
+    char *cwd = JSValueIsNull(ctx, a[3]) || JSValueIsUndefined(ctx, a[3]) ? NULL : arg_cstr(ctx, n, a, 3);
+    bm_node_stdio stdio[16];
+    int nstdio = bm_node_stdio_specs(ctx, a[4], stdio, 16);
+    double timeout = arg_num(ctx, n, a, 6, 0);
+    double max_buffer = arg_num(ctx, n, a, 7, 1024 * 1024);
+    int kill_signal = (int)arg_num(ctx, n, a, 8, SIGTERM);
+    bool detached = JSValueToBoolean(ctx, a[9]);
+    uint8_t *in[16] = {0};
+    size_t in_len[16] = {0}, in_off[16] = {0};
+    for (int i = 0; i < nstdio; i++) {
+        JSValueRef v = JSObjectGetPropertyAtIndex(ctx, (JSObjectRef)a[5], (unsigned)i, NULL);
+        if (v && JSValueIsObject(ctx, v)) bm_js_bytes_view(v, &in[i], &in_len[i]);
+    }
+    if (!argv) argv = calloc(2, sizeof *argv), argv[0] = strdup(file ? file : "");
+    pid_t pid = file ? bm_node_spawn(file, argv, env, cwd, stdio, nstdio, detached) : -EINVAL;
+    bm_sb out[16];
+    memset(out, 0, sizeof out);
+    int err = 0;
+    JSValueRef status = JSValueMakeNull(ctx), signal = JSValueMakeNull(ctx);
+    if (pid < 0) {
+        err = (int)-pid;
+        pid = 0;
+    } else {
+        for (int i = 0; i < nstdio; i++) {
+            if (stdio[i].type != BM_STDIO_PIPE) continue;
+            fcntl(stdio[i].fd, F_SETFL, fcntl(stdio[i].fd, F_GETFL) | O_NONBLOCK);
+            /* (stdin with nothing to write is closed now: the child sees its end) */
+            if (i == 0 && !in[0]) shutdown(stdio[i].fd, SHUT_WR);
+        }
+        double deadline = timeout > 0 ? bm_performance_now() + timeout : 0;
+        double total = 0;
+        bool killed = false;
+        int child_status = 0;
+        bool exited = false;
+        for (;;) {
+            struct pollfd pf[16];
+            int map[16], np = 0;
+            for (int i = 0; i < nstdio; i++) {
+                if (stdio[i].type != BM_STDIO_PIPE || stdio[i].fd < 0) continue;
+                short ev = 0;
+                if (i == 0 && in[0] && in_off[0] < in_len[0]) ev |= POLLOUT;
+                if (i != 0) ev |= POLLIN;
+                if (!ev) continue;
+                pf[np].fd = stdio[i].fd;
+                pf[np].events = ev;
+                pf[np].revents = 0;
+                map[np++] = i;
+            }
+            if (np == 0) break;
+            int wait_ms = -1;
+            if (deadline) {
+                double left = deadline - bm_performance_now();
+                if (left <= 0) {
+                    kill(pid, kill_signal);
+                    killed = true;
+                    err = ETIMEDOUT;
+                    break;
+                }
+                wait_ms = (int)left + 1;
+            }
+            int r = poll(pf, (nfds_t)np, wait_ms);
+            if (r < 0 && errno == EINTR) continue;
+            for (int k = 0; k < np; k++) {
+                int i = map[k];
+                if (pf[k].revents & POLLOUT) {
+                    ssize_t w = write(stdio[i].fd, in[i] + in_off[i], in_len[i] - in_off[i]);
+                    if (w > 0) in_off[i] += (size_t)w;
+                    if (w < 0 && errno != EAGAIN) in_off[i] = in_len[i];
+                    if (in_off[i] >= in_len[i]) shutdown(stdio[i].fd, SHUT_WR);
+                } else if (pf[k].revents & (POLLIN | POLLHUP | POLLERR)) {
+                    char buf[65536];
+                    ssize_t got = read(stdio[i].fd, buf, sizeof buf);
+                    if (got > 0) {
+                        bm_sb_add(&out[i], buf, (size_t)got);
+                        total += (double)got;
+                        if (max_buffer > 0 && total > max_buffer) {
+                            kill(pid, kill_signal);
+                            killed = true;
+                            err = ENOBUFS;
+                        }
+                    } else if (got == 0 || errno != EAGAIN) {
+                        close(stdio[i].fd);
+                        stdio[i].fd = -1;
+                    }
+                }
+            }
+            if (killed) break;
+        }
+        (void)exited;
+        while (waitpid(pid, &child_status, 0) < 0 && errno == EINTR) {}
+        if (WIFEXITED(child_status)) {
+            status = num(ctx, WEXITSTATUS(child_status));
+        } else if (WIFSIGNALED(child_status)) {
+            const char *name = bm_node_signal_name(WTERMSIG(child_status));
+            signal = name ? str(ctx, name) : num(ctx, WTERMSIG(child_status));
+        }
+    }
+    JSValueRef outputs[16];
+    for (int i = 0; i < nstdio; i++) {
+        if (stdio[i].type == BM_STDIO_PIPE) {
+            if (stdio[i].fd >= 0) close(stdio[i].fd);
+            outputs[i] = i == 0 || pid == 0 ? JSValueMakeNull(ctx) : (JSValueRef)bm_js_bytes_copy(out[i].data ? out[i].data : "", out[i].len);
+        } else {
+            outputs[i] = JSValueMakeNull(ctx);
+        }
+        bm_sb_free(&out[i]);
+    }
+    JSValueRef items[5] = { num(ctx, pid), status, signal, num(ctx, err), pid == 0 ? JSValueMakeNull(ctx) : (JSValueRef)array(ctx, (size_t)nstdio, outputs) };
+    free(file);
+    free(cwd);
+    bm_node_strings_free(argv);
+    bm_node_strings_free(env);
+    return array(ctx, 5, items);
+}
+
+/* ------------------------------------------------------------------ streams (libuv's uv_stream_t
+ * over a pipe or socket fd): reads go to onread(bytes) as they arrive (onread(null, errno) at the
+ * end: UV_EOF); writes go out now when the fd takes them, else in order as it does; shutdown
+ * follows the writes. A handle stays alive until JS releases it, a loop turn after close, so no
+ * event already collected can reach freed memory. */
+
+#define BM_UV_EOF (-4095)
+
+typedef struct bm_node_wreq {
+    struct bm_node_wreq *next;
+    uint8_t *data;
+    size_t len, off;
+    JSObjectRef cb;      /* cb(status) once written (protected) */
+} bm_node_wreq;
+
+typedef struct {
+    bm_io io;
+    int fd;
+    bool reading, closed, refed, counted, watching;
+    JSObjectRef self, onread;
+    bm_node_wreq *wq, *wq_tail;
+    JSObjectRef shutdown_cb;
+    double bytes_read, bytes_written;
+} bm_node_stream;
+
+static void bm_node_stream_finalize(JSObjectRef o) {
+    bm_node_stream *s = JSObjectGetPrivate(o);
+    if (!s) return;
+    if (s->fd >= 0) close(s->fd);
+    free(s);
+}
+
+static JSClassRef bm_node_stream_class(void) {
+    static JSClassRef cls;
+    if (!cls) {
+        JSClassDefinition def = kJSClassDefinitionEmpty;
+        def.className = "StreamHandle";
+        def.finalize = bm_node_stream_finalize;
+        cls = JSClassCreate(&def);
+    }
+    return cls;
+}
+
+static bm_node_stream *bm_node_stream_of(JSContextRef ctx, size_t n, const JSValueRef a[]) {
+    if (n < 1 || !JSValueIsObjectOfClass(ctx, a[0], bm_node_stream_class())) return NULL;
+    return JSObjectGetPrivate((JSObjectRef)a[0]);
+}
+
+static void bm_node_stream_ready(bm_io *h, bool readable, bool writable, bool broken);
+
+/* what the loop watches for, and whether the stream keeps the program running */
+static void bm_node_stream_update(bm_node_stream *s) {
+    bool want_read = s->reading && !s->closed;
+    bool want_write = !s->closed && (s->wq || s->shutdown_cb);
+    if (s->fd >= 0 && !s->closed && (want_read || want_write || s->watching)) {
+        s->io.ready = bm_node_stream_ready;
+        bm_io_set(s->fd, &s->io, want_read, want_write);
+        s->watching = want_read || want_write;
+    }
+    bool active = s->refed && (want_read || want_write);
+    if (active != s->counted) {
+        bm_io_refs += active ? 1 : -1;
+        s->counted = active;
+    }
+}
+
+static void bm_node_call_args(JSObjectRef fn, size_t n, const JSValueRef *args) {
+    JSValueRef exc = NULL;
+    JSObjectCallAsFunction(bm_js_ctx, fn, NULL, n, args, &exc);
+    if (exc) bm_node_report(exc);
+}
+
+static void bm_node_stream_complete(bm_node_wreq *w, int status) {
+    JSObjectRef cb = w->cb;
+    free(w->data);
+    free(w);
+    if (cb) {
+        JSValueRef arg = JSValueMakeNumber(bm_js_ctx, status);
+        bm_node_call_args(cb, 1, &arg);
+        JSValueUnprotect(bm_js_ctx, cb);
+    }
+}
+
+/* writes what the fd takes from the queue; finishes the shutdown once it's empty */
+static void bm_node_stream_flush(bm_node_stream *s) {
+    while (s->wq && !s->closed) {
+        bm_node_wreq *w = s->wq;
+        ssize_t r = write(s->fd, w->data + w->off, w->len - w->off);
+        if (r < 0 && errno == EINTR) continue;
+        if (r < 0 && errno == EAGAIN) break;
+        if (r < 0) {
+            int err = errno;
+            s->wq = w->next;
+            if (!s->wq) s->wq_tail = NULL;
+            bm_node_stream_complete(w, -err);
+            continue;
+        }
+        w->off += (size_t)r;
+        s->bytes_written += (double)r;
+        if (w->off < w->len) break;
+        s->wq = w->next;
+        if (!s->wq) s->wq_tail = NULL;
+        bm_node_stream_complete(w, 0);
+    }
+    if (!s->wq && s->shutdown_cb && !s->closed) {
+        JSObjectRef cb = s->shutdown_cb;
+        s->shutdown_cb = NULL;
+        int st = shutdown(s->fd, SHUT_WR) == 0 || errno == ENOTSOCK ? 0 : -errno;
+        JSValueRef arg = JSValueMakeNumber(bm_js_ctx, st);
+        bm_node_call_args(cb, 1, &arg);
+        JSValueUnprotect(bm_js_ctx, cb);
+    }
+}
+
+static void bm_node_stream_ready(bm_io *h, bool readable, bool writable, bool broken) {
+    bm_node_stream *s = (bm_node_stream *)h;
+    if (s->closed) return;
+    if (writable || (broken && s->wq)) bm_node_stream_flush(s);
+    if ((readable || broken) && s->reading && !s->closed) {
+        static uint8_t buf[65536];
+        ssize_t r = read(s->fd, buf, sizeof buf);
+        if (r > 0) {
+            s->bytes_read += (double)r;
+            JSValueRef arg = bm_js_bytes_copy(buf, (size_t)r);
+            bm_node_call_args(s->onread, 1, &arg);
+        } else if (r == 0 || (errno != EAGAIN && errno != EINTR)) {
+            int err = r == 0 ? BM_UV_EOF : -errno;
+            s->reading = false;
+            JSValueRef args[2] = { JSValueMakeNull(bm_js_ctx), JSValueMakeNumber(bm_js_ctx, err) };
+            bm_node_call_args(s->onread, 2, args);
+        }
+    }
+    if (!s->closed) bm_node_stream_update(s);
+}
+
+/* open(fd) -> handle (the fd becomes non-blocking) */
+NATIVE(n_stream_open) {
+    UNUSED;
+    static bool sigpipe;
+    if (!sigpipe) {
+        sigpipe = true;
+        signal(SIGPIPE, SIG_IGN);
+    }
+    int fd = (int)arg_num(ctx, n, a, 0, -1);
+    if (fd < 0) return undef(ctx);
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+    bm_node_stream *s = calloc(1, sizeof *s);
+    s->fd = fd;
+    s->refed = true;
+    JSObjectRef o = JSObjectMake(ctx, bm_node_stream_class(), s);
+    s->self = o;
+    JSValueProtect(ctx, o);
+    return o;
+}
+
+/* readStart(handle, onread) */
+NATIVE(n_stream_read_start) {
+    UNUSED;
+    bm_node_stream *s = bm_node_stream_of(ctx, n, a);
+    if (!s || s->closed || n < 2) return num(ctx, -EINVAL);
+    if (s->onread) JSValueUnprotect(ctx, s->onread);
+    s->onread = (JSObjectRef)a[1];
+    JSValueProtect(ctx, a[1]);
+    s->reading = true;
+    bm_node_stream_update(s);
+    return num(ctx, 0);
+}
+
+NATIVE(n_stream_read_stop) {
+    UNUSED;
+    bm_node_stream *s = bm_node_stream_of(ctx, n, a);
+    if (!s || s->closed) return num(ctx, 0);
+    s->reading = false;
+    bm_node_stream_update(s);
+    return num(ctx, 0);
+}
+
+/* write(handle, [bytes...], cb) -> [err, bytes written now, async]: cb(status) only if async */
+NATIVE(n_stream_write) {
+    UNUSED;
+    bm_node_stream *s = bm_node_stream_of(ctx, n, a);
+    if (!s || n < 3 || !JSValueIsObject(ctx, a[1])) return undef(ctx);
+    if (s->closed) {
+        JSValueRef items[3] = { num(ctx, -EBADF), num(ctx, 0), JSValueMakeBoolean(ctx, false) };
+        return array(ctx, 3, items);
+    }
+    JSObjectRef list = (JSObjectRef)a[1];
+    JSStringRef len_key = JSStringCreateWithUTF8CString("length");
+    unsigned count = (unsigned)JSValueToNumber(ctx, JSObjectGetProperty(ctx, list, len_key, NULL), NULL);
+    JSStringRelease(len_key);
+    double written = 0;
+    int err = 0;
+    bm_sb rest = {0};
+    for (unsigned i = 0; i < count; i++) {
+        uint8_t *p;
+        size_t len;
+        JSValueRef v = JSObjectGetPropertyAtIndex(ctx, list, i, NULL);
+        if (!bm_js_bytes_view(v, &p, &len) || len == 0) continue;
+        size_t off = 0;
+        /* (behind queued writes, everything waits its turn) */
+        while (!s->wq && rest.len == 0 && off < len) {
+            ssize_t r = write(s->fd, p + off, len - off);
+            if (r < 0 && errno == EINTR) continue;
+            if (r < 0) {
+                if (errno != EAGAIN) err = -errno;
+                break;
+            }
+            off += (size_t)r;
+        }
+        if (err) break;
+        written += (double)off;
+        if (off < len) bm_sb_add(&rest, (const char *)p + off, len - off);
+    }
+    s->bytes_written += written;
+    bool async = rest.len > 0 && !err;
+    if (async) {
+        bm_node_wreq *w = calloc(1, sizeof *w);
+        w->data = malloc(rest.len);
+        memcpy(w->data, rest.data, rest.len);
+        w->len = rest.len;
+        w->cb = (JSObjectRef)a[2];
+        JSValueProtect(ctx, a[2]);
+        if (s->wq_tail) s->wq_tail->next = w;
+        else s->wq = w;
+        s->wq_tail = w;
+        bm_node_stream_update(s);
+    }
+    bm_sb_free(&rest);
+    JSValueRef items[3] = { num(ctx, err), num(ctx, written), JSValueMakeBoolean(ctx, async) };
+    return array(ctx, 3, items);
+}
+
+/* shutdown(handle, cb): cb(status) once queued writes are out and the write side is closed */
+NATIVE(n_stream_shutdown) {
+    UNUSED;
+    bm_node_stream *s = bm_node_stream_of(ctx, n, a);
+    if (!s || s->closed || n < 2) return num(ctx, -ENOTCONN);
+    if (s->shutdown_cb) return num(ctx, -EALREADY);
+    s->shutdown_cb = (JSObjectRef)a[1];
+    JSValueProtect(ctx, a[1]);
+    bm_node_stream_update(s);
+    return num(ctx, 0);
+}
+
+/* close(handle): stops it and closes the fd (queued writes fail with ECANCELED) */
+NATIVE(n_stream_close) {
+    UNUSED;
+    bm_node_stream *s = bm_node_stream_of(ctx, n, a);
+    if (!s || s->closed) return undef(ctx);
+    s->reading = false;
+    bm_node_stream_update(s);
+    s->closed = true;
+    if (s->counted) {
+        bm_io_refs--;
+        s->counted = false;
+    }
+    if (s->fd >= 0) close(s->fd);
+    s->fd = -1;
+    while (s->wq) {
+        bm_node_wreq *w = s->wq;
+        s->wq = w->next;
+        bm_node_stream_complete(w, -ECANCELED);
+    }
+    s->wq_tail = NULL;
+    if (s->shutdown_cb) JSValueUnprotect(ctx, s->shutdown_cb);
+    s->shutdown_cb = NULL;
+    if (s->onread) JSValueUnprotect(ctx, s->onread);
+    s->onread = NULL;
+    return undef(ctx);
+}
+
+/* release(handle): JS is done with it (after close) */
+NATIVE(n_stream_release) {
+    UNUSED;
+    bm_node_stream *s = bm_node_stream_of(ctx, n, a);
+    if (s && s->self) {
+        JSValueUnprotect(ctx, s->self);
+        s->self = NULL;
+    }
+    return undef(ctx);
+}
+
+/* ref(handle, bool) */
+NATIVE(n_stream_ref) {
+    UNUSED;
+    bm_node_stream *s = bm_node_stream_of(ctx, n, a);
+    if (!s) return undef(ctx);
+    s->refed = n > 1 && JSValueToBoolean(ctx, a[1]);
+    if (!s->closed) bm_node_stream_update(s);
+    return undef(ctx);
+}
+
+/* info(handle) -> [fd, bytesRead, bytesWritten, write queue size] */
+NATIVE(n_stream_info) {
+    UNUSED;
+    bm_node_stream *s = bm_node_stream_of(ctx, n, a);
+    if (!s) return undef(ctx);
+    double queued = 0;
+    for (bm_node_wreq *w = s->wq; w; w = w->next) queued += (double)(w->len - w->off);
+    JSValueRef items[4] = { num(ctx, s->fd), num(ctx, s->bytes_read), num(ctx, s->bytes_written), num(ctx, queued) };
+    return array(ctx, 4, items);
+}
+
+/* ------------------------------------------------------------------ processes (process_wrap) */
+
+typedef struct {
+    bm_io io;
+    pid_t pid;
+    int pidfd;
+    bool exited, refed, counted;
+    JSObjectRef onexit;      /* onexit(exitCode, signal) (protected until it exits) */
+} bm_node_proc;
+
+static void bm_node_proc_count(bm_node_proc *p) {
+    bool active = p->refed && !p->exited;
+    if (active != p->counted) {
+        bm_io_refs += active ? 1 : -1;
+        p->counted = active;
+    }
+}
+
+static void bm_node_proc_ready(bm_io *h, bool readable, bool writable, bool broken) {
+    (void)readable; (void)writable; (void)broken;
+    bm_node_proc *p = (bm_node_proc *)h;
+    if (p->exited) return;
+    int st = 0;
+    pid_t r;
+    while ((r = waitpid(p->pid, &st, WNOHANG)) < 0 && errno == EINTR) {}
+    if (r == 0) return;
+    p->exited = true;
+    if (p->pidfd >= 0) close(p->pidfd);
+    p->pidfd = -1;
+    bm_node_proc_count(p);
+    int code = WIFEXITED(st) ? WEXITSTATUS(st) : 0;
+    int sig = WIFSIGNALED(st) ? WTERMSIG(st) : 0;
+    JSObjectRef cb = p->onexit;
+    p->onexit = NULL;
+    JSValueRef args[2] = { JSValueMakeNumber(bm_js_ctx, code), JSValueMakeNumber(bm_js_ctx, sig) };
+    bm_node_call_args(cb, 2, args);
+    JSValueUnprotect(bm_js_ctx, cb);
+}
+
+static void bm_node_proc_finalize(JSObjectRef o) {
+    free(JSObjectGetPrivate(o));
+}
+
+static JSClassRef bm_node_proc_class(void) {
+    static JSClassRef cls;
+    if (!cls) {
+        JSClassDefinition def = kJSClassDefinitionEmpty;
+        def.className = "ProcessHandle";
+        def.finalize = bm_node_proc_finalize;
+        cls = JSClassCreate(&def);
+    }
+    return cls;
+}
+
+/* spawn(file, args, env|null, cwd|null, stdio [[type, fd]], detached, onexit) -> [pid or -errno,
+ * handle, [parent fd per stdio: the pipes' ends, else -1]] */
+NATIVE(n_spawn) {
+    UNUSED;
+    if (n < 7) return undef(ctx);
+    char *file = arg_cstr(ctx, n, a, 0);
+    char **argv = bm_node_strings(ctx, a[1]);
+    char **env = JSValueIsNull(ctx, a[2]) ? NULL : bm_node_strings(ctx, a[2]);
+    char *cwd = JSValueIsNull(ctx, a[3]) || JSValueIsUndefined(ctx, a[3]) ? NULL : arg_cstr(ctx, n, a, 3);
+    bm_node_stdio stdio[16];
+    int nstdio = bm_node_stdio_specs(ctx, a[4], stdio, 16);
+    if (!argv) argv = calloc(2, sizeof *argv), argv[0] = strdup(file ? file : "");
+    pid_t pid = file ? bm_node_spawn(file, argv, env, cwd, stdio, nstdio, JSValueToBoolean(ctx, a[5])) : -EINVAL;
+    free(file);
+    free(cwd);
+    bm_node_strings_free(argv);
+    bm_node_strings_free(env);
+    JSValueRef fds[16];
+    for (int i = 0; i < nstdio; i++) fds[i] = num(ctx, pid > 0 && stdio[i].type == BM_STDIO_PIPE ? stdio[i].fd : -1);
+    JSValueRef handle = JSValueMakeNull(ctx);
+    if (pid > 0) {
+        bm_node_proc *p = calloc(1, sizeof *p);
+        p->io.ready = bm_node_proc_ready;
+        p->pid = pid;
+        p->pidfd = -1;
+        p->refed = true;
+        p->onexit = (JSObjectRef)a[6];
+        JSValueProtect(ctx, a[6]);
+        JSObjectRef o = JSObjectMake(ctx, bm_node_proc_class(), p);
+        handle = o;
+        /* (the handle lives while the child does) */
+        JSValueProtect(ctx, o);
+        if (!bm_io_proc(pid, &p->io, &p->pidfd)) bm_node_proc_ready(&p->io, false, false, false);
+        bm_node_proc_count(p);
+    }
+    JSValueRef items[3] = { num(ctx, pid), handle, array(ctx, (size_t)nstdio, fds) };
+    return array(ctx, 3, items);
+}
+
+/* kill(handle, signal) -> 0 or -errno */
+NATIVE(n_proc_kill) {
+    UNUSED;
+    if (n < 1 || !JSValueIsObjectOfClass(ctx, a[0], bm_node_proc_class())) return num(ctx, -EINVAL);
+    bm_node_proc *p = JSObjectGetPrivate((JSObjectRef)a[0]);
+    if (!p || p->exited) return num(ctx, -ESRCH);
+    return num(ctx, kill(p->pid, (int)arg_num(ctx, n, a, 1, SIGTERM)) == 0 ? 0 : -errno);
+}
+
+/* procRef(handle, bool); procRelease(handle): JS is done with it */
+NATIVE(n_proc_ref) {
+    UNUSED;
+    if (n < 1 || !JSValueIsObjectOfClass(ctx, a[0], bm_node_proc_class())) return undef(ctx);
+    bm_node_proc *p = JSObjectGetPrivate((JSObjectRef)a[0]);
+    p->refed = n > 1 && JSValueToBoolean(ctx, a[1]);
+    bm_node_proc_count(p);
+    return undef(ctx);
+}
+
+NATIVE(n_proc_release) {
+    UNUSED;
+    if (n < 1 || !JSValueIsObjectOfClass(ctx, a[0], bm_node_proc_class())) return undef(ctx);
+    bm_node_proc *p = JSObjectGetPrivate((JSObjectRef)a[0]);
+    /* (a child still running keeps its handle until it exits) */
+    if (p->exited) JSValueUnprotect(ctx, a[0]);
+    return undef(ctx);
+}
+
+static void bm_node_streams_install(JSContextRef ctx, JSObjectRef native) {
+    JSObjectRef st = JSObjectMake(ctx, NULL, NULL);
+    bm_js_def(ctx, st, "open", n_stream_open);
+    bm_js_def(ctx, st, "readStart", n_stream_read_start);
+    bm_js_def(ctx, st, "readStop", n_stream_read_stop);
+    bm_js_def(ctx, st, "write", n_stream_write);
+    bm_js_def(ctx, st, "shutdown", n_stream_shutdown);
+    bm_js_def(ctx, st, "close", n_stream_close);
+    bm_js_def(ctx, st, "release", n_stream_release);
+    bm_js_def(ctx, st, "ref", n_stream_ref);
+    bm_js_def(ctx, st, "info", n_stream_info);
+    set(ctx, native, "stream", st);
+    JSObjectRef pr = JSObjectMake(ctx, NULL, NULL);
+    bm_js_def(ctx, pr, "spawn", n_spawn);
+    bm_js_def(ctx, pr, "kill", n_proc_kill);
+    bm_js_def(ctx, pr, "ref", n_proc_ref);
+    bm_js_def(ctx, pr, "release", n_proc_release);
+    set(ctx, native, "process", pr);
+}
+
 /* ------------------------------------------------------------------ vm (Node.js's node_contextify.cc)
  *
  * Scripts run with JSEvaluateScript, in this context or a new one. A new context is a global
@@ -2478,4 +3197,6 @@ void bm_node_install(JSContextRef ctx, JSObjectRef native) {
     bm_node_zlib_install(ctx, native);
     bm_node_dns_install(ctx, native);
     bm_node_vm_install(ctx, native);
+    bm_js_def(ctx, native, "spawnSync", n_spawn_sync);
+    bm_node_streams_install(ctx, native);
 }

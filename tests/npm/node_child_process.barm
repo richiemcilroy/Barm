@@ -1,0 +1,8 @@
+import run from "node-child-process"
+import { runAsync } from "node-child-process"
+
+async function main() {
+  // Node.js's child_process used by an npm package
+  try run()
+  try await (try runAsync())
+}
