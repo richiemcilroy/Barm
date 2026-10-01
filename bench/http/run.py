@@ -43,6 +43,11 @@ SERVERS = {
     "node": lambda: ["node", os.path.join(HERE, "server.node.mjs")],
 }
 SERVERS["rust-tpc"] = SERVERS["rust"]  # with MODE=tpc (Linux: SO_REUSEPORT balances)
+# Rust with TCP_NODELAY (NODELAY=1; thread-per-core on Linux): responses go out at once, as Barm
+# sends them. axum's default keeps Nagle's algorithm on, which holds a response while earlier
+# data is unacknowledged: on loopback that moves the cost of sending onto the client, and the
+# wait shows up as latency.
+SERVERS["rust-nodelay"] = SERVERS["rust"]
 
 
 def wait_port(port, timeout=10):
@@ -173,7 +178,9 @@ def main():
         samples = {}
         for rep in range(a.repeat):
             for name in names:
-                env = dict(os.environ, PORT=str(PORT), WORKERS=str(workers), MODE="tpc" if name == "rust-tpc" else "")
+                linux = os.uname().sysname == "Linux"
+                tpc = name == "rust-tpc" or (name == "rust-nodelay" and linux)
+                env = dict(os.environ, PORT=str(PORT), WORKERS=str(workers), MODE="tpc" if tpc else "", NODELAY="1" if name == "rust-nodelay" else "")
                 proc = subprocess.Popen(SERVERS[name](), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
                 try:
                     wait_port(PORT)

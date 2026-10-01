@@ -18,7 +18,7 @@ Files:
 
 ## Results
 
-Apple M4 Max (12 performance + 4 efficiency cores). The load generator runs on the same machine as the server, with 8 threads and 128 persistent connections, one request in flight per connection. Servers are interleaved across 3 repetitions and the median is shown. `cpu/req` is the server's CPU time per request. `mem` is the memory the server costs the machine: the proportional set size (PSS) on Linux and the physical footprint on macOS, summed over its processes, so pages that forked workers share are counted once. `rss` (resident set, summed) is in the JSON results too; it counts shared pages once per process, which inflates multi-process servers.
+Apple M4 Max (12 performance + 4 efficiency cores). The load generator runs on the same machine as the server, with 8 threads and 128 persistent connections, one request in flight per connection. Servers are interleaved across 3 repetitions and the median is shown. `cpu/req` is the server's CPU time per request. `mem` is the memory the server costs the machine: the proportional set size (PSS) on Linux and the physical footprint on macOS, summed over its processes, so pages that forked workers share are counted once. `rss` (resident set, summed) is in the JSON results too. It counts shared pages once per process, which inflates multi-process servers: four Barm workers and their supervisor each map the same libc pages, so summed RSS is 8.7 MB, against 1.7 MB of memory actually used (PSS). One multithreaded Rust process maps them once. PSS is the measure that adds up to what the machine spends.
 
 ### Linux (Docker VM, 16 vCPUs, epoll)
 
@@ -57,14 +57,35 @@ Pipelined (16 requests in flight per connection, as in TechEmpower's plaintext t
 
 The tables above are closed loop: each server runs as fast as it can, so tail latency there mixes in how hard the machine is being pushed. To compare latency, the load generator also runs open loop (`--rate`, like wrk2): requests go out on a fixed schedule every server can sustain, and each is timed from when it *should* have been sent.
 
-| json route | Barm p50 | p99 | p99.9 | Rust tpc p50 | p99 | p99.9 | Rust p50 | p99 | p99.9 |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 worker at 200k req/s | **334 µs** | **1.30 ms** | **1.67 ms** | 1.11 ms | 2.05 ms | 2.98 ms | 1.11 ms | 2.02 ms | 2.76 ms |
-| 4 workers at 600k req/s | **170 µs** | **1.30 ms** | **1.58 ms** | 435 µs | 1.91 ms | 2.28 ms | 570 µs | 2.04 ms | 2.64 ms |
+`rust-nodelay` is Rust with `TCP_NODELAY` set (thread-per-core on four workers), so it sends each response at once, as Barm does. axum leaves Nagle's algorithm on by default.
 
-Bun can't hold these rates open loop (it falls to 38k and 158k): when requests queue on a connection they arrive pipelined, where Bun is slow (see the pipelined table).
+1 worker at 200k req/s, json route:
 
-At a fixed partial load Barm uses a little more CPU per request than Rust (2.70 vs 2.27 µs at 200k): it answers each request as soon as it arrives, so it reads more often. Rust reaches the socket later, finds several requests waiting and reads them at once; that wait is its higher p50. Total syscalls per request are the same (strace: 390k vs 399k over the same run).
+| | Barm | Rust | Rust tpc | Rust, no delay |
+|---|---:|---:|---:|---:|
+| p50 | **346 µs** | 1.13 ms | 1.14 ms | 348 µs |
+| p99 | **1.33 ms** | 2.07 ms | 2.07 ms | 1.46 ms |
+| p99.9 | 1.96 ms | 2.71 ms | 2.62 ms | **1.81 ms** |
+| cpu/req | 2.22 µs | 1.83 µs | **1.72 µs** | 2.89 µs |
+
+4 workers at 600k req/s, json route:
+
+| | Barm | Rust | Rust tpc | Rust, no delay |
+|---|---:|---:|---:|---:|
+| p50 | **190 µs** | 499 µs | 440 µs | 206 µs |
+| p99 | **1.26 ms** | 2.10 ms | 1.92 ms | 1.70 ms |
+| p99.9 | **2.18 ms** | 3.37 ms | 2.35 ms | 3.09 ms |
+| cpu/req | 2.20 µs | 1.92 µs | **1.55 µs** | 2.76 µs |
+
+Bun can't hold these rates open loop (it falls to 41k and 102k): when requests queue on a connection they arrive pipelined, where Bun is slow (see the pipelined table).
+
+Barm sends every response the moment it's ready. Sending immediately costs more CPU per request than holding a response back:
+- Rust with Nagle's algorithm (axum's default) holds a response while the client hasn't yet acknowledged the previous one. The response goes out when the acknowledgement arrives.
+- On loopback, whoever sends a packet also pays for the receiver's TCP processing and wakeup. A held response is sent from the client's side, so its cost lands on the load generator, not on the server.
+- The hold is also why Rust's median latency is 2.5–3.3 times Barm's.
+- `perf` shows it directly. In Barm, transmitting is 45% of its CPU time, the client's receive and wakeup included. In default Rust, transmitting is 1.6%.
+
+When Rust sends immediately too (`Rust, no delay`), its latency matches Barm's and it uses 25–30% more CPU per request. On a real network the receiver's TCP work runs on the client machine, and Barm uses about half Rust's user-space CPU per request.
 
 ### macOS (kqueue)
 
