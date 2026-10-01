@@ -45,10 +45,12 @@ function byteLengthUtf8(s) {
 
 // Encodes s into buf at offset, up to max bytes, never splitting a character (lone surrogates
 // become U+FFFD); returns the bytes written
-function utf8Encode(buf, s, offset, max) {
+// (`read`, if given, gets the UTF-16 code units consumed at [0])
+function utf8Encode(buf, s, offset, max, read) {
   let o = offset;
   const end = offset + max;
-  for (let i = 0; i < s.length; i++) {
+  let i = 0;
+  for (; i < s.length; i++) {
     let c = s.charCodeAt(i);
     if (c < 0x80) {
       if (o >= end) break;
@@ -80,6 +82,7 @@ function utf8Encode(buf, s, offset, max) {
       buf[o++] = 0x80 | (c & 0x3f);
     }
   }
+  if (read !== undefined) read[0] = i;
   return o - offset;
 }
 
@@ -494,7 +497,14 @@ module.exports = {
   base64urlWrite: write(base64Encode),
   hexWrite: write(hexEncode),
   ucs2Write: write(ucs2Encode),
+  // (for the other bindings: encoding_binding)
+  utf8Encode,
+  utf8Decode,
   createUnsafeArrayBuffer: (size) => new ArrayBuffer(size),
+  // web streams: copy bytes between ArrayBuffers
+  copyArrayBuffer(destination, destinationOffset, source, sourceOffset, bytesToCopy) {
+    new Uint8Array(destination, destinationOffset, bytesToCopy).set(new Uint8Array(source, sourceOffset, bytesToCopy));
+  },
   setDetachKey() {},
   getZeroFillToggle: () => undefined,
 };

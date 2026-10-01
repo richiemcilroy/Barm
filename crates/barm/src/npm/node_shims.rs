@@ -3,26 +3,25 @@
 
 include!(concat!(env!("OUT_DIR"), "/node_shims.rs"));
 
+/// The module id a built-in `name` is stored under: `node:` dropped, and "__globals" (what runs
+/// before an npm bundle's first module) is internal/bootstrap/globals.
+fn shim_id(name: &str) -> &str {
+    match name {
+        "__globals" => "internal/bootstrap/globals",
+        _ => name.strip_prefix("node:").unwrap_or(name),
+    }
+}
+
 /// The shim for built-in `name` (`"fs"`, `"fs/promises"`, or inside shims `"internal/util"`),
 /// if Barm has one. Most are Node.js's own lib/ files (see runtime/node/NODE.md).
 pub fn shim(name: &str) -> Option<&'static str> {
-    let id = match name {
-        // internal/bootstrap/globals needs require(): it takes over from the stand-in below once
-        // the bundler loads __globals as a module (until then the stand-in is used)
-        "__globals" => return None,
-        _ => name.strip_prefix("node:").unwrap_or(name),
-    };
+    let id = shim_id(name);
     NODE_SHIMS.binary_search_by(|(k, _)| k.cmp(&id)).ok().map(|i| NODE_SHIMS[i].1)
 }
 
 /// The static `require(...)` specifiers of shim `name` (found when Barm is built).
 pub fn shim_requires(name: &str) -> &'static [&'static str] {
-    let id = match name {
-        // internal/bootstrap/globals needs require(): it takes over from the stand-in below once
-        // the bundler loads __globals as a module (until then the stand-in is used)
-        "__globals" => return None,
-        _ => name.strip_prefix("node:").unwrap_or(name),
-    };
+    let id = shim_id(name);
     NODE_SHIMS.binary_search_by(|(k, _)| k.cmp(&id)).ok().map(|i| NODE_SHIM_REQUIRES[i]).unwrap_or(&[])
 }
 
