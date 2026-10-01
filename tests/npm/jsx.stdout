@@ -1,0 +1,3 @@
+<section static className="card" data-kind="list" id="c1">[<h1 static>["Fruit", " & more"]</h1>, <Star size=2 filled=true></Star>, <ul>[<li #apple>"apple"</li>, <li #pear>"pear"</li>]</ul>, <Fragment>"don't   wrap lines"</Fragment>]</section>
+5
+<b>"many"</b> <i>"one"</i>

@@ -151,11 +151,17 @@ impl Resolver {
             return Err(format!("\"{spec}\" is not exported by its package (package.json `exports`)"));
         }
         if subpath == "." {
-            let main = pkg.as_ref().and_then(|p| p.get("main")).and_then(|m| m.as_str()).unwrap_or("index.js").to_string();
-            if let Some(f) = self.file_or_dir(&pkg_dir.join(&main)) {
-                return Ok(Target::File(f));
+            // `main`, else `module` (the ES module build bundlers and Bun use)
+            for field in ["main", "module"] {
+                if let Some(main) = pkg.as_ref().and_then(|p| p.get(field)).and_then(|m| m.as_str())
+                    && let Some(f) = self.file_or_dir(&pkg_dir.join(main))
+                {
+                    return Ok(Target::File(f));
+                }
             }
-            return self.file_or_dir(&pkg_dir.join("index.js")).map(Target::File).ok_or_else(|| format!("can't find the entry point of \"{spec}\""));
+            // no `main` (or a missing one): the package directory's index file (index.js, index.json, ...)
+            let index = ["index.js", "index.json", "index.cjs", "index.mjs", "index.ts", "index.tsx"].iter().map(|i| pkg_dir.join(i)).find(|p| p.is_file());
+            return index.and_then(|p| canonical(&p)).map(Target::File).ok_or_else(|| format!("can't find the entry point of \"{spec}\""));
         }
         self.file_or_dir(&pkg_dir.join(&subpath[2..])).map(Target::File).ok_or_else(|| format!("can't find \"{spec}\""))
     }

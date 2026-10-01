@@ -50,6 +50,28 @@ fn main() -> ExitCode {
         Some("explain") => explain(rest.get(1).map(|s| s.as_str())),
         // Internal: bundle npm packages (for testing the bundler): `barm __bundle <dir> <spec>... [-o out.js]`.
         Some("__bundle") => bundle_cmd(&rest[1..]),
+        // Internal: the npm bundler's tokens of a file between two byte offsets: `barm __lex <file> [from] [to]`.
+        Some("__lex") => {
+            let a = &rest[1..];
+            let Some(src) = a.first().and_then(|f| std::fs::read_to_string(f).ok()) else {
+                eprintln!("usage: barm __lex <file> [from] [to]");
+                return ExitCode::from(2);
+            };
+            let from: u32 = a.get(1).and_then(|x| x.parse().ok()).unwrap_or(0);
+            let to: u32 = a.get(2).and_then(|x| x.parse().ok()).unwrap_or(u32::MAX);
+            match barm::npm::lex::tokenize(&src) {
+                Ok(toks) => {
+                    for t in toks.iter().filter(|t| t.start >= from && t.start < to) {
+                        println!("{} {:?} {:?}", t.start, t.kind, t.text(&src));
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error at byte {}: {}", e.pos, e.message);
+                    ExitCode::from(1)
+                }
+            }
+        }
         // Bun's package commands: there's nothing for them to do yet, so say so.
         Some(cmd @ ("install" | "i" | "add" | "remove" | "update")) => {
             eprintln!("error: `barm {cmd}` isn't available yet");

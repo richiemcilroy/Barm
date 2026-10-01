@@ -59,7 +59,7 @@ pub fn has_module_syntax(src: &str) -> bool {
 
 /// Rewrites an ES module as a module function body (with `ESM_PARAMS`); returns it with the
 /// specifiers it requires.
-pub fn to_commonjs(src: &str, ts: bool, jsx: bool) -> Result<(String, Vec<String>), String> {
+pub fn to_commonjs(src: &str, ts: bool, jsx: Option<&str>) -> Result<(String, Vec<String>), String> {
     let m = parse::parse(src, ts, jsx).map_err(|e| {
         let line = src[..(e.pos as usize).min(src.len())].bytes().filter(|&b| b == b'\n').count() + 1;
         format!("{} (line {line})", e.message)
@@ -159,6 +159,14 @@ pub fn to_commonjs(src: &str, ts: bool, jsx: bool) -> Result<(String, Vec<String
         at = e;
     }
     out.push_str(&src[at..]);
+    // `export { x as "module.exports" }`: what require() returns (Node.js 22's interop)
+    if let Some((_, target)) = m.exports.iter().find(|(n, _)| n == "module.exports") {
+        let value = match target {
+            ExportTarget::Local(local) => local.clone(),
+            ExportTarget::Import { source, name } => member(&ns(*source), name),
+        };
+        let _ = write!(out, "\n__barm_m.exports = {value};");
+    }
     debug_assert!(!out[..prologue_len].contains('\n'));
     Ok((out, requires))
 }
@@ -168,7 +176,7 @@ mod tests {
     use super::*;
 
     fn to_commonjs_js(src: &str) -> Result<(String, Vec<String>), String> {
-        to_commonjs(src, false, false)
+        to_commonjs(src, false, None)
     }
 
     #[test]
@@ -190,7 +198,7 @@ mod tests {
     }
 
     fn ts(src: &str) -> String {
-        let (out, _) = to_commonjs(src, true, false).unwrap_or_else(|e| panic!("{e}"));
+        let (out, _) = to_commonjs(src, true, None).unwrap_or_else(|e| panic!("{e}"));
         // the prologue, then the module
         out.split_once("}); ").unwrap().1.split_once("__barm_r(").map_or(out.split_once("}); ").unwrap().1, |(_, b)| b.split_once("; ").unwrap().1).lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().join("\n")
     }
@@ -218,7 +226,7 @@ mod tests {
 
     #[test]
     fn type_imports_are_dropped() {
-        let (out, _) = to_commonjs("import { A, b } from './a';\nimport type { C } from './c';\nimport { type D } from './d';\nimport { E } from './e';\nimport './f';\nlet x: A = b(); let y: E;\nexport { type C as CC, b };\nexport type { D };", true, false).unwrap();
+        let (out, _) = to_commonjs("import { A, b } from './a';\nimport type { C } from './c';\nimport { type D } from './d';\nimport { E } from './e';\nimport './f';\nlet x: A = b(); let y: E;\nexport { type C as CC, b };\nexport type { D };", true, None).unwrap();
         assert!(out.contains("__barm_r(\"./a\")") && out.contains("__barm_r(\"./f\")"), "{out}");
         assert!(!out.contains("./c") && !out.contains("./d") && !out.contains("./e"), "{out}");
         assert!(out.contains("\"b\": function () { return __barm_i0.b; }") && !out.contains("CC"), "{out}");
