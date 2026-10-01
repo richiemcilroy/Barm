@@ -1,0 +1,6 @@
+import run from "node-vm"
+
+function main() {
+  // Node.js's vm used by an npm package
+  try run()
+}
