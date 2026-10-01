@@ -109,7 +109,7 @@ pub fn to_commonjs(src: &str, ts: bool, jsx: bool) -> Result<(String, Vec<String
     edits.sort_by_key(|&(s, e, _)| (s, e != s, std::cmp::Reverse(e)));
 
     let mut out = String::with_capacity(src.len() + 256 + m.exports.len() * 48);
-    out.push_str("\"use strict\";\n");
+    out.push_str("\"use strict\"; ");
     // exports first: other modules in an import cycle may read them before this body runs
     out.push_str("__barm_esm(__barm_x, {");
     for (name, target) in &m.exports {
@@ -119,30 +119,36 @@ pub fn to_commonjs(src: &str, ts: bool, jsx: bool) -> Result<(String, Vec<String
         };
         let _ = write!(out, "{}: function () {{ return {value}; }}, ", js_string(name));
     }
-    out.push_str("});\n");
+    out.push_str("}); ");
     let mut requires = Vec::with_capacity(m.sources.len() + m.requires.len());
     for (i, spec) in m.sources.iter().enumerate() {
         if !m.used[i] {
             continue;
         }
-        let _ = write!(out, "var {} = __barm_ns(__barm_r({}));\n", ns(i), js_string(spec));
+        let _ = write!(out, "var {} = __barm_ns(__barm_r({})); ", ns(i), js_string(spec));
         requires.push(spec.clone());
     }
     for &s in &m.stars {
-        let _ = writeln!(out, "__barm_star(__barm_x, {});", ns(s));
+        let _ = write!(out, "__barm_star(__barm_x, {}); ", ns(s));
     }
     if !m.import_meta.is_empty() {
-        out.push_str("var __barm_meta = { url: \"file://\" + __barm_f, filename: __barm_f, dirname: __barm_d, resolve: function (s) { return \"file://\" + __barm_r.resolve(s); } };\n");
+        out.push_str("var __barm_meta = { url: \"file://\" + __barm_f, filename: __barm_f, dirname: __barm_d, resolve: function (s) { return \"file://\" + __barm_r.resolve(s); } }; ");
     }
     if !m.dynamic_imports.is_empty() {
-        out.push_str("var __barm_import = function (s) { return new Promise(function (ok) { ok(__barm_ns(__barm_r(s))); }); };\n");
+        out.push_str("var __barm_import = function (s) { return new Promise(function (ok) { ok(__barm_ns(__barm_r(s))); }); }; ");
     }
     for r in m.requires {
         if !requires.contains(&r) {
             requires.push(r);
         }
     }
+    // the prologue is one line: the module's lines keep their numbers
+    let prologue_len = out.len();
     let mut at = 0usize;
+    if src.starts_with("#!") {
+        out.push_str("//");
+        at = 2;
+    }
     for (s, e, text) in edits {
         let (s, e) = (s as usize, e as usize);
         if s < at {
@@ -153,6 +159,7 @@ pub fn to_commonjs(src: &str, ts: bool, jsx: bool) -> Result<(String, Vec<String
         at = e;
     }
     out.push_str(&src[at..]);
+    debug_assert!(!out[..prologue_len].contains('\n'));
     Ok((out, requires))
 }
 
@@ -185,7 +192,7 @@ mod tests {
     fn ts(src: &str) -> String {
         let (out, _) = to_commonjs(src, true, false).unwrap_or_else(|e| panic!("{e}"));
         // the prologue, then the module
-        out.split_once("});\n").unwrap().1.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().join("\n")
+        out.split_once("}); ").unwrap().1.split_once("__barm_r(").map_or(out.split_once("}); ").unwrap().1, |(_, b)| b.split_once("; ").unwrap().1).lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().join("\n")
     }
 
     #[test]

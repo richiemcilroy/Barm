@@ -11,8 +11,7 @@
 #include <string.h>
 
 JSGlobalContextRef bm_js_ctx;
-static JSStringRef bm_js_bundle_text;   /* the bundle, kept for __barm_source */
-static JSStringRef bm_js_bundle_url;
+static JSStringRef bm_js_bundle_url;    /* the prelude's URL */
 static JSObjectRef bm_js_npm;           /* globalThis.__barm_npm (protected) */
 static JSObjectRef bm_js_noop;          /* calling it runs pending microtasks */
 
@@ -33,17 +32,79 @@ static JSValueRef bm_js_noop_fn(JSContextRef ctx, JSObjectRef f, JSObjectRef sel
     return JSValueMakeUndefined(ctx);
 }
 
-/* globalThis.__barm_source(url): the bundle's text for its own URL (assert reads the failing
+/* The blob (see Bundle::blob in crates/barm/src/npm/bundle.rs): a u32 index — the module count,
+ * the prelude's offset, then per module its name's offset, its source's offset and length — and
+ * NUL-terminated strings. */
+static uint32_t bm_js_u32(const unsigned char *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
+static uint32_t bm_js_nmodules(void) { return bm_js_u32(bm_js_blob); }
+static const char *bm_js_prelude(void) { return (const char *)bm_js_blob + bm_js_u32(bm_js_blob + 4); }
+static const char *bm_js_module_name(uint32_t i) { return (const char *)bm_js_blob + bm_js_u32(bm_js_blob + 8 + 12 * i); }
+static const char *bm_js_module_src(uint32_t i, size_t *len) {
+    *len = bm_js_u32(bm_js_blob + 16 + 12 * i);
+    return (const char *)bm_js_blob + bm_js_u32(bm_js_blob + 12 + 12 * i);
+}
+
+static JSStringRef bm_js_string_ref(const char *s, size_t n, bool nul_terminated);
+
+/* A module's source as a JavaScript string. */
+static JSStringRef bm_js_module_text(uint32_t i) {
+    size_t len;
+    const char *src = bm_js_module_src(i, &len);
+    /* (the bundler's sources are valid UTF-8; a NUL byte inside needs the slow path) */
+    if (strlen(src) == len) return JSStringCreateWithUTF8CString(src);
+    return bm_js_string_ref(src, len, false);
+}
+
+/* globalThis.__barm_compile(id): module `id`'s function, compiled on first require with the
+ * module's name as its URL (stack traces name the file; line numbers are the file's). */
+static JSValueRef bm_js_compile_fn(JSContextRef ctx, JSObjectRef f, JSObjectRef self, size_t n, const JSValueRef a[], JSValueRef *exc) {
+    (void)f; (void)self;
+    double d = n > 0 ? JSValueToNumber(ctx, a[0], NULL) : -1;
+    if (!(d >= 0 && d < bm_js_nmodules())) return JSValueMakeUndefined(ctx);
+    uint32_t i = (uint32_t)d;
+    /* BARM_JS_TRACE=1 lists the modules as they're compiled (what a program loads at start) */
+    static int trace = -1;
+    if (trace < 0) trace = getenv("BARM_JS_TRACE") != NULL;
+    double t0 = trace ? bm_performance_now() : 0;
+    JSStringRef src = bm_js_module_text(i);
+    JSStringRef url = JSStringCreateWithUTF8CString(bm_js_module_name(i));
+    JSValueRef r = JSEvaluateScript(ctx, src, NULL, url, 1, exc);
+    JSStringRelease(src);
+    JSStringRelease(url);
+    if (trace) {
+        char line[512];
+        size_t len;
+        bm_js_module_src(i, &len);
+        int k = snprintf(line, sizeof line, "barm: compiled %s (%zu bytes) in %.3f ms\n", bm_js_module_name(i), len, bm_performance_now() - t0);
+        bm_write_fd(2, line, (size_t)k);
+    }
+    return r;
+}
+
+/* globalThis.__barm_source(url): the code of the module at `url` (assert reads the failing
  * expression from it), else undefined. */
 static JSValueRef bm_js_source_fn(JSContextRef ctx, JSObjectRef f, JSObjectRef self, size_t n, const JSValueRef a[], JSValueRef *exc) {
     (void)f; (void)self;
-    if (n > 0 && JSValueIsString(ctx, a[0])) {
-        JSStringRef url = JSValueToStringCopy(ctx, a[0], exc);
-        bool ours = url && JSStringIsEqual(url, bm_js_bundle_url);
-        if (url) JSStringRelease(url);
-        if (ours) return JSValueMakeString(ctx, bm_js_bundle_text);
+    if (n == 0 || !JSValueIsString(ctx, a[0])) return JSValueMakeUndefined(ctx);
+    bm_str url = bm_js_to_str(a[0]);
+    JSValueRef r = JSValueMakeUndefined(ctx);
+    if (strcmp(url.p->data, "barm:npm") == 0) {
+        JSStringRef t = JSStringCreateWithUTF8CString(bm_js_prelude());
+        r = JSValueMakeString(ctx, t);
+        JSStringRelease(t);
+    } else {
+        for (uint32_t i = 0, n = bm_js_nmodules(); i < n; i++) {
+            if (strcmp(bm_js_module_name(i), url.p->data) == 0) {
+                JSStringRef t = bm_js_module_text(i);
+                r = JSValueMakeString(ctx, t);
+                JSStringRelease(t);
+                break;
+            }
+        }
     }
-    return JSValueMakeUndefined(ctx);
+    bm_str_release(url);
+    (void)exc;
+    return r;
 }
 
 void bm_js_def(JSContextRef ctx, JSObjectRef obj, const char *name, JSObjectCallAsFunctionCallback fn) {
@@ -71,13 +132,14 @@ JSContextRef bm_js(void) {
     JSStringRelease(k);
     bm_node_install(ctx, native);
     bm_js_def(ctx, global, "__barm_source", bm_js_source_fn);
+    bm_js_def(ctx, global, "__barm_compile", bm_js_compile_fn);
     bm_js_noop = JSObjectMakeFunctionWithCallback(ctx, NULL, bm_js_noop_fn);
     JSValueProtect(ctx, bm_js_noop);
-    /* (the bundle is NUL-terminated) */
-    bm_js_bundle_text = JSStringCreateWithUTF8CString(bm_js_bundle);
+    JSStringRef prelude = JSStringCreateWithUTF8CString(bm_js_prelude());
     bm_js_bundle_url = JSStringCreateWithUTF8CString("barm:npm");
     JSValueRef exc = NULL;
-    JSEvaluateScript(ctx, bm_js_bundle_text, NULL, bm_js_bundle_url, 1, &exc);
+    JSEvaluateScript(ctx, prelude, NULL, bm_js_bundle_url, 1, &exc);
+    JSStringRelease(prelude);
     if (exc) bm_js_fatal("npm packages failed to load: ", exc);
     k = JSStringCreateWithUTF8CString("__barm_npm");
     JSValueRef npm = JSObjectGetProperty(ctx, global, k, NULL);
