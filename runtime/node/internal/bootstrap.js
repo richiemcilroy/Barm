@@ -12,6 +12,7 @@ const loaders = {
   async_context_frame: () => require('internal/bindings/async_context_frame'),
   async_wrap: () => require('internal/bindings/async_wrap'),
   blob: () => require('internal/bindings/blob'),
+  block_list: () => require('internal/bindings/block_list'),
   buffer: () => require('internal/bindings/buffer'),
   cares_wrap: () => require('internal/bindings/cares_wrap'),
   config: () => require('internal/bindings/config'),
