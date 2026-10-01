@@ -626,9 +626,15 @@ pub fn require_patterns(src: &str) -> Vec<(String, String)> {
     let Ok(toks) = tokenize(src) else { return Vec::new() };
     let mut out = Vec::new();
     for (i, t) in toks.iter().enumerate() {
-        if t.kind != Kind::Ident || t.text(src) != "require" || (i > 0 && is_member_dot(&toks[i - 1], src)) || toks.get(i + 1).is_none_or(|t| t.text(src) != "(") {
+        if t.kind != Kind::Ident || !is_require_name(t.text(src)) || (i > 0 && is_member_dot(&toks[i - 1], src)) {
             continue;
         }
+        // `require(` or `require.resolve(`: `i` moves to the token before `(`
+        let i = match toks.get(i + 1).map(|t| t.text(src)) {
+            Some("(") => i,
+            Some(".") if toks.get(i + 2).is_some_and(|t| t.text(src) == "resolve") && toks.get(i + 3).is_some_and(|t| t.text(src) == "(") => i + 2,
+            _ => continue,
+        };
         let Some(arg) = toks.get(i + 2) else { continue };
         match arg.kind {
             // `prefix${x}suffix` (one substitution of a plain name or member chain)

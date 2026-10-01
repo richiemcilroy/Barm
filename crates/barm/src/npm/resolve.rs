@@ -41,6 +41,20 @@ pub fn is_typescript(file: &Path) -> bool {
 pub struct Resolver {
     /// package.json contents by directory (None: no package.json there).
     packages: RefCell<FxMap<PathBuf, Option<std::rc::Rc<Json>>>>,
+    /// Resolving an ES module's imports: `exports`' "import" conditions come first (a dual
+    /// package's ES module build, as Node.js and Bun pick for `import`).
+    esm: std::cell::Cell<bool>,
+}
+
+impl Resolver {
+    /// Resolve for an ES module (true) or a CommonJS one.
+    pub fn set_esm(&self, esm: bool) {
+        self.esm.set(esm);
+    }
+
+    fn condition_order(&self) -> [&'static [&'static str]; 2] {
+        if self.esm.get() { [IMPORT_CONDITIONS, REQUIRE_CONDITIONS] } else { [REQUIRE_CONDITIONS, IMPORT_CONDITIONS] }
+    }
 }
 
 /// `exports` conditions, most preferred first: CommonJS builds, then ES modules.
@@ -49,7 +63,7 @@ const IMPORT_CONDITIONS: &[&str] = &["import", "node", "default"];
 
 impl Default for Resolver {
     fn default() -> Self {
-        Resolver { packages: RefCell::new(FxMap::default()) }
+        Resolver { packages: RefCell::new(FxMap::default()), esm: std::cell::Cell::new(false) }
     }
 }
 
@@ -138,7 +152,7 @@ impl Resolver {
     fn in_package(&self, pkg_dir: &Path, subpath: &str, spec: &str) -> Result<Target, String> {
         let pkg = self.package_json(pkg_dir);
         if let Some(exports) = pkg.as_ref().and_then(|p| p.get("exports")) {
-            for conds in [REQUIRE_CONDITIONS, IMPORT_CONDITIONS] {
+            for conds in self.condition_order() {
                 match resolve_exports(exports, subpath, conds) {
                     Some(Some(target)) => {
                         let p = pkg_dir.join(target.trim_start_matches("./"));
@@ -177,7 +191,7 @@ impl Resolver {
         while let Some(d) = dir {
             if let Some(pkg) = self.package_json(d) {
                 let imports = pkg.get("imports").ok_or_else(|| format!("\"{spec}\": the package has no `imports` field"))?;
-                for conds in [REQUIRE_CONDITIONS, IMPORT_CONDITIONS] {
+                for conds in self.condition_order() {
                     if let Some(Some(target)) = resolve_map(imports, spec, conds) {
                         if let Some(rel) = target.strip_prefix("./") {
                             let p = d.join(rel);
@@ -271,7 +285,12 @@ fn resolve_map(map: &Json, key: &str, conds: &[&str]) -> Option<Option<String>> 
         let (prefix, suffix) = (&k[..star], &k[star + 1..]);
         if key.len() >= prefix.len() + suffix.len() && key.starts_with(prefix) && key.ends_with(suffix) {
             let matched = key[prefix.len()..key.len() - suffix.len()].to_string();
-            if best.as_ref().is_none_or(|(bk, _, _)| prefix.len() > bk.find('*').unwrap_or(0)) {
+            // Node.js's order: the longer prefix before `*`, then the longer key
+            let better = |bk: &str| {
+                let bp = bk.find('*').unwrap_or(0);
+                prefix.len() > bp || (prefix.len() == bp && k.len() > bk.len())
+            };
+            if best.as_ref().is_none_or(|(bk, _, _)| better(bk)) {
                 best = Some((k.as_str(), target, matched));
             }
         }
