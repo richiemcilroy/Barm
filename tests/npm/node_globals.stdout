@@ -1,0 +1,9 @@
+console { a: 1, b: [ 1, 2 ] } xxx 42
+process module true true true
+performance number true true function
+SharedArrayBuffer 8 5 [object SharedArrayBuffer]
+createRequire true true lib true false true
+createRequire missing MODULE_NOT_FOUND
+constants 0 15
+URL https://user@example.com:8080/b?x=1&y=2+3#h example.com:8080 /b https://example.com:8080
+callsites string run number

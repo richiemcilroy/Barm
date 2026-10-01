@@ -1,0 +1,6 @@
+import run from "node-globals"
+
+function main() {
+  // Node.js's globals used by an npm package
+  try run()
+}
