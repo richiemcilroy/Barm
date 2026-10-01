@@ -183,6 +183,13 @@ for (const m of emitterMethods) {
     },
   });
 }
+// uncaught exceptions go to 'uncaughtException' listeners, if there are any
+native.setFatalHandler?.((err) => {
+  if (!emitter || process.listenerCount('uncaughtException') === 0) return false;
+  process.emit('uncaughtException', err, 'uncaughtException');
+  return true;
+});
+
 // for the host: whether anything can be listening (to 'exit' and 'beforeExit')
 Object.defineProperty(process, '_barmEmitter', { __proto__: null, get: () => emitter, enumerable: false, configurable: true });
 

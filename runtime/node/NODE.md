@@ -46,6 +46,7 @@ Per-context files also get `privateSymbols` and `perIsolateSymbols`.
 - `internal/primordials.js`: defines `Symbol.dispose` and `Symbol.asyncDispose` when the engine lacks them (JavaScriptCore does), as Node.js once did.
 - `internal/url.js`: blob URLs get their UUIDs from `internal/barm/random` rather than `internal/crypto/random`, so `URL` doesn't bring `crypto` into every bundle.
 - `internal/tls/wrap.js`: `internal/crypto/x509` loads when a peer certificate is asked for, so `tls` and `https` load without Node.js's key objects.
+- `cluster.js`: requires `internal/cluster/child` and `internal/cluster/primary` by name, not through a template string, so the bundler sees them.
 - `internal/util/debuglog.js`: `testEnabled` is initialized on first use when startup hasn't done it.
 - `internal/util.js`: `getInternalGlobal()` returns the primordial `RegExp`, `Object` and `Array` rather than a second realm from `vm` (none yet).
 

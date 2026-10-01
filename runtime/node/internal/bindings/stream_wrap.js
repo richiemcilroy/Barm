@@ -194,7 +194,67 @@ class LibuvStreamWrap {
   asyncReset() {}
 }
 
+// a socket (TCP, or a unix socket for Pipe): made when it's first bound or connected, in the
+// address's family (4, 6, or 0 for a unix path)
+class SocketWrap extends LibuvStreamWrap {
+  // (the family a new socket is made in: subclasses)
+  _barmSocket(family) {
+    if (this[kNative]) return 0;
+    const fd = native.socket(family);
+    if (fd < 0) return fd;
+    return this._barmOpen(fd);
+  }
+
+  _barmBind(address, port, family, ipv6Only) {
+    const err = this._barmSocket(family);
+    return err || native.bind(this.fd, address, port, family, ipv6Only);
+  }
+
+  listen(backlog) {
+    if (!this[kNative]) return -22; // UV_EINVAL
+    return native.listen(this[kNative], backlog, (fd, err) => {
+      complete(() => {
+        if (fd === null) {
+          this.onconnection(err);
+          return;
+        }
+        const client = new this.constructor(0);
+        client._barmOpen(fd);
+        this.onconnection(0, client);
+      });
+    });
+  }
+
+  _barmConnect(req, address, port, family) {
+    const err = this._barmSocket(family);
+    if (err) return err;
+    return native.connect(this[kNative], address, port, family, (status) => {
+      complete(() => req.oncomplete(status, this, req, true, true));
+    });
+  }
+
+  #name(out, peer) {
+    if (!this[kNative]) return -9; // UV_EBADF
+    const r = native.name(this.fd, peer);
+    if (typeof r === 'number') return r;
+    out.address = r[0];
+    out.family = r[1];
+    out.port = r[2];
+    return 0;
+  }
+
+  getsockname(out) {
+    return this.#name(out, false);
+  }
+
+  getpeername(out) {
+    return this.#name(out, true);
+  }
+}
+
 module.exports = {
+  SocketWrap,
+  kNative,
   LibuvStreamWrap,
   WriteWrap,
   ShutdownWrap,

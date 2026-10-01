@@ -22,7 +22,15 @@ const fields = new Int32Array(2);
 
 function drain() {
   drainQueued = false;
-  if (tickCallback !== null && fields[kHasTickScheduled] === 1) tickCallback();
+  if (tickCallback === null || fields[kHasTickScheduled] !== 1) return;
+  try {
+    tickCallback();
+  } catch (e) {
+    // (in a promise job, a throw would be lost: it's an uncaught exception, as in Node.js)
+    const fatal = globalThis.__barm_native?.fatal;
+    if (!fatal) throw e;
+    fatal(e);
+  }
 }
 
 const tickInfo = new Proxy(fields, {
