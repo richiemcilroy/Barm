@@ -107,7 +107,7 @@ static JSValueRef bm_js_compile_fn(JSContextRef ctx, JSObjectRef f, JSObjectRef 
     return r;
 }
 
-/* globalThis.__barm_read_file(path): a file's text (UTF-8), or undefined. For requires of files
+/* globalThis.__barm_read_file(path[, exists]): a file's text (UTF-8), or undefined. For requires of files
  * the bundle doesn't hold (`require(dir + "/package.json")`): read where the program runs, as
  * Node.js does. */
 static JSValueRef bm_js_read_file_fn(JSContextRef ctx, JSObjectRef f, JSObjectRef self, size_t n, const JSValueRef a[], JSValueRef *exc) {
@@ -117,6 +117,11 @@ static JSValueRef bm_js_read_file_fn(JSContextRef ctx, JSObjectRef f, JSObjectRe
     FILE *fp = fopen(path.p->data, "rb");
     bm_str_release(path);
     if (!fp) return JSValueMakeUndefined(ctx);
+    /* (a second argument: whether it's there, without reading it) */
+    if (n > 1 && JSValueToBoolean(ctx, a[1])) {
+        fclose(fp);
+        return JSValueMakeBoolean(ctx, true);
+    }
     bm_sb sb = {0};
     char buf[65536];
     size_t got;

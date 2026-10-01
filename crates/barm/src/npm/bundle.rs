@@ -149,6 +149,11 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
                 Err(e) => warnings.push(format!("{name}: {e}")),
             }
         }
+        // A native binding's loader (it names a `.node` file, usually by a computed path the
+        // bundler can't follow): the program links Node-API for what it loads at run time.
+        if !in_shim && (body.contains(".node\"") || body.contains(".node'") || body.contains(".node`")) {
+            native = true;
+        }
         // Globals whose shims load by a computed name (so programs that don't use them don't
         // carry them): bundled when a package's code mentions one, and mapped there (a require
         // the bundler didn't see finds a module through another's map).
@@ -542,9 +547,43 @@ function __barm_find(spec, from) {
 // A file the bundle doesn't hold, read from disk where the program runs (JSON, or CommonJS:
 // `require(path.join(dir, name))`); its own requires go through the same fallbacks.
 var __barm_disk_cache = new Map();
+// a package installed where the program runs: its entry (main, or exports' require/default)
+function __barm_disk_package(spec, from) {
+  var parts = spec.split("/"), scoped = spec[0] === "@";
+  var pkg = parts.slice(0, scoped ? 2 : 1).join("/"), sub = parts.slice(scoped ? 2 : 1).join("/");
+  for (var d = __barm_dirname(from); ; d = __barm_dirname(d)) {
+    var base = d + "/node_modules/" + pkg, pj = __barm_read_file(base + "/package.json");
+    if (pj !== undefined) {
+      var target = sub;
+      if (!target) {
+        var j = JSON.parse(pj), e = j.exports, m = typeof e === "string" ? e : e && (e["."] !== undefined ? e["."] : e);
+        while (m && typeof m === "object") m = Array.isArray(m) ? m[0] : (m.require || m.node || m.default || m.import);
+        target = typeof m === "string" && m[0] === "." ? m : (j.main || "index.js");
+      }
+      var path = __barm_join(base, target);
+      if (!__barm_by_name) { __barm_by_name = new Map(); for (var i = 0; i < __barm_count; i++) __barm_by_name.set(__barm_name(i), i); }
+      var exts = ["", ".js", ".json", "/index.js"];
+      for (var k = 0; k < exts.length; k++) {
+        var hit = __barm_by_name.get(path + exts[k]);
+        if (hit !== undefined) return __barm_load(hit);
+      }
+      return __barm_disk(path, "/");
+    }
+    if (d === "/" || d === "") return undefined;
+  }
+}
 function __barm_disk(spec, from) {
-  if (typeof __barm_read_file !== "function" || (spec[0] !== "/" && spec[0] !== ".")) return undefined;
+  if (typeof __barm_read_file !== "function") return undefined;
+  if (spec[0] !== "/" && spec[0] !== ".") return spec.slice(0, 5) === "node:" ? undefined : __barm_disk_package(spec, from);
   var p = __barm_join(__barm_dirname(from), spec);
+  if (/\.node$/.test(p) && typeof __barm_dlopen === "function" && __barm_read_file(p, true)) {
+    var cachedNative = __barm_disk_cache.get(p);
+    if (cachedNative) return cachedNative.exports;
+    var native = { exports: {} };
+    __barm_disk_cache.set(p, native);
+    native.exports = __barm_dlopen(p, native.exports);
+    return native.exports;
+  }
   var exts = ["", ".js", ".json", ".cjs", "/index.js", "/index.json"];
   for (var k = 0; k < exts.length; k++) {
     var file = p + exts[k];
