@@ -100,7 +100,10 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
                 match format {
                     Format::Json => (name, format!("module.exports = {};", src.trim_end().trim_start_matches('\u{feff}')), Vec::new(), dir),
                     Format::CommonJs | Format::Detect if !ts && !jsx => {
-                        let reqs = static_requires(&src).map_err(|e| format!("{name}: {e}"))?;
+                        let mut reqs = static_requires(&src).map_err(|e| format!("{name}: {e}"))?;
+                        for (prefix, suffix) in super::lex::require_patterns(&src) {
+                            reqs.extend(expand_pattern(&dir, &prefix, &suffix));
+                        }
                         (name, src, reqs, dir)
                     }
                     _ => {
@@ -240,6 +243,66 @@ fn add(modules: &mut Vec<Module>, index: &mut FxMap<Target, usize>, queue: &mut 
     id
 }
 
+/// The specifiers a `require(prefix + x + suffix)` can name: the files in prefix's directory
+/// that match (bundled in case they're required). At most 2000.
+fn expand_pattern(from_dir: &Path, prefix: &str, suffix: &str) -> Vec<String> {
+    let (dir_part, name_prefix) = match prefix.rfind('/') {
+        Some(i) => (&prefix[..=i], &prefix[i + 1..]),
+        None => return Vec::new(),
+    };
+    // the directory: relative to the module, or inside a package in node_modules
+    let base = if dir_part.starts_with("./") || dir_part.starts_with("../") {
+        from_dir.join(dir_part)
+    } else if dir_part.starts_with('/') {
+        return Vec::new();
+    } else {
+        let mut segs = dir_part.trim_end_matches('/').splitn(if dir_part.starts_with('@') { 3 } else { 2 }, '/');
+        let pkg = if dir_part.starts_with('@') { format!("{}/{}", segs.next().unwrap_or(""), segs.next().unwrap_or("")) } else { segs.next().unwrap_or("").to_string() };
+        let sub = segs.next().unwrap_or("");
+        let mut d = Some(from_dir);
+        let mut found = None;
+        while let Some(x) = d {
+            let cand = x.join("node_modules").join(&pkg);
+            if cand.is_dir() {
+                found = Some(cand.join(sub));
+                break;
+            }
+            d = x.parent();
+        }
+        match found {
+            Some(f) => f,
+            None => return Vec::new(),
+        }
+    };
+    let Ok(entries) = std::fs::read_dir(&base) else { return Vec::new() };
+    let mut out = Vec::new();
+    for e in entries.flatten().take(5000) {
+        let file = e.file_name().to_string_lossy().into_owned();
+        let code = [".js", ".cjs", ".mjs", ".json", ".ts"].iter().any(|x| file.ends_with(x));
+        if !code || !file.starts_with(name_prefix) || !e.path().is_file() {
+            continue;
+        }
+        if suffix.is_empty() {
+            // `require(dir + name)`: usually without the extension
+            let stem = file.rsplit_once('.').map(|(s, _)| s).unwrap_or(&file);
+            out.push(format!("{dir_part}{stem}"));
+            out.push(format!("{dir_part}{file}"));
+        } else if file.ends_with(suffix) && file.len() >= name_prefix.len() + suffix.len() {
+            out.push(format!("{dir_part}{file}"));
+        } else if let Some(stem) = file.rsplit_once('.').map(|(s, _)| s)
+            && stem.ends_with(suffix)
+        {
+            out.push(format!("{dir_part}{stem}"));
+        }
+        if out.len() >= 2000 {
+            break;
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// The module JSX compiles to calls of: the nearest tsconfig.json's `jsxImportSource` (Solid,
 /// Preact, ...) + `/jsx-runtime`, else React's.
 fn jsx_runtime(file: &Path) -> String {
@@ -325,17 +388,18 @@ function __barm_missing(name) {
 }
 var __barm_esm_set = new WeakSet();
 var __barm_ns_cache = new WeakMap();
-function __barm_esm(exports, getters) {
+function __barm_esm(exports, getters, withDefault) {
   __barm_esm_set.add(exports);
-  Object.defineProperty(exports, "__esModule", { value: true });
+  Object.defineProperty(exports, "__esModule", { value: true, enumerable: !!withDefault });
   for (var k in getters) Object.defineProperty(exports, k, { get: getters[k], enumerable: true });
 }
 function __barm_reexport(to, m, k) { Object.defineProperty(to, k, { get: function () { return m[k]; }, enumerable: true }); }
-// An ES module's view of a module: its exports if it was an ES module; otherwise (CommonJS, as
-// in Node) `default` is `module.exports` and its own keys are named exports.
+// An ES module's view of a module: its exports if it was an ES module, or a CommonJS module
+// compiled from one (`__esModule`, as Bun and bundlers read it); otherwise `default` is
+// `module.exports` and its own keys are named exports.
 function __barm_ns(m) {
   if (m === null || (typeof m !== "object" && typeof m !== "function")) return { default: m };
-  if (__barm_esm_set.has(m)) return m;
+  if (__barm_esm_set.has(m) || m.__esModule) return m;
   var ns = __barm_ns_cache.get(m);
   if (ns) return ns;
   ns = {};
@@ -374,6 +438,45 @@ function __barm_map_of(id) {
   }
   return map;
 }
+// A require the bundler couldn't see (`require(path.join(__dirname, x))`, `require(name)`): a
+// bundled module at that path, or the module other code reaches with the same specifier.
+var __barm_by_name, __barm_by_spec;
+// (deprecated in Node.js, still read)
+var __barm_extensions = { ".js": function () {}, ".json": function () {}, ".node": function () {} };
+function __barm_join(dir, rel) {
+  var parts = (rel[0] === "/" ? rel : dir + "/" + rel).split("/"), out = [];
+  for (var i = 0; i < parts.length; i++) {
+    var p = parts[i];
+    if (p === "" || p === ".") continue;
+    if (p === "..") out.pop(); else out.push(p);
+  }
+  return "/" + out.join("/");
+}
+function __barm_find(spec, from) {
+  if (spec[0] === "/" || spec[0] === ".") {
+    if (!__barm_by_name) {
+      __barm_by_name = new Map();
+      for (var i = 0; i < __barm_count; i++) __barm_by_name.set(__barm_name(i), i);
+    }
+    var p = __barm_join(__barm_dirname(from), spec);
+    var exts = ["", ".js", ".json", ".cjs", ".mjs", ".ts", ".tsx", "/index.js", "/index.json", "/index.ts"];
+    for (var k = 0; k < exts.length; k++) {
+      var hit = __barm_by_name.get(p + exts[k]);
+      if (hit !== undefined) return hit;
+    }
+    return undefined;
+  }
+  if (!__barm_by_spec) {
+    __barm_by_spec = new Map();
+    for (var j = 0; j < __barm_count; j++) {
+      var m = __barm_map_of(j);
+      for (var s in m) if (s[0] !== "." && s[0] !== "/" && !__barm_by_spec.has(s)) __barm_by_spec.set(s, m[s]);
+    }
+  }
+  var to = __barm_by_spec.get(spec);
+  if (to === undefined) to = __barm_by_spec.get(spec.slice(0, 5) === "node:" ? spec.slice(5) : "node:" + spec);
+  return to;
+}
 function __barm_load(id) {
   var cached = __barm_cache[id];
   if (cached) return cached.exports;
@@ -383,6 +486,7 @@ function __barm_load(id) {
   var map = __barm_map_of(id);
   var require = function (spec) {
     var to = map[spec];
+    if (to === undefined && typeof spec === "string") to = __barm_find(spec, name);
     if (to === undefined) {
       var e = new Error("Cannot find module '" + spec + "' (from " + name + ")");
       e.code = "MODULE_NOT_FOUND";
@@ -390,9 +494,10 @@ function __barm_load(id) {
     }
     return __barm_load(to);
   };
-  require.resolve = function (spec) { var to = map[spec]; if (to === undefined) throw new Error("Cannot find module '" + spec + "'"); return __barm_name(to); };
+  require.resolve = function (spec) { var to = map[spec]; if (to === undefined && typeof spec === "string") to = __barm_find(spec, name); if (to === undefined) { var e = new Error("Cannot find module '" + spec + "'"); e.code = "MODULE_NOT_FOUND"; throw e; } return __barm_name(to); };
   require.cache = {};
   require.main = undefined;
+  require.extensions = __barm_extensions;
   var def = __barm_defs[id] || (__barm_defs[id] = __barm_compile(id));
   def.call(module.exports, module, module.exports, require, name, __barm_dirname(name));
   module.loaded = true;

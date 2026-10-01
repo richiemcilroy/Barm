@@ -64,10 +64,6 @@ pub fn to_commonjs(src: &str, ts: bool, jsx: Option<&str>) -> Result<(String, Ve
         let line = src[..(e.pos as usize).min(src.len())].bytes().filter(|&b| b == b'\n').count() + 1;
         format!("{} (line {line})", e.message)
     })?;
-    if let Some(pos) = m.top_level_await {
-        let line = src[..pos as usize].bytes().filter(|&b| b == b'\n').count() + 1;
-        return Err(format!("top-level `await` isn't supported yet (line {line})"));
-    }
     let ns = |source: usize| format!("__barm_i{source}");
 
     // edits: (start, end, replacement), applied in order
@@ -110,6 +106,12 @@ pub fn to_commonjs(src: &str, ts: bool, jsx: Option<&str>) -> Result<(String, Ve
 
     let mut out = String::with_capacity(src.len() + 256 + m.exports.len() * 48);
     out.push_str("\"use strict\"; ");
+    // top-level `await`: the module runs as an async function. Its exports are defined before
+    // its first `await`, so importers see them (live) at once; values come as it runs on.
+    let tla = m.top_level_await.is_some();
+    if tla {
+        out.push_str("return (async function () { ");
+    }
     // exports first: other modules in an import cycle may read them before this body runs
     out.push_str("__barm_esm(__barm_x, {");
     for (name, target) in &m.exports {
@@ -119,7 +121,8 @@ pub fn to_commonjs(src: &str, ts: bool, jsx: Option<&str>) -> Result<(String, Ve
         };
         let _ = write!(out, "{}: function () {{ return {value}; }}, ", js_string(name));
     }
-    out.push_str("}); ");
+    // (as Node.js's require(esm): `__esModule` is an enumerable key when there's a default export)
+    out.push_str(if m.exports.iter().any(|(n, _)| n == "default") { "}, 1); " } else { "}); " });
     let mut requires = Vec::with_capacity(m.sources.len() + m.requires.len());
     for (i, spec) in m.sources.iter().enumerate() {
         if !m.used[i] {
@@ -167,6 +170,9 @@ pub fn to_commonjs(src: &str, ts: bool, jsx: Option<&str>) -> Result<(String, Ve
         };
         let _ = write!(out, "\n__barm_m.exports = {value};");
     }
+    if tla {
+        out.push_str("\n})();");
+    }
     debug_assert!(!out[..prologue_len].contains('\n'));
     Ok((out, requires))
 }
@@ -200,6 +206,7 @@ mod tests {
     fn ts(src: &str) -> String {
         let (out, _) = to_commonjs(src, true, None).unwrap_or_else(|e| panic!("{e}"));
         // the prologue, then the module
+        let out = out.replacen("}, 1); ", "}); ", 1);
         out.split_once("}); ").unwrap().1.split_once("__barm_r(").map_or(out.split_once("}); ").unwrap().1, |(_, b)| b.split_once("; ").unwrap().1).lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().join("\n")
     }
 

@@ -533,21 +533,160 @@ fn punct_len(s: &[u8]) -> usize {
 /// The string literals of `require("...")` calls (not `x.require(...)`), unescaped.
 pub fn static_requires(src: &str) -> Result<Vec<String>, String> {
     let toks = tokenize(src).map_err(|e| format!("{} at byte {}", e.message, e.pos))?;
+    let consts = if src.contains("__dirname") || src.contains("require(") { string_consts(&toks, src) } else { Default::default() };
     let mut out = Vec::new();
     for (i, t) in toks.iter().enumerate() {
-        if t.kind != Kind::Ident || t.text(src) != "require" {
+        if t.kind != Kind::Ident || !is_require_name(t.text(src)) {
             continue;
         }
         if i > 0 && is_member_dot(&toks[i - 1], src) {
             continue;
         }
-        if let [open, arg, close, ..] = &toks[i + 1..]
-            && open.text(src) == "(" && close.text(src) == ")" && (arg.kind == Kind::Str || arg.kind == Kind::Template)
-        {
-            out.push(unquote(arg.text(src)));
+        // `require(...)`, or `require.resolve(...)` (resolved to a bundled module's path)
+        let open = match toks.get(i + 1).map(|t| t.text(src)) {
+            Some("(") => i + 1,
+            Some(".") if toks.get(i + 2).is_some_and(|t| t.text(src) == "resolve") && toks.get(i + 3).is_some_and(|t| t.text(src) == "(") => i + 3,
+            _ => continue,
+        };
+        if let Some(spec) = literal_arg_with(&toks, src, open, &consts) {
+            out.push(spec);
         }
     }
     Ok(out)
+}
+
+/// `require`, and the names bundlers give it: Rollup's `require$1` (when a local shadows it),
+/// esbuild's `__require`.
+fn is_require_name(name: &str) -> bool {
+    name == "require" || name == "__require" || name.strip_prefix("require$").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Names bound once to a string (`var base = __dirname + '/rules/'`), for requires that use them
+/// (`require(base + 'x')`): `__dirname` is the module's directory, so the value is a relative path.
+fn string_consts(toks: &[Tok], src: &str) -> std::collections::HashMap<String, Option<String>> {
+    let mut out: std::collections::HashMap<String, Option<String>> = std::collections::HashMap::new();
+    // `name = ...` / `name += ...` elsewhere: not a constant
+    let assigned: std::collections::HashSet<&str> = (0..toks.len())
+        .filter(|&i| {
+            toks[i].kind == Kind::Ident
+                && toks.get(i + 1).is_some_and(|t| t.kind == Kind::Punct && matches!(t.text(src), "=" | "+="))
+                && !(i > 0 && matches!(toks[i - 1].text(src), "var" | "let" | "const" | "." | "?."))
+        })
+        .map(|i| toks[i].text(src))
+        .collect();
+    for i in 0..toks.len() {
+        if toks[i].kind != Kind::Ident || !matches!(toks[i].text(src), "var" | "let" | "const") {
+            continue;
+        }
+        let (Some(name), Some(eq)) = (toks.get(i + 1), toks.get(i + 2)) else { continue };
+        if name.kind != Kind::Ident || eq.text(src) != "=" {
+            continue;
+        }
+        let mut j = i + 3;
+        let mut value = String::new();
+        let mut ok = false;
+        loop {
+            match toks.get(j) {
+                Some(t) if t.kind == Kind::Str || t.kind == Kind::Template => value.push_str(&unquote(t.text(src))),
+                Some(t) if t.kind == Kind::Ident && t.text(src) == "__dirname" && j == i + 3 => value.push('.'),
+                _ => break,
+            }
+            j += 1;
+            match toks.get(j).map(|t| t.text(src)) {
+                Some("+") => j += 1,
+                Some(";" | "," | ")") | None => {
+                    ok = true;
+                    break;
+                }
+                _ if toks[j].nl_before => {
+                    ok = true;
+                    break;
+                }
+                _ => break,
+            }
+        }
+        let ok = ok && !assigned.contains(name.text(src));
+        // (bound twice: not a constant)
+        let v = if ok && !value.is_empty() { Some(value) } else { None };
+        match out.get(name.text(src)) {
+            Some(_) => {
+                out.insert(name.text(src).to_string(), None);
+            }
+            None => {
+                out.insert(name.text(src).to_string(), v);
+            }
+        }
+    }
+    out
+}
+
+/// `require(`prefix${x}suffix`)` and `require("prefix" + x)`: requires of files the bundler can
+/// list (a "require context", as webpack calls it): (prefix, suffix) of each.
+pub fn require_patterns(src: &str) -> Vec<(String, String)> {
+    let Ok(toks) = tokenize(src) else { return Vec::new() };
+    let mut out = Vec::new();
+    for (i, t) in toks.iter().enumerate() {
+        if t.kind != Kind::Ident || t.text(src) != "require" || (i > 0 && is_member_dot(&toks[i - 1], src)) || toks.get(i + 1).is_none_or(|t| t.text(src) != "(") {
+            continue;
+        }
+        let Some(arg) = toks.get(i + 2) else { continue };
+        match arg.kind {
+            // `prefix${x}suffix` (one substitution of a plain name or member chain)
+            Kind::TemplateHead => {
+                let mut j = i + 3;
+                while toks.get(j).is_some_and(|t| t.kind == Kind::Ident || t.text(src) == ".") {
+                    j += 1;
+                }
+                if let (Some(tail), Some(close)) = (toks.get(j), toks.get(j + 1))
+                    && tail.kind == Kind::TemplateTail
+                    && close.text(src) == ")"
+                    && j > i + 3
+                {
+                    let head = arg.text(src);
+                    let tail = tail.text(src);
+                    out.push((head[1..head.len() - 2].to_string(), tail[1..tail.len() - 1].to_string()));
+                }
+            }
+            // "prefix" + x
+            Kind::Str if toks.get(i + 3).is_some_and(|t| t.text(src) == "+") => {
+                let mut j = i + 4;
+                while toks.get(j).is_some_and(|t| t.kind == Kind::Ident || t.text(src) == ".") {
+                    j += 1;
+                }
+                if j > i + 4 && toks.get(j).is_some_and(|t| t.text(src) == ")") {
+                    out.push((unquote(arg.text(src)), String::new()));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The argument of a call whose `(` is token `open`, if it's a string: a literal, a template
+/// without substitutions, or literals joined with `+` (`'u' + 'rl'`, as bundlers write to hide
+/// a require). Only a sole argument (or the first, before `, { paths }`) counts.
+pub fn literal_arg(toks: &[Tok], src: &str, open: usize) -> Option<String> {
+    literal_arg_with(toks, src, open, &Default::default())
+}
+
+fn literal_arg_with(toks: &[Tok], src: &str, open: usize, consts: &std::collections::HashMap<String, Option<String>>) -> Option<String> {
+    let mut i = open + 1;
+    let mut out = String::new();
+    loop {
+        let t = toks.get(i)?;
+        match t.kind {
+            Kind::Str | Kind::Template => out.push_str(&unquote(t.text(src))),
+            Kind::Ident => out.push_str(consts.get(t.text(src))?.as_deref()?),
+            _ => return None,
+        }
+        i += 1;
+        match toks.get(i).map(|t| (t.kind, t.text(src))) {
+            Some((Kind::Punct, "+")) => i += 1,
+            Some((Kind::Punct, ")" | ",")) => return Some(out),
+            _ => return None,
+        }
+    }
 }
 
 fn is_member_dot(t: &Tok, src: &str) -> bool {
@@ -663,5 +802,23 @@ mod tests {
         for (x, y) in a.iter().zip(&b) {
             assert_eq!((x.text(src), x.kind, x.nl_before), (y.text(&min), y.kind, y.nl_before));
         }
+    }
+
+    #[test]
+    fn requires_found() {
+        let r = static_requires("require('a'); x.require('b'); require('u' + 'rl'); require.resolve(`c/d.js`); require(name); require('e', { paths })").unwrap();
+        assert_eq!(r, vec!["a", "url", "c/d.js", "e"]);
+    }
+
+    #[test]
+    fn require_patterns_found() {
+        let p = require_patterns("require(`eslint/lib/rules/${name}`); require('./locale/' + lang); require(`./a/${x.y}.js`); require(`${a}b`); require('x' + f())");
+        assert_eq!(p, vec![("eslint/lib/rules/".into(), "".into()), ("./locale/".into(), "".into()), ("./a/".into(), ".js".into()), ("".into(), "b".into())]);
+    }
+
+    #[test]
+    fn requires_through_constants() {
+        let r = static_requires("var base = __dirname + '/rules/';\nconst dir = './x/'\nlet twice = 'a'; twice = 'b';\nrequire(base + 'one'); require(dir + 'two'); require(twice + 'c'); require(base)").unwrap();
+        assert_eq!(r, vec!["./rules/one", "./x/two", "./rules/"]);
     }
 }
