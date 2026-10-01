@@ -3,7 +3,50 @@
 // internalBinding('crypto'): what tls and https need to load (Barm's crypto module doesn't use
 // this binding; it has its own natives). The rest isn't written yet: using it throws.
 
+// A TLS context's settings (Node.js's SecureContext, over OpenSSL's SSL_CTX): recorded, for
+// tls_wrap to configure Barm's TLS client with once TLS sockets are written.
+class SecureContext {
+  constructor() {
+    this.settings = { ca: [], certs: [], keys: [], crls: [] };
+  }
+
+  init(secureProtocol, minVersion, maxVersion) {
+    Object.assign(this.settings, { secureProtocol, minVersion, maxVersion });
+  }
+
+  setOptions(options) { this.settings.options = options; }
+  setCiphers(ciphers) { this.settings.ciphers = ciphers; }
+  setCipherSuites(suites) { this.settings.cipherSuites = suites; }
+  setECDHCurve(curve) { this.settings.ecdhCurve = curve; }
+  setSigalgs(sigalgs) { this.settings.sigalgs = sigalgs; }
+  setDHParam(param) { this.settings.dhParam = param; }
+  setKey(key, passphrase) { this.settings.keys.push({ key, passphrase }); }
+  setEngineKey() {}
+  setCert(cert) { this.settings.certs.push(cert); }
+  addCACert(cert) { this.settings.ca.push(cert); }
+  addCRL(crl) { this.settings.crls.push(crl); }
+  addRootCerts() { this.settings.rootCerts = true; }
+  setAllowPartialTrustChain() { this.settings.partialChain = true; }
+  setSessionIdContext(id) { this.settings.sessionIdContext = id; }
+  setSessionTimeout(timeout) { this.settings.sessionTimeout = timeout; }
+  setTicketKeys(keys) { this.settings.ticketKeys = keys; }
+  getTicketKeys() { return this.settings.ticketKeys; }
+  setClientCertEngine() {}
+  loadPKCS12() {
+    const e = new Error('PKCS#12 isn\'t supported by Barm yet');
+    e.code = 'ERR_METHOD_NOT_IMPLEMENTED';
+    throw e;
+  }
+  setMinProto(v) { this.settings.minVersion = v; }
+  setMaxProto(v) { this.settings.maxVersion = v; }
+  getMinProto() { return this.settings.minVersion; }
+  getMaxProto() { return this.settings.maxVersion; }
+  enableTicketKeyCallback() {}
+  close() {}
+}
+
 const known = {
+  SecureContext,
   // (certificates load when TLS connections are made, by Barm's TLS client)
   startLoadingCertificatesOffThread() {},
   getRootCertificates: () => [],
