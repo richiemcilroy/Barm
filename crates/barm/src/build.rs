@@ -11,7 +11,7 @@ use crate::driver;
 use crate::source::SourceMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// runtime/tls.c and the vendored BoringSSL, embedded by the Cargo build script (../build.rs).
 mod tls_files {
@@ -57,6 +57,77 @@ pub struct Options {
 /// The files on disk behind a source map (not the standard library's built-in modules).
 pub fn source_paths(sm: &SourceMap) -> Vec<PathBuf> {
     sm.files.iter().map(|f| f.path.clone()).filter(|p| p.is_file()).collect()
+}
+
+/// Whether a cached file is there; if so it's marked as just used (its modification time), which
+/// is what pruning goes by.
+fn cached(p: &Path) -> bool {
+    match std::fs::File::options().append(true).open(p) {
+        Ok(f) => {
+            let _ = f.set_modified(SystemTime::now());
+            true
+        }
+        Err(_) => p.is_file(),
+    }
+}
+
+const GIB: u64 = 1 << 30;
+
+/// Keeps the cache in bounds, at most once a day: what interrupted builds left goes, then what
+/// hasn't been used for 30 days, then the least recently used while it's over 2 GiB (down to 1.5).
+pub fn prune_cache() {
+    let dir = cache_dir();
+    let stamp = dir.join(".pruned");
+    let now = SystemTime::now();
+    let age = |t: SystemTime| now.duration_since(t).unwrap_or(Duration::ZERO);
+    if std::fs::metadata(&stamp).and_then(|m| m.modified()).is_ok_and(|t| age(t) < Duration::from_secs(86400)) {
+        return;
+    }
+    if std::fs::create_dir_all(&dir).is_err() || std::fs::write(&stamp, b"").is_err() {
+        return;
+    }
+    let mut entries = Vec::new();
+    for sub in ["bin", "c"] {
+        let Ok(rd) = std::fs::read_dir(dir.join(sub)) else { continue };
+        for e in rd.flatten() {
+            let Ok(meta) = e.metadata() else { continue };
+            let size = if meta.is_dir() { dir_size(&e.path()) } else { meta.len() };
+            entries.push((meta.modified().unwrap_or(now), size, e.path(), meta.is_dir()));
+        }
+    }
+    entries.sort_by_key(|e| e.0);
+    let mut total: u64 = entries.iter().map(|e| e.1).sum();
+    let over = total > 2 * GIB;
+    for (modified, size, path, is_dir) in entries {
+        let leftover = path.file_name().is_some_and(|n| n.to_string_lossy().contains(".tmp")) && age(modified) > Duration::from_secs(3600);
+        if leftover || age(modified) > Duration::from_secs(30 * 86400) || (over && total > 3 * GIB / 2) {
+            let removed = if is_dir { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+            if removed.is_ok() {
+                total = total.saturating_sub(size);
+            }
+        }
+    }
+}
+
+fn dir_size(p: &Path) -> u64 {
+    std::fs::read_dir(p).map_or(0, |rd| {
+        rd.flatten().map(|e| e.metadata().map_or(0, |m| if m.is_dir() { dir_size(&e.path()) } else { m.len() })).sum()
+    })
+}
+
+/// Empties the cache (what `barm clean` does): the bytes it freed.
+pub fn clean_cache() -> u64 {
+    let dir = cache_dir();
+    let mut freed = 0;
+    for sub in ["bin", "c"] {
+        let p = dir.join(sub);
+        let size = dir_size(&p);
+        if std::fs::remove_dir_all(&p).is_ok() {
+            freed += size;
+        }
+    }
+    let _ = std::fs::remove_file(dir.join(".pruned"));
+    freed
 }
 
 pub fn cache_dir() -> PathBuf {
@@ -136,6 +207,7 @@ fn linker(cc: &str) -> String {
 }
 
 pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, BuildError> {
+    prune_cache();
     let t0 = Instant::now();
     let loaded = driver::load(paths, base).map_err(BuildError::Message)?;
     let driver::Loaded { sm, mut interner, modules, diags } = loaded;
@@ -183,7 +255,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         let c_dir = cache_dir().join("c");
         std::fs::create_dir_all(&c_dir).map_err(|e| BuildError::Message(format!("can't create {}: {e}", c_dir.display())))?;
         let path = c_dir.join(format!("npm-{}.blob", hash_hex(&[&blob])));
-        if !path.is_file() {
+        if !cached(&path) {
             let tmp = path.with_extension(format!("tmp{}", std::process::id()));
             std::fs::write(&tmp, &blob).and_then(|_| std::fs::rename(&tmp, &path)).map_err(|e| BuildError::Message(format!("can't write {}: {e}", path.display())))?;
         }
@@ -230,7 +302,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     let dir = cache_dir();
     let bin_dir = dir.join("bin");
     let binary = bin_dir.join(&key);
-    if binary.is_file() {
+    if cached(&binary) {
         return Ok(Built { binary, tls: uses_tls, cached: true, sources, timings: (t1 - t0, t2 - t1, Duration::ZERO) });
     }
     let c_dir = dir.join("c");
@@ -239,7 +311,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     }
     // The runtime is compiled once per compiler and flags; programs link against the object.
     let rt_obj = c_dir.join(format!("rt-{rt_key}.o"));
-    if !rt_obj.is_file() {
+    if !cached(&rt_obj) {
         let rt_c = c_dir.join(format!("rt-{rt_key}.c"));
         std::fs::write(&rt_c, codegen::runtime_source()).map_err(|e| BuildError::Message(format!("can't write {}: {e}", rt_c.display())))?;
         let tmp = c_dir.join(format!("rt-{rt_key}.tmp{}.o", std::process::id()));
@@ -340,7 +412,7 @@ fn flags_base(flags: &[&str], pch: &Option<PathBuf>) -> Vec<String> {
 /// runtime/js.c and runtime/node.c compiled once per compiler and flags: (js.o, node.o).
 fn js_objects(cc: &str, flags: &[String], c_dir: &Path, key: &str) -> Result<Vec<PathBuf>, BuildError> {
     let objs = vec![c_dir.join(format!("js-{key}.o")), c_dir.join(format!("node-{key}.o"))];
-    if objs.iter().all(|o| o.is_file()) {
+    if objs.iter().all(|o| cached(o)) {
         return Ok(objs);
     }
     let fail = |what: String| BuildError::Message(format!("can't build the JavaScript bridge: {what}"));
@@ -389,7 +461,8 @@ fn precompiled_header(cc: &str, flags: &[&str], c_dir: &Path, prefix: &str, rt_k
     let key = hash_hex(&[prefix.as_bytes(), rt_key.as_bytes()]);
     let header = c_dir.join(format!("pre-{key}.h"));
     let pch = c_dir.join(format!("pre-{key}.h.{}", if clang { "pch" } else { "gch" }));
-    if pch.is_file() && header.is_file() {
+    // (not the header's time: clang checks the precompiled header against it)
+    if cached(&pch) && header.is_file() {
         return Some(header);
     }
     let pid = std::process::id();
@@ -471,7 +544,7 @@ impl TlsArchive {
     /// The archive, compiling it first if it isn't cached.
     fn build(&self, cc: &str, c_dir: &Path) -> Result<PathBuf, BuildError> {
         let archive = c_dir.join(format!("tls-{}.a", self.key));
-        if archive.is_file() {
+        if cached(&archive) {
             return Ok(archive);
         }
         eprintln!("barm: compiling the TLS library (BoringSSL, brotli, libdeflate, zlib, zstd); this happens once");
