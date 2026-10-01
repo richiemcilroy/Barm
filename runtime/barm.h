@@ -398,6 +398,11 @@ typedef struct bm_io bm_io;
 struct bm_io { void (*ready)(bm_io *h, bool readable, bool writable, bool broken); };
 extern int bm_io_refs;
 void bm_io_add(int fd, bm_io *h, bool read, bool write);
+/* changes what a watched fd waits for; neither stops watching it (closing the fd ends it too) */
+void bm_io_set(int fd, bm_io *h, bool read, bool write);
+/* calls h->ready once when process pid exits (then reap it with waitpid, and close *fd_out if
+ * it isn't -1: the descriptor watched for it); false if it can't */
+bool bm_io_proc(int pid, bm_io *h, int *fd_out);
 /* Node.js's check phase (setImmediate) for npm code: set bm_loop_check_pending and the loop runs
  * bm_loop_check once, after timers and I/O, without blocking; bm_loop_check_ref: it keeps the
  * program running. */

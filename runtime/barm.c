@@ -5063,6 +5063,42 @@ void bm_io_add(int fd, bm_io *h, bool read, bool write) {
 #endif
 }
 
+void bm_io_set(int fd, bm_io *h, bool read, bool write) {
+    int q = bm_loop_queue();
+    void *tag = (void *)((uintptr_t)h | 1);
+#ifdef BM_KQUEUE
+    struct kevent ev[2];
+    EV_SET(&ev[0], fd, EVFILT_READ, EV_ADD | (read ? EV_ENABLE : EV_DISABLE), 0, 0, tag);
+    EV_SET(&ev[1], fd, EVFILT_WRITE, EV_ADD | (write ? EV_ENABLE : EV_DISABLE), 0, 0, tag);
+    kevent(q, ev, 2, NULL, 0, NULL);
+#else
+    struct epoll_event ev = { .events = (read ? EPOLLIN | EPOLLRDHUP : 0) | (write ? EPOLLOUT : 0), .data.ptr = tag };
+    if (epoll_ctl(q, EPOLL_CTL_MOD, fd, &ev) != 0 && errno == ENOENT) epoll_ctl(q, EPOLL_CTL_ADD, fd, &ev);
+#endif
+}
+
+#ifndef BM_KQUEUE
+#include <sys/syscall.h>
+#endif
+
+bool bm_io_proc(int pid, bm_io *h, int *fd_out) {
+    int q = bm_loop_queue();
+    *fd_out = -1;
+    void *tag = (void *)((uintptr_t)h | 1);
+#ifdef BM_KQUEUE
+    struct kevent ev;
+    EV_SET(&ev, pid, EVFILT_PROC, EV_ADD | EV_ONESHOT, NOTE_EXIT, 0, tag);
+    return kevent(q, &ev, 1, NULL, 0, NULL) == 0;
+#else
+    int fd = (int)syscall(SYS_pidfd_open, pid, 0);
+    if (fd < 0) return false;
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    *fd_out = fd;
+    struct epoll_event ev = { .events = EPOLLIN | EPOLLONESHOT, .data.ptr = tag };
+    return epoll_ctl(q, EPOLL_CTL_ADD, fd, &ev) == 0;
+#endif
+}
+
 static void bm_dns_start_thread(void) {
     pthread_attr_t attr;
     pthread_attr_init(&attr);
