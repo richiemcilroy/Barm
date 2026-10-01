@@ -1,10 +1,16 @@
 //! Node's built-in modules as JavaScript (runtime/node/*.js), included in a bundle only when
 //! something requires them.
 
-/// The shim for built-in `name` (`"fs"`, `"fs/promises"`), if Barm has one.
+include!(concat!(env!("OUT_DIR"), "/node_shims.rs"));
+
+/// The shim for built-in `name` (`"fs"`, `"fs/promises"`, or inside shims `"internal/util"`),
+/// if Barm has one. Most are Node.js's own lib/ files (see runtime/node/NODE.md).
 pub fn shim(name: &str) -> Option<&'static str> {
-    let _ = name;
-    None
+    let id = match name {
+        "__globals" => "internal/bootstrap/globals",
+        _ => name.strip_prefix("node:").unwrap_or(name),
+    };
+    NODE_SHIMS.binary_search_by(|(k, _)| k.cmp(&id)).ok().map(|i| NODE_SHIMS[i].1)
 }
 
 /// Runs before any module: Node's globals (`process`, `Buffer`, `global`, ...). Until the

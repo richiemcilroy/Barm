@@ -47,4 +47,36 @@ fn main() {
     for p in &list {
         println!("cargo:rerun-if-changed={}", p.display());
     }
+    node_shims(&root);
+}
+
+/// runtime/node/**/*.js as a sorted table of (module id, source) for the npm bundler: "path",
+/// "internal/util", ... (see src/npm/node_shims.rs).
+fn node_shims(root: &Path) {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|e| e == "js") {
+                out.push(p);
+            }
+        }
+    }
+    let dir = root.join("runtime/node");
+    let mut files = Vec::new();
+    if dir.is_dir() {
+        walk(&dir, &mut files);
+    }
+    let mut entries: Vec<(String, PathBuf)> =
+        files.into_iter().map(|p| (p.strip_prefix(&dir).unwrap().with_extension("").to_string_lossy().replace('\\', "/"), p)).collect();
+    entries.sort();
+    let mut code = String::from("/// (module id, source), sorted by id\npub static NODE_SHIMS: &[(&str, &str)] = &[\n");
+    for (id, p) in &entries {
+        let _ = writeln!(code, "    ({id:?}, include_str!({:?})),", p.to_string_lossy());
+        println!("cargo:rerun-if-changed={}", p.display());
+    }
+    code.push_str("];\n");
+    std::fs::write(PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("node_shims.rs"), code).unwrap();
+    println!("cargo:rerun-if-changed={}", dir.display());
 }
