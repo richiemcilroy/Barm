@@ -8,6 +8,7 @@ pub mod driver;
 pub mod hash;
 pub mod intern;
 pub mod lexer;
+pub mod npm;
 pub mod parser;
 pub mod source;
 pub mod types;
