@@ -1,0 +1,7 @@
+import { Card, generic, tag } from "jsx-lib"
+import { show } from "fake-jsx/jsx-runtime"
+
+const card = try Card({ title: "Fruit", items: ["apple", "pear"], extra: { id: "c1" } })
+console.log(try show(card) as string)
+console.log(try generic(5) as int)
+console.log(try show(try tag(2)) as string, try show(try tag(1)) as string)

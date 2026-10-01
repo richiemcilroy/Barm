@@ -61,8 +61,30 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
                 let reqs = super::node_shims::shim_requires(b).iter().map(|r| r.to_string()).collect();
                 (format!("node:{b}"), body, reqs, root.to_path_buf())
             }
+            Target::File(path) if asset_kind(path).is_some() => {
+                // stylesheets are `{}`, other assets their path (as Bun's runtime does)
+                let name = display(path, root);
+                let body = match asset_kind(path) {
+                    Some(Asset::Style) => "module.exports = {};".to_string(),
+                    _ => format!("module.exports = {};", js_string(&name)),
+                };
+                (name, body, Vec::new(), root.to_path_buf())
+            }
             Target::File(path) => {
-                let src = std::fs::read_to_string(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
+                let bytes = std::fs::read(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
+                let src = match String::from_utf8(bytes) {
+                    Ok(src) if !is_binary_ext(path) => src,
+                    _ => {
+                        // a native addon or other binary: fails when required, as a failed native
+                        // load does in Node.js (packages that try one usually catch it and fall back)
+                        let name = display(path, root);
+                        let msg = format!("Cannot load {name}: native addons and binary modules aren't supported by Barm");
+                        let body = format!("var e = new Error({}); e.code = \"ERR_DLOPEN_FAILED\"; throw e;", js_string(&msg));
+                        modules[id].name = name;
+                        modules[id].body = body;
+                        continue;
+                    }
+                };
                 let name = display(path, root);
                 let dir = path.parent().unwrap_or(root).to_path_buf();
                 let ts = super::resolve::is_typescript(path);
@@ -79,7 +101,8 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
                         (name, src, reqs, dir)
                     }
                     _ => {
-                        let (body, reqs) = super::esm::to_commonjs(&src, ts, jsx).map_err(|e| format!("{name}: {e}"))?;
+                        let runtime = jsx.then(|| jsx_runtime(path));
+                        let (body, reqs) = super::esm::to_commonjs(&src, ts, runtime.as_deref()).map_err(|e| format!("{name}: {e}"))?;
                         esm = true;
                         (name, body, reqs, dir)
                     }
@@ -209,13 +232,54 @@ fn add(modules: &mut Vec<Module>, index: &mut FxMap<Target, usize>, queue: &mut 
     id
 }
 
-fn display(path: &Path, root: &Path) -> String {
-    // Keep build-machine paths out of binaries: name modules from their node_modules folder.
-    let s = path.to_string_lossy();
-    if let Some(i) = s.rfind("/node_modules/") {
-        return s[i..].to_string();
+/// The module JSX compiles to calls of: the nearest tsconfig.json's `jsxImportSource` (Solid,
+/// Preact, ...) + `/jsx-runtime`, else React's.
+fn jsx_runtime(file: &Path) -> String {
+    let mut dir = file.parent();
+    while let Some(d) = dir {
+        if let Ok(text) = std::fs::read_to_string(d.join("tsconfig.json")) {
+            if let Some(i) = text.find("\"jsxImportSource\"") {
+                let rest = &text[i + 17..];
+                if let Some(q) = rest.find('"') {
+                    let v = &rest[q + 1..];
+                    if let Some(e) = v.find('"') {
+                        return format!("{}/jsx-runtime", &v[..e]);
+                    }
+                }
+            }
+            break;
+        }
+        if d.join("package.json").is_file() && d.file_name().is_some_and(|n| n != "src") && d.join("node_modules").is_dir() {
+            break;
+        }
+        dir = d.parent();
     }
-    path.strip_prefix(root).map(|p| format!("/{}", p.display())).unwrap_or_else(|_| s.into_owned())
+    "react/jsx-runtime".into()
+}
+
+enum Asset {
+    Style,
+    File,
+}
+
+/// Files a JavaScript `require` can name that aren't code.
+fn asset_kind(path: &Path) -> Option<Asset> {
+    match path.extension().and_then(|e| e.to_str())? {
+        "css" | "scss" | "sass" | "less" | "styl" => Some(Asset::Style),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "avif" | "ico" | "bmp" | "svg" | "woff" | "woff2" | "ttf" | "otf" | "eot" | "mp3" | "mp4" | "webm" | "wav" | "ogg" | "pdf" => Some(Asset::File),
+        _ => None,
+    }
+}
+
+/// Native addons and other binaries (anything not UTF-8 is one too).
+fn is_binary_ext(path: &Path) -> bool {
+    matches!(path.extension().and_then(|e| e.to_str()), Some("node" | "wasm" | "dylib" | "so" | "dll"))
+}
+
+/// A module's name: its real path, as `__filename` in Node.js and Bun (packages find their own
+/// files from `__dirname`: binaries, data, templates).
+fn display(path: &Path, _root: &Path) -> String {
+    path.to_string_lossy().into_owned()
 }
 
 /// A JavaScript string literal for `s`.

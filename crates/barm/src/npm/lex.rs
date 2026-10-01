@@ -20,6 +20,20 @@ pub enum Kind {
     /// A whole template literal without substitutions.
     Template,
     Punct,
+    /// JSX (with `LexOpts::jsx`): `<` opening a tag.
+    JsxOpen,
+    /// `</` opening a closing tag.
+    JsxClose,
+    /// A tag or attribute name (`div`, `Foo.Bar`, `aria-label`, `xlink:href`).
+    JsxName,
+    /// An attribute's string value (quotes included; no escapes).
+    JsxStr,
+    /// Text between tags.
+    JsxText,
+    /// `>` ending a tag.
+    JsxEnd,
+    /// `/>` ending a self-closing tag.
+    JsxSelfClose,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -47,29 +61,164 @@ pub struct LexError {
 const REGEX_AFTER: &[&str] = &["return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw", "case", "do", "else", "yield", "await", "extends"];
 
 pub fn tokenize(src: &str) -> Result<Vec<Tok>, LexError> {
-    let mut start = 0;
-    if src.as_bytes().starts_with(b"#!") {
-        while start < src.len() && src.as_bytes()[start] != b'\n' {
-            start += 1;
-        }
-    }
-    tokenize_from(src, start, Vec::new(), None, false)
+    tokenize_with(src, &LexOpts::default())
 }
 
-/// Tokenizes `src` from byte `from`, with `braces` the open braces there (true: a template
-/// substitution). `slash` forces how a `/` at `from` is read (true: a regular expression), for
-/// the parser to correct the regex/division guess. `nl` is the line-break flag for the first token.
-pub fn tokenize_from(src: &str, from: usize, braces: Vec<bool>, slash: Option<bool>, nl: bool) -> Result<Vec<Tok>, LexError> {
+#[derive(Default)]
+pub struct LexOpts<'f> {
+    /// JSX (`.jsx`, `.tsx`): `<` where an expression starts opens an element.
+    pub jsx: bool,
+    /// How a `/` at these byte offsets reads (true: a regular expression), sorted: the parser's
+    /// corrections of the regex/division guess.
+    pub slashes: &'f [(u32, bool)],
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Brace {
+    Block,
+    /// `${` in a template
+    Template,
+    /// `{` in a JSX tag (an attribute value or spread)
+    JsxTag,
+    /// `{` among a JSX element's children
+    JsxChild,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Js,
+    JsxTag,
+    JsxChildren,
+}
+
+pub fn tokenize_with(src: &str, opts: &LexOpts) -> Result<Vec<Tok>, LexError> {
     let b = src.as_bytes();
     let n = b.len();
+    let mut from = 0;
+    if b.starts_with(b"#!") {
+        while from < n && b[from] != b'\n' {
+            from += 1;
+        }
+    }
     let mut toks: Vec<Tok> = Vec::with_capacity((n - from) / 4);
     let mut i = from;
-    let mut braces = braces;
-    let mut nl = nl;
-    let mut slash = slash;
+    let mut braces: Vec<Brace> = Vec::new();
+    let mut nl = false;
     let err = |pos: usize, message: &'static str| LexError { pos: pos as u32, message };
+    // JSX: the mode, the element depth of each JSX expression being read (they nest through
+    // `{...}`), and whether the current tag is a closing one
+    let mut mode = Mode::Js;
+    let mut depths: Vec<u32> = Vec::new();
+    let mut closing = false;
     while i < n {
         let c = b[i];
+        if mode == Mode::JsxChildren {
+            let start = i;
+            while i < n && b[i] != b'<' && b[i] != b'{' {
+                i += 1;
+            }
+            if i > start {
+                toks.push(Tok { kind: Kind::JsxText, start: start as u32, end: i as u32, nl_before: false });
+            }
+            if i >= n {
+                return Err(err(start, "unterminated JSX element"));
+            }
+            let start = i;
+            if b[i] == b'{' {
+                braces.push(Brace::JsxChild);
+                mode = Mode::Js;
+                i += 1;
+                toks.push(Tok { kind: Kind::Punct, start: start as u32, end: i as u32, nl_before: false });
+            } else {
+                // `<` or `</`
+                let mut j = i + 1;
+                while j < n && matches!(b[j], b' ' | b'\t' | b'\n' | b'\r') {
+                    j += 1;
+                }
+                closing = j < n && b[j] == b'/';
+                i = if closing { j + 1 } else { i + 1 };
+                toks.push(Tok { kind: if closing { Kind::JsxClose } else { Kind::JsxOpen }, start: start as u32, end: i as u32, nl_before: false });
+                mode = Mode::JsxTag;
+            }
+            continue;
+        }
+        if mode == Mode::JsxTag && !matches!(c, b' ' | b'\t' | b'\n' | b'\r') {
+            let start = i;
+            let push = |kind: Kind, end: usize, toks: &mut Vec<Tok>| toks.push(Tok { kind, start: start as u32, end: end as u32, nl_before: false });
+            match c {
+                b'>' => {
+                    i += 1;
+                    push(Kind::JsxEnd, i, &mut toks);
+                    let d = depths.last_mut().expect("in JSX");
+                    if closing {
+                        *d -= 1;
+                    } else {
+                        *d += 1;
+                    }
+                    if *d == 0 {
+                        depths.pop();
+                        mode = Mode::Js;
+                    } else {
+                        mode = Mode::JsxChildren;
+                    }
+                }
+                b'/' if i + 1 < n && b[i + 1] == b'>' => {
+                    i += 2;
+                    push(Kind::JsxSelfClose, i, &mut toks);
+                    if *depths.last().expect("in JSX") == 0 {
+                        depths.pop();
+                        mode = Mode::Js;
+                    } else {
+                        mode = Mode::JsxChildren;
+                    }
+                }
+                b'/' if i + 1 < n && (b[i + 1] == b'*' || b[i + 1] == b'/') => {
+                    // a comment inside a tag
+                    if b[i + 1] == b'/' {
+                        while i < n && b[i] != b'\n' {
+                            i += 1;
+                        }
+                    } else {
+                        i += 2;
+                        while i + 1 < n && !(b[i] == b'*' && b[i + 1] == b'/') {
+                            i += 1;
+                        }
+                        i += 2;
+                    }
+                }
+                b'{' => {
+                    i += 1;
+                    braces.push(Brace::JsxTag);
+                    mode = Mode::Js;
+                    push(Kind::Punct, i, &mut toks);
+                }
+                b'=' => {
+                    i += 1;
+                    push(Kind::Punct, i, &mut toks);
+                }
+                b'"' | b'\'' => {
+                    i += 1;
+                    while i < n && b[i] != c {
+                        i += 1;
+                    }
+                    if i >= n {
+                        return Err(err(start, "unterminated JSX attribute string"));
+                    }
+                    i += 1;
+                    push(Kind::JsxStr, i, &mut toks);
+                }
+                _ => {
+                    while i < n && (b[i].is_ascii_alphanumeric() || matches!(b[i], b'_' | b'$' | b'-' | b':' | b'.') || b[i] >= 0x80) {
+                        i += 1;
+                    }
+                    if i == start {
+                        return Err(err(start, "unexpected character in a JSX tag"));
+                    }
+                    push(Kind::JsxName, i, &mut toks);
+                }
+            }
+            continue;
+        }
         // whitespace and line terminators
         if c == b'\n' || c == b'\r' {
             nl = true;
@@ -217,29 +366,45 @@ pub fn tokenize_from(src: &str, from: usize, braces: Vec<bool>, slash: Option<bo
             let (end, subst) = scan_template(b, i).ok_or_else(|| err(start, "unterminated template literal"))?;
             i = end;
             if subst {
-                braces.push(true);
+                braces.push(Brace::Template);
                 push(Kind::TemplateHead, i, &mut toks);
             } else {
                 push(Kind::Template, i, &mut toks);
             }
             continue;
         }
+        // `}` closing a JSX expression returns to the tag or the children
+        if c == b'}' && matches!(braces.last(), Some(Brace::JsxTag | Brace::JsxChild)) {
+            mode = if braces.pop() == Some(Brace::JsxTag) { Mode::JsxTag } else { Mode::JsxChildren };
+            i += 1;
+            push(Kind::Punct, i, &mut toks);
+            continue;
+        }
+        // JSX: `<` where an expression starts (not TypeScript's `<T,>(...) =>` or `<T extends U>`)
+        if c == b'<' && opts.jsx && regex_allowed(src, &toks) && jsx_starts(b, i + 1) {
+            i += 1;
+            push(Kind::JsxOpen, i, &mut toks);
+            depths.push(0);
+            closing = false;
+            mode = Mode::JsxTag;
+            continue;
+        }
         // `}` closing a template substitution continues the template
-        if c == b'}' && braces.last() == Some(&true) {
+        if c == b'}' && braces.last() == Some(&Brace::Template) {
             braces.pop();
             i += 1;
             let (end, subst) = scan_template(b, i).ok_or_else(|| err(start, "unterminated template literal"))?;
             i = end;
             if subst {
-                braces.push(true);
+                braces.push(Brace::Template);
                 push(Kind::TemplateMiddle, i, &mut toks);
             } else {
                 push(Kind::TemplateTail, i, &mut toks);
             }
             continue;
         }
-        // regular expressions
-        let forced = if i == from { slash.take() } else { None };
+        // regular expressions (or the parser's correction of the guess)
+        let forced = if c == b'/' && !opts.slashes.is_empty() { opts.slashes.binary_search_by_key(&(i as u32), |s| s.0).ok().map(|k| opts.slashes[k].1) } else { None };
         if c == b'/' && forced.unwrap_or_else(|| regex_allowed(src, &toks)) {
             i += 1;
             let mut class = false;
@@ -274,14 +439,37 @@ pub fn tokenize_from(src: &str, from: usize, braces: Vec<bool>, slash: Option<bo
             return Err(err(start, "unexpected character"));
         }
         if c == b'{' {
-            braces.push(false);
+            braces.push(Brace::Block);
         } else if c == b'}' {
             braces.pop();
         }
         i += len;
         push(Kind::Punct, i, &mut toks);
     }
+    if mode != Mode::Js {
+        return Err(err(n, "unterminated JSX element"));
+    }
     Ok(toks)
+}
+
+/// After a `<` where an expression starts: a JSX element (`<div`, `<Foo.Bar`, `<>`) rather than
+/// TypeScript type parameters (`<T,>`, `<T extends U>`).
+fn jsx_starts(b: &[u8], mut i: usize) -> bool {
+    let n = b.len();
+    if i < n && b[i] == b'>' {
+        return true;
+    }
+    if i >= n || !(b[i].is_ascii_alphabetic() || b[i] == b'_' || b[i] == b'$') {
+        return false;
+    }
+    while i < n && (b[i].is_ascii_alphanumeric() || matches!(b[i], b'_' | b'$' | b'-' | b':' | b'.')) {
+        i += 1;
+    }
+    while i < n && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') {
+        i += 1;
+    }
+    // `<T,` / `<T extends` / `<T = X>`: type parameters
+    !(i < n && (b[i] == b',' || (b[i] == b'=' && i + 1 < n && b[i + 1] != b'{' && b[i + 1] != b'"' && b[i + 1] != b'\'') || b[i..].starts_with(b"extends ")))
 }
 
 /// Scans template characters from `i` (after a backtick or `}`): returns (end, whether it
@@ -304,8 +492,12 @@ fn regex_allowed(src: &str, toks: &[Tok]) -> bool {
     match prev.kind {
         Kind::Num | Kind::Str | Kind::Regex | Kind::Template | Kind::TemplateTail | Kind::Private => false,
         Kind::TemplateHead | Kind::TemplateMiddle => true,
-        Kind::Ident => REGEX_AFTER.contains(&prev.text(src)),
+        // (a keyword after `.` is a property name: `l.else / v`)
+        Kind::Ident => REGEX_AFTER.contains(&prev.text(src)) && !(toks.len() >= 2 && matches!(toks[toks.len() - 2].text(src), "." | "?.") && toks[toks.len() - 2].kind == Kind::Punct),
         Kind::Punct => !matches!(prev.text(src), ")" | "]" | "}" | "++" | "--"),
+        // (an element that just ended is an operand)
+        Kind::JsxEnd | Kind::JsxSelfClose => false,
+        Kind::JsxOpen | Kind::JsxClose | Kind::JsxName | Kind::JsxStr | Kind::JsxText => true,
     }
 }
 

@@ -128,6 +128,13 @@ struct P<'a> {
     ts: bool,
     /// JSX syntax (`.jsx`, `.tsx`).
     jsx: bool,
+    /// The module JSX compiles to calls of (`react/jsx-runtime`), and its source index once used.
+    jsx_runtime: String,
+    jsx_source: Option<usize>,
+    /// Corrections of the lexer's regex/division guesses (byte offset, regex), sorted.
+    slashes: Vec<(u32, bool)>,
+    /// `>>`-style tokens split where type arguments end (byte offset, bytes of the first part).
+    splits: Vec<(u32, u32)>,
     /// The import declaration being read (for TypeScript's elision of unused imports).
     import_decls: Vec<ImportDecl>,
     /// Parameter properties (`constructor(private x)`) of the parameter list just read.
@@ -145,12 +152,14 @@ struct ImportDecl {
 }
 
 pub fn parse_module(src: &str) -> Result<Module, ParseError> {
-    parse(src, false, false)
+    parse(src, false, None)
 }
 
-/// Parses a module; `ts`: TypeScript, whose types are recorded as removals; `jsx`: with JSX.
-pub fn parse(src: &str, ts: bool, jsx: bool) -> Result<Module, ParseError> {
-    let toks = lex::tokenize(src).map_err(|e| ParseError { pos: e.pos, message: e.message.to_string() })?;
+/// Parses a module; `ts`: TypeScript, whose types are recorded as removals; `jsx`: with JSX,
+/// compiled for this runtime module (`react/jsx-runtime`).
+pub fn parse(src: &str, ts: bool, jsx: Option<&str>) -> Result<Module, ParseError> {
+    let opts = lex::LexOpts { jsx: jsx.is_some(), slashes: &[] };
+    let toks = lex::tokenize_with(src, &opts).map_err(|e| ParseError { pos: e.pos, message: e.message.to_string() })?;
     let mut p = P {
         src,
         toks,
@@ -165,7 +174,11 @@ pub fn parse(src: &str, ts: bool, jsx: bool) -> Result<Module, ParseError> {
         no_in: false,
         import_index: FxMap::default(),
         ts,
-        jsx,
+        jsx: jsx.is_some(),
+        jsx_runtime: jsx.unwrap_or("react/jsx-runtime").to_string(),
+        jsx_source: None,
+        slashes: Vec::new(),
+        splits: Vec::new(),
         import_decls: Vec::new(),
         param_props: Vec::new(),
         no_body: false,
@@ -262,25 +275,31 @@ impl<'a> P<'a> {
     }
 
     /// Re-reads the current token: `/` was guessed wrong (`regex`: read a regular expression).
+    /// The file is tokenized again with the correction (the lexer's state there — templates, JSX
+    /// — comes out right); the tokens before it don't change.
     fn relex(&mut self, regex: bool) -> R<()> {
-        let mut braces: Vec<bool> = Vec::new();
-        for t in &self.toks[..self.i] {
-            match t.kind {
-                Kind::Punct if t.text(self.src) == "{" => braces.push(false),
-                Kind::Punct if t.text(self.src) == "}" => {
-                    braces.pop();
-                }
-                Kind::TemplateHead => braces.push(true),
-                Kind::TemplateTail => {
-                    braces.pop();
-                }
-                _ => {}
-            }
+        let at = self.toks[self.i].start;
+        match self.slashes.binary_search_by_key(&at, |s| s.0) {
+            Ok(k) => self.slashes[k].1 = regex,
+            Err(k) => self.slashes.insert(k, (at, regex)),
         }
-        let t = self.toks[self.i];
-        let rest = lex::tokenize_from(self.src, t.start as usize, braces, Some(regex), t.nl_before).map_err(|e| ParseError { pos: e.pos, message: e.message.to_string() })?;
-        self.toks.truncate(self.i);
-        self.toks.extend(rest);
+        let opts = lex::LexOpts { jsx: self.jsx, slashes: &self.slashes };
+        let mut toks = lex::tokenize_with(self.src, &opts).map_err(|e| ParseError { pos: e.pos, message: e.message.to_string() })?;
+        // re-apply the splits of `>>`-style tokens
+        if !self.splits.is_empty() {
+            let mut out = Vec::with_capacity(toks.len() + self.splits.len());
+            for t in toks {
+                match self.splits.iter().find(|s| s.0 == t.start) {
+                    Some(&(start, take)) => {
+                        out.push(Tok { kind: Kind::Punct, start, end: start + take, nl_before: t.nl_before });
+                        out.push(Tok { kind: Kind::Punct, start: start + take, end: t.end, nl_before: false });
+                    }
+                    None => out.push(t),
+                }
+            }
+            toks = out;
+        }
+        self.toks = toks;
         Ok(())
     }
 
@@ -1663,6 +1682,8 @@ impl<'a> P<'a> {
     fn primary(&mut self, callee: bool) -> R<()> {
         let Some(kind) = self.kind(0) else { return self.err("expected an expression") };
         match kind {
+            Kind::JsxOpen => self.jsx_element(),
+            Kind::JsxClose | Kind::JsxName | Kind::JsxStr | Kind::JsxText | Kind::JsxEnd | Kind::JsxSelfClose => self.err("unexpected JSX"),
             Kind::Num | Kind::Str | Kind::Regex | Kind::Private => {
                 // `#x in obj`
                 self.bump();
@@ -1866,6 +1887,333 @@ impl<'a> P<'a> {
     }
 }
 
+// ---------------------------------------------------------------- JSX
+//
+// Elements compile in place to the automatic runtime (React 17+'s, or tsconfig's
+// `jsxImportSource`): `<div a="x" {...p}>hi {name}</div>` becomes
+// `rt.jsxs("div", {a: "x", ...p, children: ["hi ", name]})`. Embedded expressions stay where they
+// are, so their references are rewritten like any other code.
+
+impl<'a> P<'a> {
+    /// The runtime module's variable (`__barm_iN`, see esm.rs).
+    fn jsx_rt(&mut self) -> String {
+        let src = match self.jsx_source {
+            Some(s) => s,
+            None => {
+                let spec = self.jsx_runtime.clone();
+                let s = self.add_source(&super::bundle::js_string(&spec));
+                self.import_decls.push(ImportDecl { source: s, side_effect: true });
+                self.jsx_source = Some(s);
+                s
+            }
+        };
+        format!("__barm_i{src}")
+    }
+
+    fn jsx_element(&mut self) -> R<()> {
+        let rt = self.jsx_rt();
+        let open = self.toks[self.i];
+        let mut key: Option<String> = None;
+        self.bump();
+        // the call's head: patched to `jsxs` once the children are counted
+        let head = self.m.replacements.len();
+        if self.kind(0) == Some(Kind::JsxEnd) {
+            // a fragment
+            self.m.replacements.push((open.start, open.end, format!("{rt}.jsx({rt}.Fragment, {{")));
+        } else {
+            let Some(Kind::JsxName) = self.kind(0) else { return self.err("expected a JSX tag name") };
+            let name = self.toks[self.i];
+            let text = name.text(self.src);
+            let intrinsic = text.starts_with(|c: char| c.is_ascii_lowercase()) || text.contains('-') || text.contains(':');
+            if intrinsic {
+                self.m.replacements.push((open.start, name.end, format!("{rt}.jsx({}, {{", super::bundle::js_string(text))));
+            } else {
+                // a component: its name is a reference (`Foo`, or `ns.Foo`'s `ns`)
+                self.m.replacements.push((open.start, open.end, format!("{rt}.jsx(")));
+                let first = text.split('.').next().unwrap_or(text);
+                self.refs.push(RawRef { start: name.start, end: name.start + first.len() as u32, scope: self.cur, ctx: Ctx::Plain });
+                self.m.inserts.push((name.end, ", {".into()));
+            }
+            self.bump();
+            key = self.jsx_attributes()?;
+        }
+        // `key`: the call's third argument, as Babel and TypeScript compile it
+        let close_args = match &key {
+            Some(k) => format!("}}, {k})"),
+            None => "})".to_string(),
+        };
+        if self.kind(0) == Some(Kind::JsxSelfClose) {
+            let t = self.toks[self.i];
+            self.m.replacements.push((t.start, t.end, close_args));
+            self.bump();
+            return Ok(());
+        }
+        // `>`: the children follow
+        let gt = self.toks[self.i];
+        let children_at = self.m.replacements.len();
+        self.m.replacements.push((gt.start, gt.end, String::new()));
+        self.bump();
+        let mut count = 0usize;
+        loop {
+            match self.kind(0) {
+                Some(Kind::JsxText) => {
+                    let t = self.toks[self.i];
+                    let text = jsx_text(t.text(self.src));
+                    if text.is_empty() {
+                        self.m.removals.push((t.start, t.end));
+                    } else {
+                        self.m.replacements.push((t.start, t.end, format!("{}, ", super::bundle::js_string(&text))));
+                        count += 1;
+                    }
+                    self.bump();
+                }
+                Some(Kind::Punct) if self.text(0) == "{" => {
+                    let lb = self.toks[self.i];
+                    self.bump();
+                    if self.is_punct(0, "}") {
+                        // `{}` or `{/* a comment */}`: nothing
+                        let rb = self.toks[self.i];
+                        self.m.removals.push((lb.start, rb.end));
+                        self.bump();
+                        continue;
+                    }
+                    self.m.removals.push((lb.start, lb.end));
+                    let spread = self.eat("...");
+                    let saved = std::mem::replace(&mut self.no_in, false);
+                    let r = self.assign();
+                    self.no_in = saved;
+                    r?;
+                    let rb = self.toks.get(self.i).copied();
+                    self.expect("}")?;
+                    if let Some(rb) = rb {
+                        self.m.replacements.push((rb.start, rb.end, ", ".into()));
+                    }
+                    // (a spread child counts as many)
+                    count += if spread { 2 } else { 1 };
+                }
+                Some(Kind::JsxOpen) => {
+                    self.jsx_element()?;
+                    self.m.inserts.push((self.prev_end(), ", ".into()));
+                    count += 1;
+                }
+                Some(Kind::JsxClose) => {
+                    let start = self.toks[self.i].start;
+                    self.bump();
+                    if self.kind(0) == Some(Kind::JsxName) {
+                        self.bump();
+                    }
+                    let Some(Kind::JsxEnd) = self.kind(0) else { return self.err("expected `>`") };
+                    let end = self.toks[self.i].end;
+                    self.bump();
+                    let (open_text, close_text) = match count {
+                        0 => ("", close_args.clone()),
+                        1 => ("children: ", close_args.clone()),
+                        _ => ("children: [", format!("]{close_args}")),
+                    };
+                    self.m.replacements[children_at].2 = open_text.to_string();
+                    self.m.replacements.push((start, end, close_text));
+                    if count > 1 {
+                        // static children: jsxs
+                        let h = &mut self.m.replacements[head].2;
+                        *h = h.replacen(".jsx(", ".jsxs(", 1);
+                    }
+                    return Ok(());
+                }
+                _ => return self.err("expected JSX children or a closing tag"),
+            }
+        }
+    }
+
+    /// Attributes, up to `>` or `/>`: `name="v"`, `name={e}`, `name`, `{...e}`. Returns the
+    /// `key`'s code when it can move to the call's third argument.
+    fn jsx_attributes(&mut self) -> R<Option<String>> {
+        let mut key_out = None;
+        loop {
+            match self.kind(0) {
+                Some(Kind::JsxEnd) | Some(Kind::JsxSelfClose) => return Ok(key_out),
+                Some(Kind::JsxName) => {
+                    let name = self.toks[self.i];
+                    let key = super::bundle::js_string(name.text(self.src));
+                    self.bump();
+                    if !self.is_punct(0, "=") {
+                        self.m.replacements.push((name.start, name.end, format!("{key}: true, ")));
+                        continue;
+                    }
+                    self.bump();
+                    let is_key = name.text(self.src) == "key";
+                    match self.kind(0) {
+                        Some(Kind::JsxStr) => {
+                            let v = self.toks[self.i];
+                            let raw = v.text(self.src);
+                            let value = super::bundle::js_string(&jsx_entities(&raw[1..raw.len() - 1]));
+                            if is_key {
+                                self.m.removals.push((name.start, v.end));
+                                key_out = Some(value);
+                            } else {
+                                self.m.replacements.push((name.start, v.end, format!("{key}: {value}, ")));
+                            }
+                            self.bump();
+                        }
+                        Some(Kind::Punct) if self.text(0) == "{" && is_key => {
+                            // moved as text when nothing in it needs rewriting (no imports, JSX
+                            // or types); otherwise it stays a prop (React reads it from there too)
+                            let lb = self.toks[self.i];
+                            let (refs, edits) = (self.refs.len(), self.m.removals.len() + self.m.replacements.len() + self.m.inserts.len());
+                            self.bump();
+                            let from = self.pos();
+                            let saved = std::mem::replace(&mut self.no_in, false);
+                            let r = self.assign();
+                            self.no_in = saved;
+                            r?;
+                            let to = self.prev_end();
+                            let rb = self.toks.get(self.i).copied();
+                            self.expect("}")?;
+                            let clean = self.m.removals.len() + self.m.replacements.len() + self.m.inserts.len() == edits
+                                && self.refs[refs..].iter().all(|r| !self.import_index.contains_key(&self.src[r.start as usize..r.end as usize]))
+                                && self.m.top_this.last().is_none_or(|t| t.0 < from);
+                            match (clean, rb) {
+                                (true, Some(rb)) => {
+                                    self.m.removals.push((name.start, rb.end));
+                                    key_out = Some(format!("({})", &self.src[from as usize..to as usize]));
+                                }
+                                (_, Some(rb)) => {
+                                    self.m.replacements.push((name.start, lb.end, format!("{key}: (")));
+                                    self.m.replacements.push((rb.start, rb.end, "), ".into()));
+                                }
+                                _ => {}
+                            }
+                        }
+                        Some(Kind::Punct) if self.text(0) == "{" => {
+                            let lb = self.toks[self.i];
+                            self.m.replacements.push((name.start, lb.end, format!("{key}: (")));
+                            self.bump();
+                            let saved = std::mem::replace(&mut self.no_in, false);
+                            let r = self.assign();
+                            self.no_in = saved;
+                            r?;
+                            let rb = self.toks.get(self.i).copied();
+                            self.expect("}")?;
+                            if let Some(rb) = rb {
+                                self.m.replacements.push((rb.start, rb.end, "), ".into()));
+                            }
+                        }
+                        Some(Kind::JsxOpen) => {
+                            // an element as a value
+                            self.m.replacements.push((name.start, self.toks[self.i - 1].end, format!("{key}: ")));
+                            self.jsx_element()?;
+                            self.m.inserts.push((self.prev_end(), ", ".into()));
+                        }
+                        _ => return self.err("expected an attribute value"),
+                    }
+                }
+                Some(Kind::Punct) if self.text(0) == "{" => {
+                    // `{...props}`
+                    let lb = self.toks[self.i];
+                    self.m.removals.push((lb.start, lb.end));
+                    self.bump();
+                    self.expect("...")?;
+                    let saved = std::mem::replace(&mut self.no_in, false);
+                    let r = self.assign();
+                    self.no_in = saved;
+                    r?;
+                    let rb = self.toks.get(self.i).copied();
+                    self.expect("}")?;
+                    if let Some(rb) = rb {
+                        self.m.replacements.push((rb.start, rb.end, ", ".into()));
+                    }
+                }
+                _ => return self.err("expected a JSX attribute"),
+            }
+        }
+    }
+}
+
+/// JSX text as a string: lines trimmed (but spaces between words on a line kept), blank lines
+/// dropped, the rest joined with spaces; entities decoded (as Babel and TypeScript do).
+fn jsx_text(raw: &str) -> String {
+    let lines: Vec<&str> = raw.split('\n').collect();
+    let last = lines.len() - 1;
+    let mut out = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        let line = line.trim_end_matches('\r');
+        let mut l = line;
+        if i > 0 {
+            l = l.trim_start_matches([' ', '\t']);
+        }
+        if i < last {
+            l = l.trim_end_matches([' ', '\t']);
+        }
+        if l.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(l);
+    }
+    jsx_entities(&out)
+}
+
+/// HTML character references in JSX text and attribute strings.
+fn jsx_entities(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        let end = rest.find(';').filter(|&e| e <= 10);
+        let decoded = end.and_then(|e| {
+            let name = &rest[1..e];
+            let ch = if let Some(h) = name.strip_prefix("#x").or_else(|| name.strip_prefix("#X")) {
+                u32::from_str_radix(h, 16).ok().and_then(char::from_u32)
+            } else if let Some(d) = name.strip_prefix('#') {
+                d.parse().ok().and_then(char::from_u32)
+            } else {
+                match name {
+                    "amp" => Some('&'),
+                    "lt" => Some('<'),
+                    "gt" => Some('>'),
+                    "quot" => Some('"'),
+                    "apos" => Some('\''),
+                    "nbsp" => Some('\u{a0}'),
+                    "copy" => Some('©'),
+                    "reg" => Some('®'),
+                    "trade" => Some('™'),
+                    "hellip" => Some('…'),
+                    "mdash" => Some('—'),
+                    "ndash" => Some('–'),
+                    "lsquo" => Some('‘'),
+                    "rsquo" => Some('’'),
+                    "ldquo" => Some('“'),
+                    "rdquo" => Some('”'),
+                    "times" => Some('×'),
+                    "middot" => Some('·'),
+                    "bull" => Some('•'),
+                    "larr" => Some('←'),
+                    "rarr" => Some('→'),
+                    _ => None,
+                }
+            };
+            ch.map(|c| (c, e))
+        });
+        match decoded {
+            Some((c, e)) => {
+                out.push(c);
+                rest = &rest[e + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 // ---------------------------------------------------------------- TypeScript
 //
 // Types are skipped (they only move `self.i`) and recorded as removals by the caller, which
@@ -1944,6 +2292,7 @@ impl<'a> P<'a> {
                             // split off the `>`s that close this list
                             let take = depth.min(closes) as u32;
                             let tok = self.toks[self.i];
+                            self.splits.push((tok.start, take));
                             let first = Tok { kind: Kind::Punct, start: tok.start, end: tok.start + take, nl_before: tok.nl_before };
                             let rest = Tok { kind: Kind::Punct, start: tok.start + take, end: tok.end, nl_before: false };
                             self.toks[self.i] = first;
