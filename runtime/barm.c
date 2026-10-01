@@ -5140,6 +5140,7 @@ enum { BM_FETCH_DECOMPRESS = 1, BM_FETCH_INSECURE = 2 };
 /* Set by bm_tls_install() in programs linked with TLS (runtime/tls.c, runtime/codecs.c). */
 const bm_tls_ops *bm_tls_impl;
 const bm_codec_ops *bm_codec;
+const bm_crypto_ops *bm_crypto;
 
 typedef struct bm_fr {
     bm_int id;

@@ -23,9 +23,12 @@ Per-context files also get `privateSymbols` and `perIsolateSymbols`.
 - `internal/errors/error_source.js` finds the source expression for `assert`'s "evaluated to a falsy value" message. It scans the line rather than using acorn, and reads the source through `globalThis.__barm_source(file)`.
 - `internal/bootstrap/realm.js` lists the built-in module ids.
 - `internal/v8/startup_snapshot.js` reports that Barm builds no snapshots.
+- `crypto.js` replaces Node.js's, which binds all of OpenSSL. It runs on BoringSSL through `__barm_native.crypto` (`runtime/crypto.c`). It covers hashes, HMAC, random values, `pbkdf2`, `scrypt`, `hkdf`, `timingSafeEqual` and `subtle.digest`, answering and failing as Node.js does. A program whose bundle has `crypto` links BoringSSL's libcrypto, not the TLS client.
+- `internal/barm/random.js` provides `getRandomValues` and `randomUUID` for the global `crypto`, without loading `crypto`. Without BoringSSL linked, they use the system's `arc4random`.
 
 ## Local edits to Node.js files
 
+- `internal/util/types.js`: `isKeyObject` and `isCryptoKey` answer false without loading `internal/crypto/keys` (Barm's crypto has neither yet).
 - `internal/primordials.js`: defines `Symbol.dispose` and `Symbol.asyncDispose` when the engine lacks them (JavaScriptCore does), as Node.js once did.
 - `internal/util/debuglog.js`: `testEnabled` is initialized on first use when startup hasn't done it.
 - `internal/util.js`: `getInternalGlobal()` returns the primordial `RegExp`, `Object` and `Array` rather than a second realm from `vm` (none yet).
@@ -34,6 +37,7 @@ Per-context files also get `privateSymbols` and `perIsolateSymbols`.
 
 - `util.inspect` of a settled promise shows `Promise { <pending> }`. A promise's state isn't visible from JavaScript, and JavaScriptCore's public C API doesn't expose it.
 - `util.inspect` can't see a proxy's target or iterator entries (`getProxyDetails`, `previewEntries`).
+- `crypto` has no ciphers, signatures, key objects or Diffie-Hellman yet: those functions throw `ERR_METHOD_NOT_IMPLEMENTED`. `crypto.subtle` only digests.
 
 ## Tests
 

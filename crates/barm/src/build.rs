@@ -159,7 +159,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         }
     };
     drop(checker);
-    let codegen::Program { c: mut c_src, uses_tls, npm } = program;
+    let codegen::Program { c: mut c_src, mut uses_tls, npm } = program;
     // npm packages: bundled into a blob the program embeds (see runtime/js.c)
     if !npm.is_empty() {
         if !cfg!(target_vendor = "apple") {
@@ -170,6 +170,12 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
             for w in &b.warnings {
                 eprintln!("npm: {w}");
             }
+        }
+        // Node.js's crypto runs on the TLS library's BoringSSL (runtime/crypto.c): a bundle with it
+        // links the library, and installs it before main
+        if b.sources.iter().any(|(name, _)| name == "node:crypto") {
+            uses_tls = true;
+            c_src.push_str("__attribute__((constructor)) static void bmg_npm_crypto(void) { bm_crypto_install(); }\n");
         }
         let blob = b.blob();
         let c_dir = cache_dir().join("c");
