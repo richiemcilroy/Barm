@@ -1844,6 +1844,12 @@ impl<'c, 'a> Gen<'c, 'a> {
                 if let Some(fact) = self.facts(m).calls.get(&e)
                     && let Callee::JsNew = fact.callee
                 {
+                    if let Some(v) = self.js_try_fuse(e, ty, span) {
+                        if self.facts(m).throwing.contains(&e) {
+                            self.error_check();
+                        }
+                        return v;
+                    }
                     let f = self.js_callee(*callee);
                     let v = self.js_call(f, None, args, true, ty);
                     if self.facts(m).throwing.contains(&e) {
@@ -1873,7 +1879,15 @@ impl<'c, 'a> Gen<'c, 'a> {
                 Val::plain("BM_EMPTY_MAP", ty)
             }
             ExprKind::Member { obj, name, optional, .. } => self.member(e, *obj, *name, *optional, ty, span),
-            ExprKind::Index { obj, index, optional } => self.index(*obj, *index, *optional, ty, span),
+            ExprKind::Index { obj, index, optional } => {
+                let ot = self.ty(*obj);
+                if self.c.types.without_undefined(ot) == JS
+                    && let Some(v) = self.js_try_fuse(e, ty, span)
+                {
+                    return v;
+                }
+                self.index(*obj, *index, *optional, ty, span)
+            }
             ExprKind::Object(fields) => {
                 let target = self.c.unfold(ty);
                 // Checked against an interface: build a record with the interface's members, then wrap it.
@@ -2749,6 +2763,9 @@ impl<'c, 'a> Gen<'c, 'a> {
         let m = self.cur_m();
         let ot = self.ty(obj);
         if self.c.types.without_undefined(ot) == JS {
+            if let Some(v) = self.js_try_fuse(e, ty, span) {
+                return v;
+            }
             let base = self.expr(obj);
             let base = self.js_of(base);
             return self.js_member(base, name, optional, ty, span);

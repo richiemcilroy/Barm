@@ -165,6 +165,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             Callee::NewPromise => self.new_promise(args, ty),
             Callee::Js { method } => {
+                if let Some(v) = self.js_try_fuse(e, ty, span) {
+                    return v;
+                }
                 let target = match (&ast.expr(*callee).kind, method) {
                     (ExprKind::Member { obj, .. }, Some(_)) => *obj,
                     _ => *callee,
