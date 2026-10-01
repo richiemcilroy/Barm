@@ -246,12 +246,13 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
                 eprintln!("npm: {w}");
             }
         }
-        // Node.js's crypto and zlib run on the TLS library's BoringSSL and codecs (runtime/crypto.c,
-        // runtime/compress.c): a bundle with them links the library, and installs them before main
-        for (module, install) in [("node:crypto", "bm_crypto_install"), ("node:zlib", "bm_zlib_install")] {
+        // Node.js's crypto and zlib, and fetch(), run on the TLS library's BoringSSL, codecs and TLS
+        // client (runtime/crypto.c, compress.c, tls.c): a bundle with them links the library, and
+        // installs them before main
+        for (module, install) in [("node:crypto", "bm_crypto_install"), ("node:zlib", "bm_zlib_install"), ("node:internal/barm/fetch", "bm_tls_install")] {
             if b.sources.iter().any(|(name, _)| name == module) {
                 uses_tls = true;
-                c_src.push_str(&format!("__attribute__((constructor)) static void bmg_npm_{}(void) {{ {install}(); }}\n", &module[5..]));
+                c_src.push_str(&format!("__attribute__((constructor)) static void bmg_npm_{}(void) {{ {install}(); }}\n", module[5..].replace('/', "_")));
             }
         }
         let blob = b.blob();

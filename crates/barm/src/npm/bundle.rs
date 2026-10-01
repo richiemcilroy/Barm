@@ -368,7 +368,7 @@ fn expand_pattern(from_dir: &Path, prefix: &str, suffix: &str) -> Vec<String> {
 }
 
 /// (global name, the shim that defines it) for globals globals.js loads by a computed name.
-const LAZY_GLOBALS: &[(&str, &str)] = &[("CompressionStream", "internal/webstreams/compression"), ("DecompressionStream", "internal/webstreams/compression"), ("subtle", "crypto")];
+const LAZY_GLOBALS: &[(&str, &str)] = &[("CompressionStream", "internal/webstreams/compression"), ("DecompressionStream", "internal/webstreams/compression"), ("subtle", "crypto"), ("fetch", "internal/barm/fetch"), ("Request", "internal/barm/fetch"), ("Response", "internal/barm/fetch"), ("Headers", "internal/barm/fetch"), ("FormData", "internal/barm/fetch")];
 
 /// The module JSX compiles to calls of: the nearest tsconfig.json's `jsxImportSource` (Solid,
 /// Preact, ...) + `/jsx-runtime`, else React's.

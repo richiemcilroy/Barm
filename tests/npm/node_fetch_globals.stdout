@@ -1,0 +1,20 @@
+get 200 true OK application/json ["a=1","b=2"] {"method":"GET","url":"/hello","body":"","ct":null,"custom":null}
+post {"method":"POST","url":"/post","body":"{\"x\":1}","ct":"application/json","custom":"yes"}
+urlencoded {"method":"PUT","url":"/form","body":"a=1&b=two","ct":"application/x-www-form-urlencoded;charset=UTF-8","custom":null}
+redirect 200 true BASE/target
+manual 302 /target
+stream 20000 true
+status 404 false Nope 1 missing
+abort AbortError This operation was aborted
+refused TypeError fetch failed ECONNREFUSED
+clone true
+data text/plain hello
+headers [["a","1, 3"],["b","2"]] true 1, 3
+bad header TypeError Headers.append: "bad name" is an invalid header name.
+request POST BASE/x text/plain;charset=UTF-8 hi true
+get body TypeError Request with GET/HEAD method cannot have body.
+response 201  text/plain;charset=UTF-8 text body
+json response {"k":[1]} application/json
+error response error 0
+redirect response http://x.test/
+formData value
