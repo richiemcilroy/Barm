@@ -217,6 +217,8 @@ impl<'a> Checker<'a> {
                         );
                         ERROR
                     }
+                    // a JavaScript iterable (an array, a Set, a generator...)
+                    Ty::Js => JS,
                     _ => {
                         let msg = format!("`for...of` needs an array or set, found `{}`", self.show(t));
                         self.report(Diagnostic::new("T0402", ispan, msg));

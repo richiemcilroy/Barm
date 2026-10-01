@@ -1,0 +1,16 @@
+import { point } from "cjs-math"
+
+const p = try point(1, 2)
+p.x = 10
+p["y"] = 20
+console.log(p.x as int, p.y as int)
+for (const t of p.tags) {
+  console.log(t as string)
+}
+console.log(p.tags.length as int)
+p.count = 1
+p.count += 41
+p.label ??= "set once"
+p.label ??= "not again"
+console.log(p.count as int, p.label as string)
+console.log(p.nested?.ok as bool, p.missing?.deep)
