@@ -15,6 +15,7 @@ usage:
   barm build [path] [-o out] [--emit-c f]   build a native binary
   barm test [path]                          build and run every `test(...)`
   barm explain <CODE>                       explain a diagnostic code
+  barm clean                                empty the build cache (it's also pruned as it grows)
   barm version
 
 A script wins over a file of the same name; `check`, `build`, `test` and `run` are always
@@ -48,6 +49,11 @@ fn main() -> ExitCode {
         Some("run") => run_cmd(&with(&rest[1..]), false),
         Some("test") => build_cmd(&with(&rest[1..]), BuildCmd::Test),
         Some("explain") => explain(rest.get(1).map(|s| s.as_str())),
+        Some("clean") => {
+            let freed = barm::build::clean_cache();
+            println!("clean: freed {:.1} MB of cached builds ({})", freed as f64 / 1e6, barm::build::cache_dir().display());
+            ExitCode::SUCCESS
+        }
         // Internal: bundle npm packages (for testing the bundler): `barm __bundle <dir> <spec>... [-o out.js]`.
         Some("__bundle") => bundle_cmd(&rest[1..]),
         // Internal: the npm bundler's tokens of a file between two byte offsets: `barm __lex <file> [from] [to]`.
