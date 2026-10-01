@@ -27,7 +27,15 @@ pub enum Target {
 pub enum Format {
     CommonJs,
     Esm,
+    /// `.js` in a package without a `type`: CommonJS unless it has ES module syntax (Node's
+    /// module syntax detection).
+    Detect,
     Json,
+}
+
+/// TypeScript source (types are stripped when bundling).
+pub fn is_typescript(file: &Path) -> bool {
+    matches!(file.extension().and_then(|e| e.to_str()), Some("ts" | "tsx" | "mts" | "cts"))
 }
 
 pub struct Resolver {
@@ -70,15 +78,20 @@ impl Resolver {
             Some("json") => Format::Json,
             Some("mjs") | Some("mts") => Format::Esm,
             Some("cjs") | Some("cts") => Format::CommonJs,
-            _ => {
+            ext => {
                 let mut dir = file.parent();
                 while let Some(d) = dir {
                     if let Some(pkg) = self.package_json(d) {
-                        return if pkg.get("type").and_then(|t| t.as_str()) == Some("module") { Format::Esm } else { Format::CommonJs };
+                        return match pkg.get("type").and_then(|t| t.as_str()) {
+                            Some("module") => Format::Esm,
+                            Some("commonjs") => Format::CommonJs,
+                            _ if matches!(ext, Some("ts" | "tsx")) => Format::Esm,
+                            _ => Format::Detect,
+                        };
                     }
                     dir = d.parent();
                 }
-                Format::CommonJs
+                Format::Detect
             }
         }
     }
@@ -175,14 +188,25 @@ impl Resolver {
         self.file_or_dir(p)
     }
 
-    /// `p`, `p.js`, `p.json`, `p.cjs`, `p.mjs`, then `p/` as a directory (package.json `main`,
-    /// then `index.*`).
+    /// `p`, `p.js`, `p.json`, `p.cjs`, `p.mjs`, then the TypeScript extensions, then `p/` as a
+    /// directory (package.json `main`, then `index.*`). TypeScript's ES module convention names
+    /// `x.ts` as `x.js` in imports: that is tried too.
     fn file_or_dir(&self, p: &Path) -> Option<PathBuf> {
         if p.is_file() {
             return canonical(p);
         }
         let s = p.as_os_str().to_string_lossy();
-        for ext in [".js", ".json", ".cjs", ".mjs"] {
+        for (js, ts) in [(".js", [".ts", ".tsx"]), (".mjs", [".mts", ".mts"]), (".cjs", [".cts", ".cts"]), (".jsx", [".tsx", ".tsx"])] {
+            if let Some(stem) = s.strip_suffix(js) {
+                for ext in ts {
+                    let f = PathBuf::from(format!("{stem}{ext}"));
+                    if f.is_file() {
+                        return canonical(&f);
+                    }
+                }
+            }
+        }
+        for ext in [".js", ".json", ".cjs", ".mjs", ".ts", ".tsx", ".mts", ".cts", ".jsx"] {
             let f = PathBuf::from(format!("{s}{ext}"));
             if f.is_file() {
                 return canonical(&f);
@@ -194,7 +218,7 @@ impl Resolver {
             {
                 return Some(f);
             }
-            for idx in ["index.js", "index.json", "index.cjs", "index.mjs"] {
+            for idx in ["index.js", "index.json", "index.cjs", "index.mjs", "index.ts", "index.tsx", "index.jsx"] {
                 let f = p.join(idx);
                 if f.is_file() {
                     return canonical(&f);

@@ -24,6 +24,8 @@ struct Module {
     body: String,
     /// Static require specifier → module index.
     map: Vec<(String, usize)>,
+    /// Converted from an ES module (its function takes `esm::ESM_PARAMS`).
+    esm: bool,
 }
 
 /// Bundles the packages `specs` imports, resolving them from `root` (the program's directory).
@@ -40,6 +42,7 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
         entry_ids.push(id);
     }
     while let Some((id, target)) = queue.pop() {
+        let mut esm = false;
         let (name, body, requires, dir) = match &target {
             Target::Builtin(b) => {
                 let body = match super::node_shims::shim(b) {
@@ -54,14 +57,22 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
                 let src = std::fs::read_to_string(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
                 let name = display(path, root);
                 let dir = path.parent().unwrap_or(root).to_path_buf();
-                match resolver.format(path) {
+                let ts = super::resolve::is_typescript(path);
+                let jsx = matches!(path.extension().and_then(|e| e.to_str()), Some("tsx" | "jsx"));
+                let format = match resolver.format(path) {
+                    Format::Detect if ts || jsx || super::esm::has_module_syntax(&src) => Format::Esm,
+                    Format::Detect => Format::CommonJs,
+                    f => f,
+                };
+                match format {
                     Format::Json => (name, format!("module.exports = {};", src.trim_end().trim_start_matches('\u{feff}')), Vec::new(), dir),
-                    Format::CommonJs => {
+                    Format::CommonJs | Format::Detect if !ts && !jsx => {
                         let reqs = static_requires(&src).map_err(|e| format!("{name}: {e}"))?;
                         (name, src, reqs, dir)
                     }
-                    Format::Esm => {
-                        let (body, reqs) = super::esm::to_commonjs(&src).map_err(|e| format!("{name}: {e}"))?;
+                    _ => {
+                        let (body, reqs) = super::esm::to_commonjs(&src, ts, jsx).map_err(|e| format!("{name}: {e}"))?;
+                        esm = true;
                         (name, body, reqs, dir)
                     }
                 }
@@ -94,6 +105,7 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
         modules[id].name = name;
         modules[id].body = body;
         modules[id].map = map;
+        modules[id].esm = esm;
     }
     let mut js = String::with_capacity(modules.iter().map(|m| m.body.len() + 64).sum::<usize>() + 4096);
     js.push_str(super::node_shims::globals());
@@ -101,7 +113,8 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
     js.push_str("var __barm_defs = [\n");
     for m in &modules {
         // `exports` is `this` at a CommonJS module's top level, as in Node.
-        let _ = write!(js, "function (module, exports, require, __filename, __dirname) {{\n{}\n}},\n", m.body);
+        let params = if m.esm { super::esm::ESM_PARAMS } else { "module, exports, require, __filename, __dirname" };
+        let _ = write!(js, "function ({params}) {{\n{}\n}},\n", m.body);
     }
     js.push_str("];\nvar __barm_names = [");
     for m in &modules {
@@ -129,7 +142,7 @@ fn add(modules: &mut Vec<Module>, index: &mut FxMap<Target, usize>, queue: &mut 
         return id;
     }
     let id = modules.len();
-    modules.push(Module { name: String::new(), body: String::new(), map: Vec::new() });
+    modules.push(Module { name: String::new(), body: String::new(), map: Vec::new(), esm: false });
     index.insert(t.clone(), id);
     queue.push((id, t));
     id
@@ -240,6 +253,35 @@ function __barm_dirname(p) { var i = p.lastIndexOf("/"); return i <= 0 ? "/" : p
 function __barm_missing(name) {
   var fail = function () { throw new Error("The Node module \"" + name + "\" is not supported by Barm yet"); };
   return new Proxy({}, { get: function (t, k) { if (k === "__esModule" || typeof k === "symbol" || k === "then") return undefined; return fail; } });
+}
+var __barm_esm_set = new WeakSet();
+var __barm_ns_cache = new WeakMap();
+function __barm_esm(exports, getters) {
+  __barm_esm_set.add(exports);
+  Object.defineProperty(exports, "__esModule", { value: true });
+  for (var k in getters) Object.defineProperty(exports, k, { get: getters[k], enumerable: true });
+}
+function __barm_reexport(to, m, k) { Object.defineProperty(to, k, { get: function () { return m[k]; }, enumerable: true }); }
+// An ES module's view of a module: its exports if it was an ES module; otherwise (CommonJS, as
+// in Node) `default` is `module.exports` and its own keys are named exports.
+function __barm_ns(m) {
+  if (m === null || (typeof m !== "object" && typeof m !== "function")) return { default: m };
+  if (__barm_esm_set.has(m)) return m;
+  var ns = __barm_ns_cache.get(m);
+  if (ns) return ns;
+  ns = {};
+  var keys = Object.keys(m);
+  for (var i = 0; i < keys.length; i++) if (keys[i] !== "default") __barm_reexport(ns, m, keys[i]);
+  Object.defineProperty(ns, "default", { value: m, enumerable: true });
+  __barm_ns_cache.set(m, ns);
+  return ns;
+}
+function __barm_star(to, m) {
+  var keys = Object.keys(m);
+  for (var i = 0; i < keys.length; i++) {
+    var k = keys[i];
+    if (k !== "default" && k !== "__esModule" && !Object.prototype.hasOwnProperty.call(to, k)) __barm_reexport(to, m, k);
+  }
 }
 function __barm_load(id) {
   var cached = __barm_cache[id];

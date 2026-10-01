@@ -6,6 +6,7 @@ pub mod esm;
 pub mod json;
 pub mod lex;
 pub mod node_shims;
+pub mod parse;
 pub mod resolve;
 
 pub use bundle::{bundle, Bundle};
