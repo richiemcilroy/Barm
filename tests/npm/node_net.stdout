@@ -9,3 +9,9 @@ unix PIPE
 refused ECONNREFUSED connect 127.0.0.1 1
 in use EADDRINUSE listen
 localhost by name
+Subnet: IPv4 192.168.0.0/16 | Subnet: IPv6 8592:757c:efae:4e45::/64 | Range: IPv4 10.0.0.1-10.0.0.9 | Address: IPv4 1.2.3.4
+true true true false true false
+range ERR_INVALID_ARG_VALUE
+::1 80 ipv6 0 {"address":"::1","port":80,"family":"ipv6","flowlabel":0}
+invalid ERR_INVALID_ADDRESS Invalid socket address
+parse {"address":"1.2.3.4","port":8080,"family":"ipv4","flowlabel":0} undefined
