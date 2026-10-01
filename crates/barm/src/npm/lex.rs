@@ -338,6 +338,98 @@ fn punct_len(s: &[u8]) -> usize {
     0
 }
 
+/// The string literals of `require("...")` calls (not `x.require(...)`), unescaped.
+pub fn static_requires(src: &str) -> Result<Vec<String>, String> {
+    let toks = tokenize(src).map_err(|e| format!("{} at byte {}", e.message, e.pos))?;
+    let mut out = Vec::new();
+    for (i, t) in toks.iter().enumerate() {
+        if t.kind != Kind::Ident || t.text(src) != "require" {
+            continue;
+        }
+        if i > 0 && is_member_dot(&toks[i - 1], src) {
+            continue;
+        }
+        if let [open, arg, close, ..] = &toks[i + 1..] {
+            if open.text(src) == "(" && close.text(src) == ")" && (arg.kind == Kind::Str || arg.kind == Kind::Template) {
+                out.push(unquote(arg.text(src)));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn is_member_dot(t: &Tok, src: &str) -> bool {
+    t.kind == Kind::Punct && (t.text(src) == "." || t.text(src) == "?.")
+}
+
+/// The value of a string literal token (quotes and common escapes).
+pub fn unquote(lit: &str) -> String {
+    let inner = &lit[1..lit.len() - 1];
+    if !inner.contains('\\') {
+        return inner.to_string();
+    }
+    let mut out = String::new();
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('0') => out.push('\0'),
+            Some('u') => {
+                let hex: String = chars.by_ref().take(4).collect();
+                if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                    out.push(ch);
+                }
+            }
+            Some('x') => {
+                let hex: String = chars.by_ref().take(2).collect();
+                if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                    out.push(ch);
+                }
+            }
+            Some('\n') => {}
+            Some(other) => out.push(other),
+            None => {}
+        }
+    }
+    out
+}
+
+/// `src` without comments and with whitespace collapsed: a line break stays where there was
+/// one (automatic semicolons), a space only where tokens would otherwise merge.
+pub fn minify(src: &str) -> Result<String, String> {
+    let toks = tokenize(src).map_err(|e| format!("{} at byte {}", e.message, e.pos))?;
+    let mut out = String::with_capacity(src.len() / 2);
+    let mut prev: Option<&Tok> = None;
+    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c == b'\\' || c >= 0x80;
+    for t in &toks {
+        let text = t.text(src);
+        if let Some(p) = prev {
+            let (a, b) = (*p.text(src).as_bytes().last().unwrap(), text.as_bytes()[0]);
+            if t.nl_before {
+                out.push('\n');
+            } else if (word(a) && word(b))
+                || (p.kind == Kind::Regex && word(b))
+                || (p.kind == Kind::Num && b == b'.')
+                || (a == b'+' && b == b'+')
+                || (a == b'-' && (b == b'-' || b == b'>'))
+                || (a == b'/' && (b == b'/' || b == b'*'))
+                || (a == b'<' && b == b'!')
+            {
+                out.push(' ');
+            }
+        }
+        out.push_str(text);
+        prev = Some(t);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,5 +459,17 @@ mod tests {
         let k = kinds("// import x from 'y'\nconst s = \"require('z')\" /* export */ ; require('w')");
         assert_eq!(k.iter().filter(|t| t.1 == "require").count(), 1);
         assert!(k.contains(&(Kind::Str, "'w'")));
+    }
+
+    /// Minifying keeps every token and line break: re-tokenized, the output is the same.
+    #[test]
+    fn minify_keeps_tokens() {
+        let src = "'use strict'\na = b - -c + +d / /re/g.exec(e) in f; x = 1 .toString(); y = a-- > b; if (a < !--b) {}\nlet z = `t${ 1 }u`\n/* c */ // d\nq";
+        let min = minify(src).unwrap();
+        let (a, b) = (tokenize(src).unwrap(), tokenize(&min).unwrap());
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(&b) {
+            assert_eq!((x.text(src), x.kind, x.nl_before), (y.text(&min), y.kind, y.nl_before));
+        }
     }
 }

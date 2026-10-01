@@ -2,7 +2,7 @@
 //! static `require(...)` calls resolved at bundle time. The script defines `__barm_npm`, which
 //! loads a requested package on first use.
 
-use super::lex::{self, Kind, Tok};
+pub use super::lex::{static_requires, unquote};
 use super::resolve::{Format, Resolver, Target};
 use crate::hash::FxMap;
 use std::fmt::Write;
@@ -36,6 +36,8 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
     let mut queue: Vec<(usize, Target)> = Vec::new();
     let mut warnings = Vec::new();
     let mut entry_ids = Vec::new();
+    // Node's globals (`process`, `Buffer`, ...) as a module that runs before the entries
+    let globals_id = super::node_shims::shim("__globals").map(|_| add(&mut modules, &mut index, &mut queue, Target::Builtin("internal/bootstrap/globals".into())));
     for spec in specs {
         let t = resolver.resolve(root, spec)?;
         let id = add(&mut modules, &mut index, &mut queue, t);
@@ -46,11 +48,11 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
         let (name, body, requires, dir) = match &target {
             Target::Builtin(b) => {
                 let body = match super::node_shims::shim(b) {
-                    Some(src) => src.to_string(),
+                                        Some(src) => src.to_string(),
                     None => format!("module.exports = __barm_missing({});", js_string(b)),
                 };
                 // shims may require other shims ("node:events")
-                let reqs = if super::node_shims::shim(b).is_some() { static_requires(&body).map_err(|e| format!("node:{b}: {e}"))? } else { Vec::new() };
+                let reqs = super::node_shims::shim_requires(b).iter().map(|r| r.to_string()).collect();
                 (format!("node:{b}"), body, reqs, root.to_path_buf())
             }
             Target::File(path) => {
@@ -108,7 +110,9 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
         modules[id].esm = esm;
     }
     let mut js = String::with_capacity(modules.iter().map(|m| m.body.len() + 64).sum::<usize>() + 4096);
-    js.push_str(super::node_shims::globals());
+    if globals_id.is_none() {
+        js.push_str(super::node_shims::globals());
+    }
     js.push_str(RUNTIME_HEAD);
     js.push_str("var __barm_defs = [\n");
     for m in &modules {
@@ -133,6 +137,9 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
         let _ = write!(js, "{}:{},", js_string(spec), id);
     }
     js.push_str("};\n");
+    if let Some(id) = globals_id {
+        let _ = writeln!(js, "__barm_load({id});");
+    }
     js.push_str(RUNTIME_TAIL);
     Ok(Bundle { js, entries: specs.to_vec(), modules: modules.len(), warnings })
 }
@@ -155,68 +162,6 @@ fn display(path: &Path, root: &Path) -> String {
         return s[i..].to_string();
     }
     path.strip_prefix(root).map(|p| format!("/{}", p.display())).unwrap_or_else(|_| s.into_owned())
-}
-
-/// The string literals of `require("...")` calls (not `x.require(...)`), unescaped.
-pub fn static_requires(src: &str) -> Result<Vec<String>, String> {
-    let toks = lex::tokenize(src).map_err(|e| format!("{} at byte {}", e.message, e.pos))?;
-    let mut out = Vec::new();
-    for (i, t) in toks.iter().enumerate() {
-        if t.kind != Kind::Ident || t.text(src) != "require" {
-            continue;
-        }
-        if i > 0 && is_member_dot(&toks[i - 1], src) {
-            continue;
-        }
-        if let [open, arg, close, ..] = &toks[i + 1..] {
-            if open.text(src) == "(" && close.text(src) == ")" && (arg.kind == Kind::Str || arg.kind == Kind::Template) {
-                out.push(unquote(arg.text(src)));
-            }
-        }
-    }
-    Ok(out)
-}
-
-fn is_member_dot(t: &Tok, src: &str) -> bool {
-    t.kind == Kind::Punct && (t.text(src) == "." || t.text(src) == "?.")
-}
-
-/// The value of a string literal token (quotes and common escapes).
-pub fn unquote(lit: &str) -> String {
-    let inner = &lit[1..lit.len() - 1];
-    if !inner.contains('\\') {
-        return inner.to_string();
-    }
-    let mut out = String::new();
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('n') => out.push('\n'),
-            Some('t') => out.push('\t'),
-            Some('r') => out.push('\r'),
-            Some('0') => out.push('\0'),
-            Some('u') => {
-                let hex: String = chars.by_ref().take(4).collect();
-                if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
-                    out.push(ch);
-                }
-            }
-            Some('x') => {
-                let hex: String = chars.by_ref().take(2).collect();
-                if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
-                    out.push(ch);
-                }
-            }
-            Some('\n') => {}
-            Some(other) => out.push(other),
-            None => {}
-        }
-    }
-    out
 }
 
 /// A JavaScript string literal for `s`.
