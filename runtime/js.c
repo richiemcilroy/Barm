@@ -9,6 +9,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #endif
 #include <dlfcn.h>
+#include <errno.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -85,6 +86,368 @@ static JSStringRef bm_js_module_text(uint32_t i) {
     return bm_js_string_ref(src, len, false);
 }
 
+#ifdef __APPLE__
+/* The bytecode cache. A module's bytecode (its functions' too, all of them) is written to a file
+ * the first time the program runs, and the next run reads it back instead of parsing: the media
+ * server Cap runs (654 modules, 5 MB) spends ~35 ms parsing modules at start, and more compiling
+ * the functions it calls. JavaScriptCore does this through JSScript (its Objective-C API), whose
+ * cache it only reads from a "data vault" directory (one only Apple's own software can make); so
+ * the cache's file is set on the JSScript directly (its m_cachePath, checked to be what's
+ * expected: if JavaScriptCore changes, nothing is cached). The engine checks a cache before it
+ * uses one (its source, the engine's version, this boot: one that doesn't match is emptied and
+ * written again). The files are written by a process of their own (the program, run again to
+ * write them: BARM_JS_CACHE_WRITE), started when the program first idles or exits, at a low
+ * priority, each to a temporary file renamed into place: a file is whole or isn't there. They're
+ * in the user's temporary directory (which the system empties of what isn't used), named for the
+ * module's text, so programs share them; or in BARM_JS_CACHE_DIR. BARM_JS_CACHE=0 turns it off. */
+#include <fcntl.h>
+#include <mach-o/dyld.h>
+#include <objc/message.h>
+#include <objc/runtime.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/qos.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+extern char **environ;
+/* (<spawn.h>'s, hidden under strict standards) */
+extern int posix_spawnattr_set_qos_class_np(posix_spawnattr_t *attr, qos_class_t qos);
+
+/* (the Objective-C runtime's, not in its headers) */
+extern void *objc_autoreleasePoolPush(void);
+extern void objc_autoreleasePoolPop(void *pool);
+
+/* (smaller modules parse faster than a cache is read) */
+#define BM_JSC_MIN_BYTES 4096
+
+static struct {
+    int state;              /* 0 not yet looked, 1 on, -1 off */
+    Class script;           /* JSScript */
+    ptrdiff_t cache_path;   /* its m_cachePath */
+    id context;             /* a JSContext over bm_js_ctx */
+    id vm;                  /* its JSVirtualMachine */
+    char dir[1024];
+    uint32_t *queue;        /* modules to write */
+    size_t nqueue, capqueue;
+} bm_jsc;
+
+static id bm_jsc_send(id self, const char *sel) { return ((id (*)(id, SEL))objc_msgSend)(self, sel_registerName(sel)); }
+
+static bool bm_jsc_on(void) {
+    if (bm_jsc.state) return bm_jsc.state > 0;
+    bm_jsc.state = -1;
+    const char *off = getenv("BARM_JS_CACHE");
+    if (off && strcmp(off, "0") == 0) return false;
+    Class script = objc_getClass("JSScript"), context = objc_getClass("JSContext");
+    if (!script || !context) return false;
+    Ivar path = class_getInstanceVariable(script, "m_cachePath");
+    const char *type = path ? ivar_getTypeEncoding(path) : NULL;
+    /* (a RetainPtr<NSURL>: a pointer the JSScript releases) */
+    if (!type || strcmp(type, "{RetainPtr<NSURL>=\"m_ptr\"@\"NSURL\"}") != 0) return false;
+    if (!class_getInstanceMethod(script, sel_registerName("readCache")) || !class_getInstanceMethod(script, sel_registerName("cacheBytecodeWithError:"))
+        || !class_getInstanceMethod(script, sel_registerName("isUsingBytecodeCache"))
+        || !class_getClassMethod(script, sel_registerName("scriptOfType:withSource:andSourceURL:andBytecodeCache:inVirtualMachine:error:"))
+        || !class_getClassMethod(context, sel_registerName("contextWithJSGlobalContextRef:"))
+        || !class_getInstanceMethod(context, sel_registerName("evaluateJSScript:")))
+        return false;
+    const char *dir = getenv("BARM_JS_CACHE_DIR");
+    if (dir && *dir) {
+        if (strlen(dir) >= sizeof bm_jsc.dir - 32) return false;
+        strcpy(bm_jsc.dir, dir);
+    } else {
+        size_t n = confstr(_CS_DARWIN_USER_TEMP_DIR, bm_jsc.dir, sizeof bm_jsc.dir);
+        if (n == 0 || n > sizeof bm_jsc.dir - 32) return false;
+        strcat(bm_jsc.dir, "barm-js");
+    }
+    if (mkdir(bm_jsc.dir, 0700) != 0 && errno != EEXIST) return false;
+    if (bm_js_ctx) {
+        id ctx = ((id (*)(Class, SEL, JSGlobalContextRef))objc_msgSend)(context, sel_registerName("contextWithJSGlobalContextRef:"), bm_js_ctx);
+        if (!ctx) return false;
+        bm_jsc.context = (id)CFRetain(ctx);
+        bm_jsc.vm = (id)CFRetain(bm_jsc_send(ctx, "virtualMachine"));
+    }
+    bm_jsc.script = script;
+    bm_jsc.cache_path = ivar_getOffset(path);
+    bm_jsc.state = 1;
+    return true;
+}
+
+/* The cache's files for module i, named for its name and text: `out` + ".jsc" (the bytecode)
+ * and + ".js" (the text, when it's ASCII: read from the file, mapped, it's memory the system can
+ * drop and read again, where a copy of it would be the program's own, ~5 MB for that server). */
+static void bm_jsc_file(uint32_t i, char *out, size_t cap) {
+    size_t len;
+    const unsigned char *s = (const unsigned char *)bm_js_module_src(i, &len);
+    uint64_t h = 0x9e3779b97f4a7c15ull ^ len;
+    size_t k = 0;
+    for (; k + 8 <= len; k += 8) {
+        uint64_t w;
+        memcpy(&w, s + k, 8);
+        h = (h ^ w) * 0xff51afd7ed558ccdull;
+        h ^= h >> 32;
+    }
+    for (; k < len; k++) h = (h ^ s[k]) * 0x100000001b3ull;
+    for (const unsigned char *p = (const unsigned char *)bm_js_module_name(i); *p; p++) h = (h ^ *p) * 0x100000001b3ull;
+    h ^= h >> 29;
+    snprintf(out, cap, "%s/%016llx", bm_jsc.dir, (unsigned long long)h);
+}
+
+/* Module i's name as a URL (owned), or NULL if it isn't one as it is: stack traces name a
+ * module as its JSScript's URL reads (and those modules aren't cached). */
+static CFURLRef bm_jsc_url(uint32_t i) {
+    const char *name = bm_js_module_name(i);
+    CFURLRef url = CFURLCreateWithBytes(NULL, (const UInt8 *)name, (CFIndex)strlen(name), kCFStringEncodingUTF8, NULL);
+    if (!url) return NULL;
+    char back[1024];
+    if (!CFStringGetCString(CFURLGetString(url), back, sizeof back, kCFStringEncodingUTF8) || strcmp(back, name) != 0) {
+        CFRelease(url);
+        return NULL;
+    }
+    return url;
+}
+
+/* A JSScript of module i in `vm`, autoreleased, its text mapped from file `mapped` if there's one
+ * (NULL if the module's name isn't a URL). */
+static id bm_jsc_script(uint32_t i, id vm, const char *mapped) {
+    size_t len;
+    const char *src = bm_js_module_src(i, &len);
+    CFURLRef url = bm_jsc_url(i);
+    if (!url) return NULL;
+    id error = NULL, script = NULL;
+    if (mapped) {
+        CFURLRef file = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)mapped, (CFIndex)strlen(mapped), false);
+        if (file) {
+            script = ((id (*)(Class, SEL, long, id, id, id, id, id *))objc_msgSend)(bm_jsc.script,
+                sel_registerName("scriptOfType:memoryMappedFromASCIIFile:withSourceURL:andBytecodeCache:inVirtualMachine:error:"), 0, (id)file, (id)url, NULL, vm, &error);
+            CFRelease(file);
+        }
+    } else {
+        CFStringRef text = CFStringCreateWithBytesNoCopy(NULL, (const UInt8 *)src, (CFIndex)len, kCFStringEncodingUTF8, false, kCFAllocatorNull);
+        if (text) {
+            script = ((id (*)(Class, SEL, long, id, id, id, id, id *))objc_msgSend)(bm_jsc.script,
+                sel_registerName("scriptOfType:withSource:andSourceURL:andBytecodeCache:inVirtualMachine:error:"), 0, (id)text, (id)url, NULL, vm, &error);
+            CFRelease(text);
+        }
+    }
+    CFRelease(url);
+    return script;
+}
+
+/* Gives the JSScript its cache's file (the JSScript owns the URL). */
+static void bm_jsc_set_file(id script, const char *file) {
+    CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)file, (CFIndex)strlen(file), false);
+    CFURLRef *slot = (CFURLRef *)((char *)script + bm_jsc.cache_path);
+    if (*slot) CFRelease(*slot);
+    *slot = url;
+}
+
+static void bm_jsc_at_exit(void);
+
+static void bm_jsc_queue(uint32_t i) {
+    static bool registered;
+    if (!registered) {
+        registered = true;
+        atexit(bm_jsc_at_exit);
+    }
+    if (bm_jsc.nqueue == bm_jsc.capqueue) {
+        size_t cap = bm_jsc.capqueue ? bm_jsc.capqueue * 2 : 64;
+        uint32_t *q = realloc(bm_jsc.queue, cap * sizeof *q);
+        if (!q) return;
+        bm_jsc.queue = q;
+        bm_jsc.capqueue = cap;
+    }
+    bm_jsc.queue[bm_jsc.nqueue++] = i;
+}
+
+/* Module i's function from its cache, if it has one; if it hasn't, it's queued to be written. */
+static bool bm_jsc_load(JSContextRef ctx, uint32_t i, JSValueRef *out, JSValueRef *exc) {
+    size_t len;
+    bm_js_module_src(i, &len);
+    if (len < BM_JSC_MIN_BYTES || !bm_jsc_on()) return false;
+    char base[1100], file[1110], text[1110];
+    bm_jsc_file(i, base, sizeof base);
+    snprintf(file, sizeof file, "%s.jsc", base);
+    snprintf(text, sizeof text, "%s.js", base);
+    struct stat st;
+    if (stat(file, &st) != 0 || st.st_size == 0) {
+        CFURLRef url = bm_jsc_url(i);
+        if (url) {
+            CFRelease(url);
+            bm_jsc_queue(i);
+        }
+        return false;
+    }
+    bool mapped = stat(text, &st) == 0 && (size_t)st.st_size == len;
+    void *pool = objc_autoreleasePoolPush();
+    bool done = false;
+    id script = bm_jsc_script(i, bm_jsc.vm, mapped ? text : NULL);
+    if (script) {
+        bm_jsc_set_file(script, file);
+        ((void (*)(id, SEL))objc_msgSend)(script, sel_registerName("readCache"));
+        if (((BOOL (*)(id, SEL))objc_msgSend)(script, sel_registerName("isUsingBytecodeCache"))) {
+            id value = ((id (*)(id, SEL, id))objc_msgSend)(bm_jsc.context, sel_registerName("evaluateJSScript:"), script);
+            id thrown = bm_jsc_send(bm_jsc.context, "exception");
+            if (thrown) {
+                if (exc) *exc = ((JSValueRef (*)(id, SEL))objc_msgSend)(thrown, sel_registerName("JSValueRef"));
+                ((void (*)(id, SEL, id))objc_msgSend)(bm_jsc.context, sel_registerName("setException:"), NULL);
+                *out = NULL;
+            } else {
+                *out = value ? ((JSValueRef (*)(id, SEL))objc_msgSend)(value, sel_registerName("JSValueRef")) : JSValueMakeUndefined(ctx);
+            }
+            done = true;
+        } else {
+            /* (out of date: the engine emptied it) */
+            bm_jsc_queue(i);
+        }
+    }
+    objc_autoreleasePoolPop(pool);
+    return done;
+}
+
+/* Writes modules' caches (in the writing process, in an engine of its own). */
+static void bm_jsc_write(const uint32_t *modules, size_t n) {
+    void *pool = objc_autoreleasePoolPush();
+    id vm = bm_jsc_send(bm_jsc_send((id)objc_getClass("JSVirtualMachine"), "alloc"), "init");
+    for (size_t k = 0; vm && k < n; k++) {
+        void *inner = objc_autoreleasePoolPush();
+        uint32_t i = modules[k];
+        CFURLRef url = bm_jsc_url(i);
+        if (!url) {
+            objc_autoreleasePoolPop(inner);
+            continue;
+        }
+        CFRelease(url);
+        char base[1100], file[1110], text[1110], tmp[1200];
+        bm_jsc_file(i, base, sizeof base);
+        snprintf(file, sizeof file, "%s.jsc", base);
+        snprintf(text, sizeof text, "%s.js", base);
+        snprintf(tmp, sizeof tmp, "%s.%d.tmp", base, (int)getpid());
+        /* the text first (when it's ASCII), then the bytecode of the text as mapped */
+        size_t len;
+        const unsigned char *src = (const unsigned char *)bm_js_module_src(i, &len);
+        bool ascii = true;
+        for (size_t j = 0; j < len && ascii; j++) ascii = src[j] < 0x80;
+        const char *mapped = NULL;
+        if (ascii) {
+            FILE *f = fopen(tmp, "wb");
+            if (f) {
+                bool ok = fwrite(src, 1, len, f) == len;
+                if (fclose(f) == 0 && ok && rename(tmp, text) == 0) mapped = text;
+                else unlink(tmp);
+            }
+        }
+        id script = bm_jsc_script(i, vm, mapped);
+        if (script) {
+            bm_jsc_set_file(script, tmp);
+            id error = NULL;
+            if (((BOOL (*)(id, SEL, id *))objc_msgSend)(script, sel_registerName("cacheBytecodeWithError:"), &error)) rename(tmp, file);
+            else unlink(tmp);
+        }
+        objc_autoreleasePoolPop(inner);
+    }
+    if (vm) CFRelease(vm);
+    objc_autoreleasePoolPop(pool);
+}
+
+/* Starts the program again to write the queued modules' caches (BARM_JS_CACHE_WRITE=modules),
+ * detached: by way of a process that starts it and exits at once (so it's never this program's
+ * child to wait for), with nothing of this one's open (its sockets, its terminal). */
+static void bm_jsc_flush(void) {
+    if (bm_jsc.nqueue == 0) return;
+    char exe[1024];
+    uint32_t size = sizeof exe;
+    size_t cap = 32 + bm_jsc.nqueue * 11;
+    char *var = malloc(cap);
+    if (!var || _NSGetExecutablePath(exe, &size) != 0) {
+        free(var);
+        return;
+    }
+    size_t at = (size_t)snprintf(var, cap, "BARM_JS_CACHE_WRITE=spawn");
+    for (size_t k = 0; k < bm_jsc.nqueue; k++) at += (size_t)snprintf(var + at, cap - at, ",%u", bm_jsc.queue[k]);
+    bm_jsc.nqueue = 0;
+    size_t nenv = 0;
+    while (environ[nenv]) nenv++;
+    char **env = malloc((nenv + 2) * sizeof *env);
+    if (!env) {
+        free(var);
+        return;
+    }
+    size_t m = 0;
+    for (size_t k = 0; k < nenv; k++)
+        if (strncmp(environ[k], "BARM_JS_CACHE_WRITE=", 20) != 0) env[m++] = environ[k];
+    env[m++] = var;
+    env[m] = NULL;
+    posix_spawn_file_actions_t files;
+    posix_spawn_file_actions_init(&files);
+    for (int fd = 0; fd < 3; fd++) posix_spawn_file_actions_addopen(&files, fd, "/dev/null", fd ? O_WRONLY : O_RDONLY, 0);
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSID | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
+    sigset_t none, all;
+    sigemptyset(&none);
+    sigfillset(&all);
+    posix_spawnattr_setsigmask(&attr, &none);
+    posix_spawnattr_setsigdefault(&attr, &all);
+    posix_spawnattr_set_qos_class_np(&attr, QOS_CLASS_UTILITY);
+    char *argv[] = {exe, NULL};
+    pid_t pid;
+    if (posix_spawn(&pid, exe, &files, &attr, argv, env) == 0)
+        while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
+    posix_spawn_file_actions_destroy(&files);
+    posix_spawnattr_destroy(&attr);
+    free(env);
+    free(var);
+}
+
+static void bm_jsc_at_exit(void) { bm_jsc_flush(); }
+
+/* The program run to write caches (see bm_jsc_flush): before anything of the program runs. */
+__attribute__((constructor)) static void bm_jsc_writer(void) {
+    const char *what = getenv("BARM_JS_CACHE_WRITE");
+    if (!what) return;
+    if (strncmp(what, "spawn,", 6) == 0) {
+        /* the go-between: starts the writer and exits */
+        size_t n = strlen(what);
+        char *var = malloc(n + 32);
+        if (!var) _exit(0);
+        snprintf(var, n + 32, "BARM_JS_CACHE_WRITE=write,%s", what + 6);
+        for (char **e = environ; *e; e++)
+            if (strncmp(*e, "BARM_JS_CACHE_WRITE=", 20) == 0) *e = var;
+        char exe[1024];
+        uint32_t size = sizeof exe;
+        posix_spawnattr_t attr;
+        posix_spawnattr_init(&attr);
+        posix_spawnattr_set_qos_class_np(&attr, QOS_CLASS_UTILITY);
+        char *argv[] = {exe, NULL};
+        pid_t pid;
+        if (_NSGetExecutablePath(exe, &size) == 0) posix_spawn(&pid, exe, NULL, &attr, argv, environ);
+        _exit(0);
+    }
+    if (strncmp(what, "write,", 6) != 0 || !bm_jsc_on()) _exit(0);
+    size_t n = 0, cap = 0;
+    uint32_t *modules = NULL;
+    for (const char *p = what + 6; *p;) {
+        char *end;
+        unsigned long i = strtoul(p, &end, 10);
+        if (end == p) break;
+        if (i < bm_js_nmodules()) {
+            if (n == cap) {
+                cap = cap ? cap * 2 : 64;
+                uint32_t *q = realloc(modules, cap * sizeof *q);
+                if (!q) break;
+                modules = q;
+            }
+            modules[n++] = (uint32_t)i;
+        }
+        p = *end == ',' ? end + 1 : end;
+    }
+    bm_jsc_write(modules, n);
+    _exit(0);
+}
+#endif
+
 /* globalThis.__barm_compile(id): module `id`'s function, compiled on first require with the
  * module's name as its URL (stack traces name the file; line numbers are the file's). */
 static JSValueRef bm_js_compile_fn(JSContextRef ctx, JSObjectRef f, JSObjectRef self, size_t n, const JSValueRef a[], JSValueRef *exc) {
@@ -96,16 +459,23 @@ static JSValueRef bm_js_compile_fn(JSContextRef ctx, JSObjectRef f, JSObjectRef 
     static int trace = -1;
     if (trace < 0) trace = getenv("BARM_JS_TRACE") != NULL;
     double t0 = trace ? bm_performance_now() : 0;
-    JSStringRef src = bm_js_module_text(i);
-    JSStringRef url = JSStringCreateWithUTF8CString(bm_js_module_name(i));
-    JSValueRef r = JSEvaluateScript(ctx, src, NULL, url, 1, exc);
-    JSStringRelease(src);
-    JSStringRelease(url);
+    JSValueRef r;
+    bool cached = false;
+#ifdef __APPLE__
+    cached = bm_jsc_load(ctx, i, &r, exc);
+#endif
+    if (!cached) {
+        JSStringRef src = bm_js_module_text(i);
+        JSStringRef url = JSStringCreateWithUTF8CString(bm_js_module_name(i));
+        r = JSEvaluateScript(ctx, src, NULL, url, 1, exc);
+        JSStringRelease(src);
+        JSStringRelease(url);
+    }
     if (trace) {
         char line[512];
         size_t len;
         bm_js_module_src(i, &len);
-        int k = snprintf(line, sizeof line, "barm: compiled %s (%zu bytes) in %.3f ms\n", bm_js_module_name(i), len, bm_performance_now() - t0);
+        int k = snprintf(line, sizeof line, "barm: %s %s (%zu bytes) in %.3f ms\n", cached ? "loaded" : "compiled", bm_js_module_name(i), len, bm_performance_now() - t0);
         bm_write_fd(2, line, (size_t)k);
     }
     return r;
@@ -255,6 +625,9 @@ static void bm_js_idle(bool deep) {
     if (deep) JSObjectCallAsFunction(bm_js_ctx, drop_code, NULL, 0, NULL, NULL);
     if (JSSynchronousGarbageCollectForDebugging) JSSynchronousGarbageCollectForDebugging(bm_js_ctx);
     if (release) release();
+#ifdef __APPLE__
+    bm_jsc_flush();
+#endif
 }
 
 JSContextRef bm_js(void) {

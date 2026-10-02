@@ -1,0 +1,15 @@
+import { total, where, Shape, loadBroken } from "cache-lib"
+import { greet } from "cache-unicode"
+
+// Run twice by tests/npm.rs: compiled, then from the bytecode cache the first run wrote
+function main() {
+  console.log(try total() as int)
+  // stack traces name the module's file
+  console.log((try where() as string).includes("node_modules/cache-lib/index.js"))
+  const s = try new Shape(3, 4)
+  console.log(try s.area() as int)
+  console.log(try greet("Ada") as string)
+  // a module that throws as it loads
+  console.log(try loadBroken() as string)
+  console.log(try loadBroken() as string)
+}
