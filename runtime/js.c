@@ -10,6 +10,11 @@
 #endif
 #include <dlfcn.h>
 #include <errno.h>
+#if defined(__APPLE__)
+#include <malloc/malloc.h>
+#elif defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -625,6 +630,12 @@ static void bm_js_idle(bool deep) {
     if (deep) JSObjectCallAsFunction(bm_js_ctx, drop_code, NULL, 0, NULL, NULL);
     if (JSSynchronousGarbageCollectForDebugging) JSSynchronousGarbageCollectForDebugging(bm_js_ctx);
     if (release) release();
+    /* (and what the system allocator holds freed: native addons' and the runtime's own) */
+#ifdef __APPLE__
+    malloc_zone_pressure_relief(NULL, 0);
+#elif defined(__GLIBC__)
+    malloc_trim(0);
+#endif
 #ifdef __APPLE__
     bm_jsc_flush();
 #endif
