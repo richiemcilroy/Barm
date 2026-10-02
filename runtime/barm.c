@@ -3370,7 +3370,14 @@ static uint64_t bm_mono_ns(void) {
 }
 
 static uint64_t bm_loop_ms;   /* the loop's clock (0: not read yet) */
-static uint64_t bm_loop_worked_at;   /* when the loop last did work, if it hasn't been idle since */
+static uint64_t bm_loop_worked_at;   /* when the loop last did work (0: it hasn't) */
+static int bm_loop_idle_stage;       /* idle since then: 1 collected, 2 deep (see bm_loop_idle) */
+
+/* the loop did work (I/O, timers) */
+static void bm_loop_work(uint64_t now_ms) {
+    bm_loop_worked_at = now_ms ? now_ms : 1;
+    bm_loop_idle_stage = 0;
+}
 
 static uint64_t bm_loop_update(void) { return bm_loop_ms = bm_mono_ns() / 1000000u; }
 static uint64_t bm_loop_now(void) { return bm_loop_ms ? bm_loop_ms : bm_loop_update(); }
@@ -3472,7 +3479,7 @@ static void bm_fire_timers(void) {
     while (bm_ntimers && bm_timers[0].when <= now) {
         bm_timer t = bm_timer_pop();
         if (!t.cb.fn) continue;
-        bm_loop_worked_at = now;
+        bm_loop_work(now);
         void (*fn)(bm_env *) = (void (*)(bm_env *))t.cb.fn;
         if (t.every) {
             bm_env_retain(t.cb.env);   /* the call's own reference: clearInterval may run inside it */
@@ -3508,20 +3515,25 @@ uint64_t (*bm_loop_host_due)(uint64_t now_ms);
 void (*bm_loop_host_run)(void);
 static uint64_t bm_loop_host_at, bm_loop_host_asked;
 
-void (*bm_loop_idle)(void);
+void (*bm_loop_idle)(bool deep);
+static bool bm_loop_idled;   /* the loop has been idle since the program started */
 #define BM_LOOP_IDLE_MS 1000
+#define BM_LOOP_DEEP_IDLE_MS 10000
 
-/* when bm_loop_idle is due (0: it isn't) */
+/* when bm_loop_idle is next due (0: it isn't) */
 static uint64_t bm_loop_idle_due(void) {
-    return bm_loop_idle && bm_loop_worked_at ? bm_loop_worked_at + BM_LOOP_IDLE_MS : 0;
+    if (!bm_loop_idle || !bm_loop_worked_at || bm_loop_idle_stage >= 2) return 0;
+    return bm_loop_worked_at + (bm_loop_idle_stage == 0 ? BM_LOOP_IDLE_MS : BM_LOOP_DEEP_IDLE_MS);
 }
 
 static void bm_loop_maybe_idle(uint64_t now_ms) {
     uint64_t due = bm_loop_idle_due();
-    if (due && now_ms >= due) {
-        bm_loop_worked_at = 0;
-        bm_loop_idle();
-    }
+    if (!due || now_ms < due) return;
+    /* (the first time, what's compiled is mostly startup code that won't run again) */
+    bool deep = bm_loop_idle_stage == 1 || !bm_loop_idled;
+    bm_loop_idle_stage = deep ? 2 : 1;
+    bm_loop_idled = true;
+    bm_loop_idle(deep);
 }
 
 /* Runs the engine's timers that are due; returns when the next is (0: none). Asked at most once
@@ -4466,7 +4478,7 @@ static bool bm_http_alive(void) {
  * and microtasks run in it too. */
 static void bm_http_loop(void) {
     bm_loop_queue();
-    bm_loop_worked_at = bm_loop_update();   /* (starting up is work: its garbage goes once idle) */
+    bm_loop_work(bm_loop_update());   /* (starting up is work: its garbage goes once idle) */
 #ifdef BM_KQUEUE
     struct kevent events[256];
 #else
@@ -4568,7 +4580,7 @@ static void bm_http_loop(void) {
         if (bm_io_after_batch) bm_io_after_batch();
         bm_run_microtasks();
         bm_loop_run_check();
-        if (worked) bm_loop_worked_at = bm_loop_update();
+        if (worked) bm_loop_work(bm_loop_update());
         else bm_loop_maybe_idle(bm_loop_update());
     }
     /* the queue stays: pooled client connections are still registered with it */
