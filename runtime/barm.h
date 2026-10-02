@@ -415,9 +415,10 @@ extern bool bm_loop_check_pending, bm_loop_check_ref;
  * running. */
 extern uint64_t (*bm_loop_host_due)(uint64_t now_ms);
 extern void (*bm_loop_host_run)(void);
-/* Called once the loop has been idle (no I/O, no timers firing) for a second after doing work:
- * the engine collects its garbage then and gives the memory back. */
-extern void (*bm_loop_idle)(void);
+/* Called once the loop has been idle (no I/O, no timers firing) for a second after doing work,
+ * and again (deep) after ten: the engine collects its garbage then and gives the memory back,
+ * and deep, drops its compiled code too. The first idle after starting is deep. */
+extern void (*bm_loop_idle)(bool deep);
 void bm_clear_timer(bm_int id);
 /* Runs the event loop until nothing is left: microtasks, timers and servers. */
 void bm_async_run(void);

@@ -225,15 +225,34 @@ static void bm_js_host_run(void) {
 /* (JavaScriptCore's, exported though not in its headers) */
 extern void JSSynchronousGarbageCollectForDebugging(JSContextRef ctx) __attribute__((weak_import));
 
-/* The loop is idle after work (bm_loop_idle): a full collection, and the memory it frees back to
- * the system (after a burst of requests, an http server holds ~32 MB without, ~24 MB with). */
-static void bm_js_idle(void) {
-    static void (*release)(void);
+/* VM::deleteAllCode(DeleteAllCodeIfNotCollecting), JavaScriptCore's (exported, not in its headers;
+ * the context group is the VM). Called from a native function, as it needs the engine's lock and
+ * runs once JavaScript returns. */
+static JSValueRef bm_js_drop_code_fn(JSContextRef ctx, JSObjectRef f, JSObjectRef self, size_t n, const JSValueRef a[], JSValueRef *exc) {
+    (void)f; (void)self; (void)n; (void)a; (void)exc;
+    static void (*drop)(void *vm, int effort);
     static bool looked;
     if (!looked) {
         looked = true;
-        release = (void (*)(void))dlsym(RTLD_DEFAULT, "_ZN3WTF27releaseFastMallocFreeMemoryEv");
+        drop = (void (*)(void *, int))dlsym(RTLD_DEFAULT, "_ZN3JSC2VM13deleteAllCodeENS_19DeleteAllCodeEffortE");
     }
+    if (drop) drop((void *)JSContextGetGroup(ctx), 1);
+    return JSValueMakeUndefined(ctx);
+}
+
+/* The loop is idle after work (bm_loop_idle): a full collection, and the memory it frees back to
+ * the system; deep, the compiled code first (recompiled when it runs again, at a few ms' cost to
+ * the next burst: after one, an http server holds ~32 MB without either, ~24 MB with the
+ * collection, ~14 MB with the code dropped too). */
+static void bm_js_idle(bool deep) {
+    static void (*release)(void);
+    static JSObjectRef drop_code;
+    if (!drop_code) {
+        release = (void (*)(void))dlsym(RTLD_DEFAULT, "_ZN3WTF27releaseFastMallocFreeMemoryEv");
+        drop_code = JSObjectMakeFunctionWithCallback(bm_js_ctx, NULL, bm_js_drop_code_fn);
+        JSValueProtect(bm_js_ctx, drop_code);
+    }
+    if (deep) JSObjectCallAsFunction(bm_js_ctx, drop_code, NULL, 0, NULL, NULL);
     if (JSSynchronousGarbageCollectForDebugging) JSSynchronousGarbageCollectForDebugging(bm_js_ctx);
     if (release) release();
 }
