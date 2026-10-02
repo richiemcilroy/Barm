@@ -5576,8 +5576,14 @@ static void bm_fr_head_ready(bm_fr *r) {
     bm_fr_resolve(&r->done, 0);
 }
 
-/* A body streamed as it arrives: at most this much waits for the reader before the socket pauses. */
-#define BM_STREAM_HIGH (4 << 20)
+/* A body streamed as it arrives: at most this much waits for the reader before the socket pauses
+ * (a reader that stops partway and drops the body leaves no more than this held until it's
+ * collected). */
+#define BM_STREAM_HIGH (1 << 20)
+
+/* Set by the host (runtime/node.c): bytes of response bodies as they arrive, which the
+ * JavaScript objects reading them hold until they're collected. */
+void (*bm_fetch_on_bytes)(size_t n);
 
 /* An encoded body that's decoded (not `decompress: false`). */
 static inline bool bm_fr_decoding(bm_fr *r) { return r->decompress && r->enc; }
@@ -6695,6 +6701,7 @@ static void bm_fc_ready(bm_io *h, bool readable, bool writable, bool broken) {
         if (n > 0) {
             r->got_any = true;
             c->in_len += (size_t)n;
+            if (bm_fetch_on_bytes) bm_fetch_on_bytes((size_t)n);
             int st = bm_fr_parse(r, c);
             if (r->result != 1) return;
             if (st < 0) {

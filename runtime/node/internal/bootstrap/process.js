@@ -98,7 +98,25 @@ function hrtime(previous) {
 hrtime.bigint = () => BigInt(Math.round(native.hrtime()));
 process.hrtime = hrtime;
 
-process.memoryUsage = () => native.memoryUsage();
+// (the heap's figures cost a walk over it: read at most once a second)
+let heapReadAt = -Infinity;
+let heap = null;
+process.memoryUsage = () => {
+  const usage = native.memoryUsage();
+  if (native.heapStats) {
+    const now = Date.now();
+    if (now - heapReadAt >= 1000) {
+      heap = native.heapStats();
+      heapReadAt = now;
+    }
+    const [size, capacity, extra] = heap;
+    usage.heapTotal = capacity;
+    usage.heapUsed = size;
+    usage.external = extra;
+    usage.arrayBuffers = extra;
+  }
+  return usage;
+};
 process.memoryUsage.rss = () => native.memoryUsage().rss;
 process.cpuUsage = (previous) => {
   const [user, system] = native.cpuUsage();
