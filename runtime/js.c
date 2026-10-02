@@ -124,8 +124,9 @@ extern int posix_spawnattr_set_qos_class_np(posix_spawnattr_t *attr, qos_class_t
 extern void *objc_autoreleasePoolPush(void);
 extern void objc_autoreleasePoolPop(void *pool);
 
-/* (smaller modules parse faster than a cache is read) */
-#define BM_JSC_MIN_BYTES 4096
+/* (smaller modules parse faster than a cache is read: a program of only small modules, such as
+ * the 7 KB the runtime's own bootstrap is, starts ~1 ms sooner without one) */
+#define BM_JSC_MIN_BYTES 8192
 
 static struct {
     int state;              /* 0 not yet looked, 1 on, -1 off */
