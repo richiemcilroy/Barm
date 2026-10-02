@@ -1086,11 +1086,14 @@ JSObjectRef bm_js_bytes(void *ptr, size_t len, void (*dealloc)(void *bytes, void
 
 static void bm_js_free_bytes(void *bytes, void *ctx) { (void)ctx; free(bytes); }
 
+/* (in the engine's own heap, which it counts towards collections and gives back as it
+ * scavenges: a malloc'd copy freed only when collected would fragment the system allocator) */
 JSObjectRef bm_js_bytes_copy(const void *ptr, size_t len) {
-    void *copy = malloc(len ? len : 1);
-    if (!copy) bm_trap("out of memory", "js");
-    memcpy(copy, ptr, len);
-    return bm_js_bytes(copy, len, bm_js_free_bytes, NULL);
+    JSContextRef ctx = bm_js();
+    JSObjectRef a = JSObjectMakeTypedArray(ctx, kJSTypedArrayTypeUint8Array, len, NULL);
+    if (!a) bm_trap("out of memory", "js");
+    if (len) memcpy(JSObjectGetTypedArrayBytesPtr(ctx, a, NULL), ptr, len);
+    return a;
 }
 
 bool bm_js_bytes_view(JSValueRef v, uint8_t **ptr, size_t *len) {
