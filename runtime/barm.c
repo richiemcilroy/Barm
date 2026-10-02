@@ -3929,6 +3929,13 @@ void bm_native_httpWriteRaw(bm_int id, const char *p, size_t n, int end) {
     bm_http_mark_dirty(c);
 }
 
+int64_t bm_native_httpBuffered(bm_int id) {
+    if (id <= 0 || id > bm_http_ndeferred) return -1;
+    bm_http_req *r = bm_http_deferred[id];
+    if (!r || (uintptr_t)r <= (uintptr_t)bm_http_ndeferred || !r->c) return -1;
+    return (int64_t)(r->c->out_len - r->c->out_off + r->out.len);
+}
+
 /* The fd of deferred request id's connection (-1 if it's gone), for its addresses. */
 int bm_native_httpFd(bm_int id) {
     if (id <= 0 || id > bm_http_ndeferred) return -1;

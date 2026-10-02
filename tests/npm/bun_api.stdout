@@ -1,0 +1,18 @@
+number null undefined true undefined
+"out\n" 3 3 null
+143 null SIGTERM true
+"hello world" 0
+2 false "sync\n" 0
+from blob
+spawn ENOENT ENOENT: no such file or directory, posix_spawn '/nonexistent/x'
+write 10
+10 text/plain true number true false 0
+hello file file 5 true 10
+ell hello file
+missing ENOENT
+deleted false
+slept true
+true false true false
+true false true false
+-1 1 0
+string true null true

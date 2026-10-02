@@ -746,4 +746,17 @@ function dataResponse(url) {
   return r;
 }
 
-module.exports = { fetch, Headers, Request, Response, FormData };
+// for Bun.serve (bun.js): a request from what Barm's server parsed (its body bytes or null), and
+// what a response holds, to write it out
+function serverRequest(url, method, wire, body, signal) {
+  const r = Object.create(Request.prototype);
+  r[kState] = { url, method, redirect: 'follow', signal, mode: 'cors', credentials: 'same-origin', cache: 'default',
+    referrer: 'about:client', referrerPolicy: '', integrity: '', keepalive: false, duplex: 'half' };
+  r[kHeaders] = headersFromWire(wire, 'none');
+  r[kBody] = new BodyState(body);
+  return r;
+}
+
+const internals = { kState, kHeaders, kBody, serverRequest, bodyStream, bodyBytes, FormBody, encodeForm };
+
+module.exports = { fetch, Headers, Request, Response, FormData, internals };

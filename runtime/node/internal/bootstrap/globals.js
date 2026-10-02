@@ -167,6 +167,11 @@ lazy('Headers', () => fetchModule().Headers);
 lazy('Request', () => fetchModule().Request);
 lazy('Response', () => fetchModule().Response);
 lazy('FormData', () => fetchModule().FormData);
+// Bun's global (the bun module): in the bundle only when the program's code names it
+lazy('Bun', () => {
+  const id = 'bun';
+  return require(id);
+});
 lazy('performance', () => require('perf_hooks').performance);
 lazy('PerformanceEntry', () => require('perf_hooks').PerformanceEntry);
 lazy('PerformanceMark', () => require('perf_hooks').PerformanceMark);

@@ -57,6 +57,7 @@ Per-context files also get `privateSymbols` and `perIsolateSymbols`.
 
 ## Known differences
 
+- `util.inspect` shows an error whose `stack` is JavaScriptCore's (frames alone, `fn@file:line:col`) as V8's would read: `Name: message`, then `    at fn (file:line:col)` (`internal/util/inspect.js`, `v8Stack`). `error.stack` itself stays JavaScriptCore's.
 - `util.inspect` of a settled promise shows `Promise { <pending> }`. A promise's state isn't visible from JavaScript, and JavaScriptCore's public C API doesn't expose it.
 - `util.inspect` can't see a proxy's target or iterator entries (`getProxyDetails`, `previewEntries`).
 - SharedArrayBuffer is the engine's: runtime/js.c turns on JavaScriptCore's option for it.
