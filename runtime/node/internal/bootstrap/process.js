@@ -170,6 +170,31 @@ function becomeEmitter() {
     [Symbol.toStringTag]: { value: 'process', configurable: true },
   }));
   EventEmitter.init.call(process);
+  // signals: the first listener for one starts catching it, the last one's removal stops
+  // (Node.js's startListeningIfSignal and stopListeningIfSignal)
+  if (typeof native.signal === 'function') {
+    native.signalHandler((name, number) => {
+      require('internal/bindings/task_queue').callFromHost(() => process.emit(name, name, number));
+    });
+    process.on('newListener', (type) => {
+      if (typeof type !== 'string' || !type.startsWith('SIG') || process.listenerCount(type) > 0) return;
+      const err = native.signal(type, true);
+      if (err === -22 && signalNumber(type) !== undefined) {
+        const e = new Error('uv_signal_start EINVAL');
+        e.errno = -22;
+        e.code = 'EINVAL';
+        e.syscall = 'uv_signal_start';
+        throw e;
+      }
+    });
+    process.on('removeListener', (type) => {
+      if (typeof type === 'string' && type.startsWith('SIG') && process.listenerCount(type) === 0) native.signal(type, false);
+    });
+  }
+}
+
+function signalNumber(name) {
+  return require('os').constants.signals[name];
 }
 for (const m of emitterMethods) {
   Object.defineProperty(process, m, {

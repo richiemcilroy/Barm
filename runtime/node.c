@@ -2242,6 +2242,83 @@ static const char *bm_node_signal_name(int sig) {
     return NULL;
 }
 
+/* ------------------------------------------------------------------ signals (Node.js's signal_wrap):
+ * signal(name, on) starts or stops delivering a signal to the handler signalHandler(fn) set, as
+ * fn(name, number). The signal handler writes the signal's number to a pipe the loop watches, so
+ * fn runs on the loop; as in Node.js, a watched signal doesn't keep the program running. */
+static int bm_node_sig_pipe[2] = {-1, -1};
+static bm_io bm_node_sig_io;
+static JSObjectRef bm_node_sig_fn;
+static bool bm_node_sig_on[NSIG];
+static struct sigaction bm_node_sig_before[NSIG];   /* what each watched signal did before */
+
+static void bm_node_sig_caught(int sig) {
+    int saved = errno;
+    unsigned char b = (unsigned char)sig;
+    (void)!write(bm_node_sig_pipe[1], &b, 1);
+    errno = saved;
+}
+
+static void bm_node_sig_ready(bm_io *h, bool readable, bool writable, bool broken) {
+    (void)h; (void)readable; (void)writable; (void)broken;
+    unsigned char buf[64];
+    ssize_t got;
+    while ((got = read(bm_node_sig_pipe[0], buf, sizeof buf)) > 0) {
+        for (ssize_t i = 0; i < got; i++) {
+            int sig = buf[i];
+            if (!bm_node_sig_on[sig] || !bm_node_sig_fn) continue;
+            const char *name = bm_node_signal_name(sig);
+            JSValueRef args[2] = { name ? str(bm_js_ctx, name) : num(bm_js_ctx, sig), num(bm_js_ctx, sig) };
+            JSValueRef exc = NULL;
+            JSObjectCallAsFunction(bm_js_ctx, bm_node_sig_fn, NULL, 2, args, &exc);
+            if (exc) bm_node_report(exc);
+        }
+    }
+}
+
+/* signalHandler(fn) */
+NATIVE(n_signal_handler) {
+    UNUSED;
+    if (bm_node_sig_fn) JSValueUnprotect(ctx, bm_node_sig_fn);
+    bm_node_sig_fn = n > 0 && JSValueIsObject(ctx, a[0]) ? (JSObjectRef)a[0] : NULL;
+    if (bm_node_sig_fn) JSValueProtect(ctx, bm_node_sig_fn);
+    return undef(ctx);
+}
+
+/* signal(name, on) -> 0, or -errno (EINVAL: not a signal, or one that can't be caught) */
+NATIVE(n_signal) {
+    UNUSED;
+    char *name = arg_cstr(ctx, n, a, 0);
+    bool on = n > 1 && JSValueToBoolean(ctx, a[1]);
+    int sig = -1;
+    for (size_t i = 0; i < sizeof bm_signals / sizeof *bm_signals; i++)
+        if (strcmp(bm_signals[i].name, name) == 0) sig = bm_signals[i].sig;
+    free(name);
+    if (sig <= 0 || sig >= NSIG || sig == SIGKILL || sig == SIGSTOP) return num(ctx, -EINVAL);
+    if (on == bm_node_sig_on[sig]) return num(ctx, 0);
+    if (on) {
+        if (bm_node_sig_pipe[0] < 0) {
+            if (pipe(bm_node_sig_pipe) != 0) return num(ctx, -errno);
+            for (int i = 0; i < 2; i++) {
+                fcntl(bm_node_sig_pipe[i], F_SETFL, fcntl(bm_node_sig_pipe[i], F_GETFL) | O_NONBLOCK);
+                fcntl(bm_node_sig_pipe[i], F_SETFD, FD_CLOEXEC);
+            }
+            bm_node_sig_io.ready = bm_node_sig_ready;
+            bm_io_add(bm_node_sig_pipe[0], &bm_node_sig_io, true, false);
+        }
+        struct sigaction sa;
+        memset(&sa, 0, sizeof sa);
+        sa.sa_handler = bm_node_sig_caught;
+        sa.sa_flags = SA_RESTART;
+        sigemptyset(&sa.sa_mask);
+        if (sigaction(sig, &sa, &bm_node_sig_before[sig]) != 0) return num(ctx, -errno);
+    } else {
+        sigaction(sig, &bm_node_sig_before[sig], NULL);
+    }
+    bm_node_sig_on[sig] = on;
+    return num(ctx, 0);
+}
+
 /* spawnSync(file, args, env|null, cwd|null, stdio [[type, fd]], inputs [bytes|null], timeout ms,
  * maxBuffer, killSignal, detached) -> [pid, status|null, signal name|null, errno (0: none),
  * [output per fd: bytes|null]] */
@@ -3801,6 +3878,8 @@ void bm_node_install(JSContextRef ctx, JSObjectRef native) {
     bm_js_def(ctx, native, "cpuUsage", n_cpu_usage);
     bm_js_def(ctx, native, "ids", n_ids);
     bm_js_def(ctx, native, "kill", n_kill);
+    bm_js_def(ctx, native, "signal", n_signal);
+    bm_js_def(ctx, native, "signalHandler", n_signal_handler);
     bm_js_def(ctx, native, "setRawMode", n_set_raw_mode);
 
     bm_js_def(ctx, native, "now", n_now);
