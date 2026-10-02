@@ -3296,7 +3296,18 @@ NATIVE(n_fetch_tls) {
     return JSValueMakeBoolean(ctx, bm_tls_impl != NULL);
 }
 
+/* (JavaScriptCore's, exported though not in its headers) */
+extern void JSReportExtraMemoryCost(JSContextRef ctx, size_t size) __attribute__((weak_import));
+
+/* Response bytes arriving: memory the engine's objects hold, which it should count towards its
+ * next collection (a response read partway and dropped holds its buffer and connection until
+ * then) */
+static void bm_node_fetch_bytes(size_t n) {
+    if (JSReportExtraMemoryCost && bm_js_ctx) JSReportExtraMemoryCost(bm_js_ctx, n);
+}
+
 static void bm_node_fetch_install(JSContextRef ctx, JSObjectRef native) {
+    bm_fetch_on_bytes = bm_node_fetch_bytes;
     JSObjectRef f = JSObjectMake(ctx, NULL, NULL);
     bm_js_def(ctx, f, "start", n_fetch_start);
     bm_js_def(ctx, f, "wait", n_fetch_wait);
