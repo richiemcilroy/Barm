@@ -4,7 +4,8 @@
 // installs). It costs one native call to make: the fields are plain values, and everything that
 // needs another module (EventEmitter, nextTick, warnings, stdio) loads it on first use, so a
 // package that only reads process.env starts nothing else. The natives this uses:
-//   info()          { argv, execArgv, execPath, pid, ppid, platform, arch, env, title }
+//   info()          { argv, execArgv, execPath, pid, ppid, platform, arch, title }
+//   env()           the environment, as an object
 //   cwd() / chdir(path) / exit(code) / umask(mask)
 //   hrtime()        nanoseconds since the program started (a number)
 //   write(fd, data) data is a string or a Uint8Array; returns bytes written
@@ -59,7 +60,8 @@ process.argv = info.argv;
 process.execArgv = info.execArgv ?? [];
 process.argv0 = info.argv[0] ?? 'barm';
 process.execPath = info.execPath;
-process.env = info.env;
+// (~50 µs of strings: made when first read)
+lazyProperty('env', () => (native.env ? native.env() : info.env));
 process.pid = info.pid;
 process.ppid = info.ppid;
 process.exitCode = undefined;

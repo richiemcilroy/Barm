@@ -238,6 +238,12 @@ NATIVE(n_info) {
     set(ctx, o, "arch", str(ctx, bm_node_arch()));
     const char *base = strrchr(exe, '/');
     set(ctx, o, "title", str(ctx, base ? base + 1 : exe));
+    return o;
+}
+
+/* env() -> the environment as an object (process.env, made on first use) */
+NATIVE(n_env) {
+    UNUSED;
     JSObjectRef env = JSObjectMake(ctx, NULL, NULL);
     for (char **e = environ; e && *e; e++) {
         const char *eq = strchr(*e, '=');
@@ -248,8 +254,7 @@ NATIVE(n_info) {
         key[kl] = 0;
         set(ctx, env, key, str(ctx, eq + 1));
     }
-    set(ctx, o, "env", env);
-    return o;
+    return env;
 }
 
 NATIVE(n_cwd) {
@@ -3878,6 +3883,7 @@ void bm_node_install(JSContextRef ctx, JSObjectRef native) {
     bm_js_def(ctx, native, "cpuUsage", n_cpu_usage);
     bm_js_def(ctx, native, "ids", n_ids);
     bm_js_def(ctx, native, "kill", n_kill);
+    bm_js_def(ctx, native, "env", n_env);
     bm_js_def(ctx, native, "signal", n_signal);
     bm_js_def(ctx, native, "signalHandler", n_signal_handler);
     bm_js_def(ctx, native, "setRawMode", n_set_raw_mode);
