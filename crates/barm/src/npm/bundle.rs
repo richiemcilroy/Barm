@@ -676,7 +676,14 @@ function __barm_load(id) {
   require.extensions = __barm_extensions;
   var def = __barm_defs[id] || __barm_compile(id);
   __barm_defs[id] = undefined;
-  def.call(module.exports, module, module.exports, require, name, __barm_dirname(name));
+  // (a module that throws as it loads is loaded again by the next require, as in Node.js)
+  var ok = false;
+  try {
+    def.call(module.exports, module, module.exports, require, name, __barm_dirname(name));
+    ok = true;
+  } finally {
+    if (!ok) __barm_cache[id] = undefined;
+  }
   module.loaded = true;
   return module.exports;
 }
