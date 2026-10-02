@@ -1,0 +1,6 @@
+import run from "node-signals"
+
+function main() {
+  // signals as process events
+  try run()
+}

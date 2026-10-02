@@ -3541,6 +3541,11 @@ static uint64_t bm_loop_host(uint64_t now_ms, bool fresh) {
     return bm_loop_host_at;
 }
 
+static bool bm_loop_for_timers;   /* bm_http_loop runs while timers are live, too */
+static int bm_http_q;
+static void bm_http_loop(void);
+static void bm_http_refresh_date(void);
+
 void bm_async_run(void) {
     for (;;) {
         bm_run_microtasks();
@@ -3552,6 +3557,15 @@ void bm_async_run(void) {
         while (bm_ntimers && !bm_timers[0].cb.fn) (void)bm_timer_pop();
         bool check = bm_loop_check_pending;
         if (!bm_live_timers && !(check && bm_loop_check_ref)) return;
+        /* descriptors are watched that don't keep the program running (a signal's pipe, an
+         * unref'd socket): the timers wait on them too */
+        if (bm_http_q >= 0) {
+            bm_loop_for_timers = true;
+            bm_http_refresh_date();
+            bm_http_loop();
+            bm_loop_for_timers = false;
+            continue;
+        }
         if (bm_ntimers && !check && bm_timers[0].when > bm_loop_update()) {
             uint64_t wake = bm_timers[0].when, host = bm_loop_host(bm_loop_ms, true), idle = bm_loop_idle_due();
             if (host && host < wake) wake = host;
@@ -4441,6 +4455,13 @@ static bool bm_http_service(bm_http_conn *c, bool readable, bool broken) {
 
 static char bm_http_timer_tag;   /* the loop's timer event (the next setTimeout) */
 
+/* whether the loop goes on: servers, connections or ref'd I/O, a ref'd check phase, or (run for
+ * timers, see bm_async_run) timers */
+static bool bm_http_alive(void) {
+    return bm_http_active > 0 || bm_http_conns || bm_io_refs > 0 || (bm_loop_check_pending && bm_loop_check_ref)
+        || (bm_loop_for_timers && bm_live_timers > 0);
+}
+
 /* Runs the event loop until every server has stopped and its connections have closed; timers
  * and microtasks run in it too. */
 static void bm_http_loop(void) {
@@ -4460,7 +4481,7 @@ static void bm_http_loop(void) {
         if (kevent(bm_http_q, &ev, 1, NULL, 0, NULL) != 0) _exit(0);
     }
 #endif
-    while (bm_http_active > 0 || bm_http_conns || bm_io_refs > 0 || (bm_loop_check_pending && bm_loop_check_ref)) {
+    while (bm_http_alive()) {
         bm_run_microtasks();
         /* connections whose late responses are ready */
         while (bm_http_dirty) {
@@ -4470,7 +4491,7 @@ static void bm_http_loop(void) {
             bm_http_service(c, false, false);
             bm_run_microtasks();
         }
-        if (!(bm_http_active > 0 || bm_http_conns || bm_io_refs > 0 || (bm_loop_check_pending && bm_loop_check_ref))) break;
+        if (!bm_http_alive()) break;
         if (bm_out_len) bm_out_flush(); /* handler logs reach pipes and files promptly */
         while (bm_ntimers && !bm_timers[0].cb.fn) (void)bm_timer_pop();
         /* wait for I/O, or until the next timer is due */

@@ -1,0 +1,5 @@
+SIGKILL uv_signal_start EINVAL EINVAL -22 uv_signal_start
+SIGKILL listeners 0
+SIGUSR2 SIGUSR2 true
+caught SIGTERM
+shut down
