@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <time.h>
 #if defined(__unix__) || defined(__APPLE__)
+#include <sys/mman.h>
 #include <unistd.h>
 #define BM_HAVE_ISATTY 1
 #endif
@@ -130,11 +131,34 @@ static size_t bm_size_mul_add(size_t a, size_t b, size_t c) {
 #else
 #define BM_SB_SMALL(cap) (BM_STR_HDR + (cap) + 1 <= (BM_SMALL_CLASSES - 1) * 8)
 #endif
+/* Big builders (a response body, a large JSON text) on macOS get their pages straight from the
+ * kernel, and give them straight back: its allocator keeps freed large blocks dirty for reuse,
+ * so a burst of big buffers would stay in the program's footprint. (glibc maps blocks this
+ * big itself.) */
+#if defined(__APPLE__) && !(defined(__SANITIZE_ADDRESS__) || (defined(__has_feature) && __has_feature(address_sanitizer)))
+#define BM_SB_MAPPED(cap) ((cap) >= ((size_t)128 << 10))
+static size_t bm_sb_map_size(size_t cap) {
+    size_t page = (size_t)getpagesize();
+    return (BM_STR_HDR + cap + 1 + page - 1) & ~(page - 1);
+}
+static char *bm_sb_map(size_t cap) {
+    void *p = mmap(NULL, bm_sb_map_size(cap), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (BM_UNLIKELY(p == MAP_FAILED)) bm_oom(cap);
+    return (char *)p;
+}
+#else
+#define BM_SB_MAPPED(cap) false
+static size_t bm_sb_map_size(size_t cap) { return cap; }
+static char *bm_sb_map(size_t cap) { return (char *)bm_alloc(cap); }
+#endif
+
 static inline void bm_sb_release_buf(char *base, size_t cap) {
     if (BM_SB_SMALL(cap)) {
         size_t c = (BM_STR_HDR + cap + 1 + 7) >> 3;
         *(void **)(void *)base = bm_small_bins[c];
         bm_small_bins[c] = base;
+    } else if (BM_SB_MAPPED(cap)) {
+        munmap(base, bm_sb_map_size(cap));
     } else {
         free(base);
     }
@@ -154,6 +178,13 @@ void bm_sb_grow(bm_sb *sb, size_t need) {
         base = (char *)f;
         if (old) memcpy(base + BM_STR_HDR, sb->data, sb->len);
         if (old) bm_sb_release_buf(old, sb->cap);
+    } else if (BM_SB_MAPPED(cap)) {
+        base = bm_sb_map(cap);
+        if (old) {
+            memcpy(base + BM_STR_HDR, sb->data, sb->len);
+            bm_sb_release_buf(old, sb->cap);
+        }
+        cap = bm_sb_map_size(cap) - BM_STR_HDR - 1;   /* (the whole of its pages) */
     } else if (old && BM_SB_SMALL(sb->cap)) {
         base = (char *)bm_alloc(BM_STR_HDR + cap + 1);
         memcpy(base + BM_STR_HDR, sb->data, sb->len);
@@ -545,7 +576,7 @@ bm_str bm_str_from_sb(bm_sb *sb) {
         bm_sb_free(sb);
         return r;
     }
-    if (BM_SB_SMALL(sb->cap)) { /* the builder's block is in the small-object heap: copy out */
+    if (BM_SB_SMALL(sb->cap) || BM_SB_MAPPED(sb->cap)) { /* the builder's block is in the small-object heap, or mapped: copy out */
         bm_strbuf *b = (bm_strbuf *)bm_alloc(BM_STR_HDR + n + 1);
         memcpy(b->data, sb->data, n);
         bm_sb_free(sb);
