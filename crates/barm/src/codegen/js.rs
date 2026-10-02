@@ -88,8 +88,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                 f
             }
         };
-        let v = Val::plain(format!("{f}()"), JS);
-        self.coerce(v, ty)
+        // (a variable, not the call: printing takes the value's address)
+        let t = self.fresh("j");
+        self.line(format!("JSValueRef {t} = {f}();"));
+        self.coerce(Val::plain(t, JS), ty)
     }
 
     // ------------------------------------------------------------ Barm → JavaScript
