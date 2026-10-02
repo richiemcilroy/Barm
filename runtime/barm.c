@@ -5596,7 +5596,9 @@ static bool bm_fr_decode(bm_fr *r, bool final);
 /* Body bytes arrived: decode them, and a waiting reader gets them. True when the reader is far
  * enough behind that the socket should pause. */
 static bool bm_fr_data(bm_fr *r) {
-    if (!r->streaming) return false;
+    /* (nothing's reading it yet: at most BM_STREAM_HIGH arrives until the program reads it, whole
+     * or as a stream; a body read partway or not at all holds no more than that) */
+    if (!r->streaming) return !r->whole && bm_fr_sink(r)->len >= BM_STREAM_HIGH;
     if (bm_fr_decoding(r) && !bm_fr_decode(r, false)) return false;
     if (r->read_p && r->rbody.len) bm_fr_resolve(&r->read_p, (bm_int)r->rbody.len);
     return r->rbody.len >= BM_STREAM_HIGH || r->raw_off < r->raw.len;
@@ -5973,7 +5975,8 @@ static bool bm_fr_head(bm_fr *r, const char *p, size_t n) {
     r->discard = r->redirect_mode != BM_FETCH_MANUAL && bm_redirect_status(s) && r->location.len > 0;
     if (!r->discard && length > 0 && r->state == BM_FR_FIXED) {
         if (length > INT32_MAX) return false;
-        bm_sb_grow(bm_fr_sink(r), (size_t)(length < (64 << 20) ? length : (64 << 20)));
+        size_t most = r->whole ? (64 << 20) : BM_STREAM_HIGH;   /* (until it's known to be read whole) */
+        bm_sb_grow(bm_fr_sink(r), (size_t)length < most ? (size_t)length : most);
     }
     return true;
 }
@@ -6709,7 +6712,11 @@ static void bm_fc_ready(bm_io *h, bool readable, bool writable, bool broken) {
                 return;
             }
             if (st > 0) break;
-            if (r->streaming && (r->rbody.len >= BM_STREAM_HIGH || r->raw_off < r->raw.len)) { r->paused = true; bm_fc_interest(c, false, false); break; }
+            if (r->streaming ? r->rbody.len >= BM_STREAM_HIGH || r->raw_off < r->raw.len : !r->whole && bm_fr_sink(r)->len >= BM_STREAM_HIGH) {
+                r->paused = true;
+                bm_fc_interest(c, false, false);
+                break;
+            }
             if ((size_t)n == room || c->tls) continue;
             break;
         }
@@ -6870,6 +6877,13 @@ bm_promise *bm_native_fetchBodyWait(bm_int id) {
         /* read whole: decoded at once when it's all in (now, if it is) */
         r->whole = true;
         bm_fr_drain(r, true);
+        if (r->paused && r->c && !r->streaming) {
+            /* it waited, unread, for this: the rest comes now */
+            r->paused = false;
+            bm_fc *c = r->c;
+            bm_fc_interest(c, true, false);
+            bm_fc_ready(&c->io, true, false, false);
+        }
     }
     return bm_fr_promise(r ? &r->body_p : NULL, r && r->result == 1, r ? r->result : -1);
 }
