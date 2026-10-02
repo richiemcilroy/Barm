@@ -14,7 +14,7 @@ pub const BUILTINS: &[&str] = &[
     "readline/promises", "repl", "stream", "stream/promises", "stream/web", "stream/consumers", "string_decoder", "sys", "timers",
     "timers/promises", "tls", "trace_events", "tty", "url", "util", "util/types", "v8", "vm", "wasi", "worker_threads", "zlib",
     "test", "sqlite", "_http_agent", "_http_client", "_http_common", "_http_incoming", "_http_outgoing", "_http_server",
-    "_tls_common", "_tls_wrap",
+    "_tls_common", "_tls_wrap", "bun",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

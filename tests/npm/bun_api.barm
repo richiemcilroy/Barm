@@ -1,0 +1,6 @@
+import run from "bun-api"
+
+async function main() {
+  // Bun's APIs for packages written for Bun
+  try await run()
+}

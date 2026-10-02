@@ -1,0 +1,12 @@
+number true localhost true
+/a?b=1 200 text/plain null "hello /a?b=1"
+/users/42 200 application/json null "{\"id\":\"42\"}"
+/static 200 text/plain null "static route"
+/throw 500 text/plain null "handled: boom"
+/stream 200 null null "chunk "
+/empty 204 null null ""
+/ip 200 application/json null "{\"family\":\"IPv6\"}"
+/async 201 text/plain 1 "later"
+post POST payload yes
+head 200 8 ""
+stopped refused

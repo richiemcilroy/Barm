@@ -2187,6 +2187,8 @@ static pid_t bm_node_spawn(const char *file, char **argv, char **env, const char
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
         if (cwd) posix_spawn_file_actions_addchdir_np(&fa, cwd);
 #pragma clang diagnostic pop
+        /* (what the program wrote before comes before what the child writes to the same fds) */
+        bm_out_flush();
         err = posix_spawn(&pid, path, &fa, &attr, argv, env ? env : environ);
     }
     posix_spawn_file_actions_destroy(&fa);
@@ -3425,6 +3427,12 @@ NATIVE(n_http_write) {
     return undef(ctx);
 }
 
+/* httpBuffered(id) -> bytes of the response the socket hasn't taken yet (-1: the client has gone) */
+NATIVE(n_http_buffered) {
+    UNUSED;
+    return num(ctx, (double)bm_native_httpBuffered((bm_int)arg_num(ctx, n, a, 0, 0)));
+}
+
 /* httpFd(id) -> the connection's fd (-1 if it's gone) */
 NATIVE(n_http_fd) {
     UNUSED;
@@ -3461,6 +3469,7 @@ static void bm_node_http_install(JSContextRef ctx, JSObjectRef native) {
     bm_js_def(ctx, h, "listen", n_http_listen);
     bm_js_def(ctx, h, "write", n_http_write);
     bm_js_def(ctx, h, "fd", n_http_fd);
+    bm_js_def(ctx, h, "buffered", n_http_buffered);
     bm_js_def(ctx, h, "takeover", n_http_takeover);
     bm_js_def(ctx, h, "port", n_http_port);
     bm_js_def(ctx, h, "stop", n_http_stop);

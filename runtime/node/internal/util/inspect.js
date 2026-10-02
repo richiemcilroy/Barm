@@ -1751,7 +1751,7 @@ function getStackString(ctx, error) {
   }
   if (stack) {
     if (typeof stack === 'string') {
-      return stack;
+      return v8Stack(error, stack);
     }
     ctx.seen.push(error);
     ctx.indentationLvl += 4;
@@ -1761,6 +1761,27 @@ function getStackString(ctx, error) {
     return `${ErrorPrototypeToString(error)}\n    ${result}`;
   }
   return ErrorPrototypeToString(error);
+}
+
+// (Barm: JavaScriptCore's stacks are frames alone, "fn@file:line:col" a line; shown as V8's are,
+// "Name: message" then "    at fn (file:line:col)", as Node.js shows them)
+const JSC_FRAME = /^(?:([^@\n]*)@)?(.+)$/;
+function v8Stack(error, stack) {
+  if (StringPrototypeIncludes(stack, '\n    at ') || StringPrototypeStartsWith(stack, '    at ')) return stack;
+  const lines = StringPrototypeSplit(stack, '\n');
+  if (!lines.every((line) => line === '' || RegExpPrototypeExec(/@|^[^\s]+:\d+:\d+$|^\[native code\]$/, line) !== null)) {
+    return stack;
+  }
+  let out = ErrorPrototypeToString(error);
+  for (const line of lines) {
+    if (line === '') continue;
+    const m = RegExpPrototypeExec(JSC_FRAME, line);
+    const fn = m[1] ?? '';
+    const where = m[2] === '[native code]' ? 'native' : m[2];
+    out += fn === '' || fn === 'global code' || fn === 'module code' || fn === 'eval code' ?
+      `\n    at ${where}` : `\n    at ${fn} (${where})`;
+  }
+  return out;
 }
 
 function getStackFrames(ctx, err, stack) {
