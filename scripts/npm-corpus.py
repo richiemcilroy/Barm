@@ -35,7 +35,7 @@ def build():
     sh(["cargo", "build", "-q", "--release"], cwd=ROOT)
     rt = os.path.join(ROOT, "runtime")
     srcs = [os.path.join(ROOT, "scripts", "npm-corpus-runner.c")] + [os.path.join(rt, f) for f in ("js.c", "node.c", "napi.c", "barm.c")]
-    sh(["cc", "-O1", "-std=gnu11", "-w", "-I", rt, *srcs, "-framework", "JavaScriptCore", "-o", RUNNER])
+    sh(["cc", "-O1", "-std=gnu11", "-w", "-I", rt, *srcs, "-framework", "JavaScriptCore", "-framework", "CoreFoundation", "-o", RUNNER])
     plist = os.path.join(OUT, "jit.plist")
     with open(plist, "w") as f:
         f.write('<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>com.apple.security.cs.allow-jit</key><true/></dict></plist>\n')

@@ -111,11 +111,13 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
                         for (prefix, suffix) in super::lex::require_patterns(&src) {
                             reqs.extend(expand_pattern(&dir, &prefix, &suffix));
                         }
+                        let src = minified(src);
                         (name, src, reqs, dir)
                     }
                     _ => {
                         let runtime = jsx.then(|| jsx_runtime(path));
                         let (body, reqs) = super::esm::to_commonjs(&src, ts, runtime.as_deref()).map_err(|e| format!("{name}: {e}"))?;
+                        let body = minified(body);
                         esm = true;
                         (name, body, reqs, dir)
                     }
@@ -424,6 +426,22 @@ fn asset_kind(path: &Path) -> Option<Asset> {
     }
 }
 
+/// A module's code minified (less for the engine to parse at start), when that's sure to mean
+/// the same: the minified text must read back as exactly the same tokens (a regular expression
+/// the lexer took for division would not). Line breaks stay, so line numbers do too.
+fn minified(src: String) -> String {
+    if std::env::var_os("BARM_NO_MINIFY").is_some() {
+        return src;
+    }
+    let Ok(min) = super::lex::minify(&src) else { return src };
+    if min.len() + min.len() / 10 >= src.len() {
+        return src;
+    }
+    let (Ok(a), Ok(b)) = (super::lex::tokenize(&src), super::lex::tokenize(&min)) else { return src };
+    let same = a.len() == b.len() && a.iter().zip(&b).all(|(x, y)| x.kind == y.kind && x.text(&src) == y.text(&min));
+    if same { min } else { src }
+}
+
 /// Native addons and other binaries (anything not UTF-8 is one too).
 fn is_binary_ext(path: &Path) -> bool {
     matches!(path.extension().and_then(|e| e.to_str()), Some("node" | "wasm" | "dylib" | "so" | "dll"))
@@ -656,7 +674,8 @@ function __barm_load(id) {
   require.cache = {};
   require.main = undefined;
   require.extensions = __barm_extensions;
-  var def = __barm_defs[id] || (__barm_defs[id] = __barm_compile(id));
+  var def = __barm_defs[id] || __barm_compile(id);
+  __barm_defs[id] = undefined;
   def.call(module.exports, module, module.exports, require, name, __barm_dirname(name));
   module.loaded = true;
   return module.exports;
