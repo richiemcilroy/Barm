@@ -7,6 +7,9 @@
 
 const g = globalThis;
 
+// what a global's loader returns when the bundle doesn't hold its module: the global goes away
+const ABSENT = Symbol('absent');
+
 // (Node.js's versions replace the engine's or host's, where there are any)
 function lazy(name, load, enumerable = false) {
   let value;
@@ -18,6 +21,10 @@ function lazy(name, load, enumerable = false) {
     get() {
       if (!loaded) {
         value = load();
+        if (value === ABSENT) {
+          delete g[name];
+          return undefined;
+        }
         loaded = true;
       }
       return value;
@@ -107,7 +114,7 @@ lazy('crypto', () => {
     configurable: true,
     get() {
       const id = 'crypto';
-      return require(id).subtle;
+      return bundled(id)?.subtle;
     },
   });
   return webcrypto;
@@ -147,30 +154,43 @@ lazy('ByteLengthQueuingStrategy', () => require('internal/webstreams/queuingstra
 lazy('CountQueuingStrategy', () => require('internal/webstreams/queuingstrategies').CountQueuingStrategy);
 lazy('TextEncoderStream', () => require('internal/webstreams/encoding').TextEncoderStream);
 lazy('TextDecoderStream', () => require('internal/webstreams/encoding').TextDecoderStream);
+// a module loaded by a computed name: in the bundle only when the program's code names its
+// global (as `fetch`, not `globalThis.fetch`), else undefined, and so is the global (a package
+// feature-testing `globalThis.Bun` finds no Bun, as under Node.js)
+function bundled(id) {
+  try {
+    return require(id);
+  } catch (e) {
+    if (e?.code === 'MODULE_NOT_FOUND' && `${e.message}`.includes(`'${id}'`)) return undefined;
+    throw e;
+  }
+}
+const pick = (mod, key) => (mod === undefined ? ABSENT : mod[key]);
+
 // (zlib: in the bundle only when the program's code names these, so the codecs aren't linked into
 // every program)
 function compression() {
   const id = 'internal/webstreams/compression';
-  return require(id);
+  return bundled(id);
 }
-lazy('CompressionStream', () => compression().CompressionStream);
-lazy('DecompressionStream', () => compression().DecompressionStream);
+lazy('CompressionStream', () => pick(compression(), 'CompressionStream'));
+lazy('DecompressionStream', () => pick(compression(), 'DecompressionStream'));
 lazy('Blob', () => require('internal/blob').Blob);
 // fetch() and its classes (internal/barm/fetch, over Barm's HTTP client): in the bundle only
 // when the program's code names them, so the TLS client isn't linked into every program
 function fetchModule() {
   const id = 'internal/barm/fetch';
-  return require(id);
+  return bundled(id);
 }
-lazy('fetch', () => fetchModule().fetch);
-lazy('Headers', () => fetchModule().Headers);
-lazy('Request', () => fetchModule().Request);
-lazy('Response', () => fetchModule().Response);
-lazy('FormData', () => fetchModule().FormData);
+lazy('fetch', () => pick(fetchModule(), 'fetch'));
+lazy('Headers', () => pick(fetchModule(), 'Headers'));
+lazy('Request', () => pick(fetchModule(), 'Request'));
+lazy('Response', () => pick(fetchModule(), 'Response'));
+lazy('FormData', () => pick(fetchModule(), 'FormData'));
 // Bun's global (the bun module): in the bundle only when the program's code names it
 lazy('Bun', () => {
   const id = 'bun';
-  return require(id);
+  return bundled(id) ?? ABSENT;
 });
 lazy('performance', () => require('perf_hooks').performance);
 lazy('PerformanceEntry', () => require('perf_hooks').PerformanceEntry);
