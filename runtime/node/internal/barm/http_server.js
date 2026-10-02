@@ -28,36 +28,21 @@ const kAddress = Symbol('kAddress');
 
 // the request's socket: writes go to the native server for request id
 class NativeSocket extends EventEmitter {
+  // (one per request: what doesn't change is on the prototype, so each holds only its own state)
   constructor(server, id) {
     super();
     this[kId] = id;
-    this[kChunks] = [];
-    this[kFlushQueued] = false;
-    this[kDone] = false;
-    this[kAddress] = null;
+    this[kChunks] = null;
     this.server = server;
-    this._httpMessage = null;
-    this.writable = true;
-    this.readable = false;
-    this.destroyed = false;
-    this.encrypted = undefined;
-    this.connecting = false;
-    this.bytesWritten = 0;
-    this.writableLength = 0;
-    this.writableHighWaterMark = 16384;
-    this.writableNeedDrain = false;
-    this.writableCorked = 0;
-    this._writableState = { corked: 0, length: 0, needDrain: false, ended: false };
-    this._paused = false;
   }
 
   // (chunks are strings with their encodings, or bytes: strings go as they are, encoded natively)
-  #flush(end) {
+  _barmFlush(end) {
     if (this[kDone]) return;
     const chunks = this[kChunks];
-    this[kChunks] = [];
+    this[kChunks] = null;
     if (end) this[kDone] = true;
-    if (chunks.length === 0) {
+    if (chunks === null) {
       native.write(this[kId], null, end, false);
     } else if (chunks.length === 2 && typeof chunks[0] === 'string') {
       native.write(this[kId], chunks[0], end, chunks[1] === 'latin1');
@@ -76,6 +61,7 @@ class NativeSocket extends EventEmitter {
       encoding = undefined;
     }
     if (this[kDone]) return false;
+    this[kChunks] ??= [];
     if (typeof data === 'string') {
       const enc = encoding === 'latin1' || encoding === 'binary' || encoding === 'ascii' ? 'latin1' : (encoding ?? 'utf8');
       this[kChunks].push(data, enc);
@@ -89,17 +75,14 @@ class NativeSocket extends EventEmitter {
     // (more of a response that hasn't ended goes out when the tick ends)
     if (!this[kFlushQueued]) {
       this[kFlushQueued] = true;
-      process.nextTick(() => {
-        this[kFlushQueued] = false;
-        if (this[kChunks].length) this.#flush(0);
-      });
+      process.nextTick(flushSoon, this);
     }
     return true;
   }
 
   // the response is complete: what's gathered goes with the end (2: then close the connection)
   _barmEnd(close) {
-    this.#flush(close ? 2 : 1);
+    this._barmFlush(close ? 2 : 1);
   }
 
   end(data, encoding, callback) {
@@ -173,6 +156,32 @@ class NativeSocket extends EventEmitter {
   }
 }
 
+function flushSoon(socket) {
+  socket[kFlushQueued] = false;
+  if (socket[kChunks] !== null) socket._barmFlush(0);
+}
+
+// (what every request's socket starts with)
+const socketState = { corked: 0, length: 0, needDrain: false, ended: false };
+Object.assign(NativeSocket.prototype, {
+  [kFlushQueued]: false,
+  [kDone]: false,
+  [kAddress]: null,
+  _httpMessage: null,
+  writable: true,
+  readable: false,
+  destroyed: false,
+  encrypted: undefined,
+  connecting: false,
+  bytesWritten: 0,
+  writableLength: 0,
+  writableHighWaterMark: 16384,
+  writableNeedDrain: false,
+  writableCorked: 0,
+  _writableState: socketState,
+  _paused: false,
+});
+
 // the request's headers, as [name, value, ...]
 function rawHeaders(wire) {
   const out = [];
@@ -203,6 +212,25 @@ function install(Server, { IncomingMessage, kServerResponse, kIncomingMessage, k
   const { allMethods } = require('internal/bindings/http_parser');
   const methods = new Set(allMethods);
   const BAD_REQUEST = Buffer.from('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
+
+  // (shared by every response: `this` is the response, its socket the request's)
+  function onResponseFinish() {
+    const res = this;
+    const req = res.req;
+    const socket = res.socket;
+    if (!req._consuming && !req._readableState.resumeScheduled) req._dump();
+    res.detachSocket(socket);
+    socket._barmEnd(res._last || !res.shouldKeepAlive);
+    process.nextTick(emitResponseClose, res);
+  }
+
+  function emitResponseClose(res) {
+    if (!res._closed) {
+      res.destroyed = true;
+      res._closed = true;
+      res.emit('close');
+    }
+  }
 
   function onRequest(server, id, method, target, wire, body, http10) {
     // (a method llhttp doesn't know: Node.js answers 400 and closes)
@@ -256,18 +284,7 @@ function install(Server, { IncomingMessage, kServerResponse, kIncomingMessage, k
     res.shouldKeepAlive = keepAlive;
     res[kUniqueHeaders] = server[kUniqueHeaders];
     res.assignSocket(socket);
-    res.on('finish', () => {
-      if (!req._consuming && !req._readableState.resumeScheduled) req._dump();
-      res.detachSocket(socket);
-      socket._barmEnd(res._last || !res.shouldKeepAlive);
-      process.nextTick(() => {
-        if (!res._closed) {
-          res.destroyed = true;
-          res._closed = true;
-          res.emit('close');
-        }
-      });
-    });
+    res.on('finish', onResponseFinish);
     if (http10 === false && server.requireHostHeader && req.headers.host === undefined) {
       res.writeHead(400, ['Connection', 'close']);
       res.end();

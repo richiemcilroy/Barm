@@ -55,14 +55,17 @@ const immediateInfo = new Proxy(immediateFields, {
 
 const timeoutInfo = new Int32Array(1);
 
-// The loop's time, as libuv caches it: read once per callback from the loop (and reset when
-// its microtasks run), not on every timer change
+// The loop's time, as libuv caches it: read once per callback from the loop, not on every timer
+// change (outside one, read each time)
 let cachedNow = -1;
 const resetNow = () => { cachedNow = -1; };
+let hostState = null;
 function getLibuvNow() {
+  hostState ??= require('internal/bindings/task_queue');
+  if (!hostState.inHostCallback()) return native.now();
   if (cachedNow < 0) {
     cachedNow = native.now();
-    queueMicrotask(resetNow);
+    hostState.onHostReturn(resetNow);
   }
   return cachedNow;
 }
