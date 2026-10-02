@@ -1,0 +1,3 @@
+wasm add 5
+wasm exports add
+finalized object 0, object 1, object 2
