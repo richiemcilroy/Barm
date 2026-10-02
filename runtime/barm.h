@@ -409,6 +409,15 @@ bool bm_io_proc(int pid, bm_io *h, int *fd_out);
  * program running. */
 extern void (*bm_loop_check)(void);
 extern bool bm_loop_check_pending, bm_loop_check_ref;
+/* The engine's own timers (JavaScriptCore sweeps and collects on its thread's run loop, which the
+ * event loop stands in for): bm_loop_host_due(now) says when the next is due, in the loop's
+ * milliseconds (0: none), and bm_loop_host_run runs those due. They never keep the program
+ * running. */
+extern uint64_t (*bm_loop_host_due)(uint64_t now_ms);
+extern void (*bm_loop_host_run)(void);
+/* Called once the loop has been idle (no I/O, no timers firing) for a second after doing work:
+ * the engine collects its garbage then and gives the memory back. */
+extern void (*bm_loop_idle)(void);
 void bm_clear_timer(bm_int id);
 /* Runs the event loop until nothing is left: microtasks, timers and servers. */
 void bm_async_run(void);

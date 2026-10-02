@@ -5,6 +5,10 @@
 #include "js.h"
 
 #include <JavaScriptCore/JavaScriptCore.h>
+#ifdef __APPLE__
+#include <CoreFoundation/CoreFoundation.h>
+#endif
+#include <dlfcn.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -200,18 +204,70 @@ static void bm_js_trace_phase(const char *what, double since) {
     bm_write_fd(2, line, (size_t)k);
 }
 
+#ifdef __APPLE__
+/* JavaScriptCore's timers (the incremental sweeper, the next full collection, FinalizationRegistry
+ * callbacks) are on this thread's CFRunLoop, which runs only when the event loop runs it: without
+ * them, garbage swept and collected only as memory runs out stays held. */
+static uint64_t bm_js_host_due(uint64_t now_ms) {
+    CFAbsoluteTime at = CFRunLoopGetNextTimerFireDate(CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+    if (at == 0) return 0;
+    double wait = (at - CFAbsoluteTimeGetCurrent()) * 1000;
+    if (wait <= 0) return now_ms ? now_ms : 1;
+    /* (+1: rounding down would wake it a little early) */
+    return now_ms + (uint64_t)(wait < 3600000 ? wait : 3600000) + 1;
+}
+
+static void bm_js_host_run(void) {
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, false);
+}
+#endif
+
+/* (JavaScriptCore's, exported though not in its headers) */
+extern void JSSynchronousGarbageCollectForDebugging(JSContextRef ctx) __attribute__((weak_import));
+
+/* The loop is idle after work (bm_loop_idle): a full collection, and the memory it frees back to
+ * the system (after a burst of requests, an http server holds ~32 MB without, ~24 MB with). */
+static void bm_js_idle(void) {
+    static void (*release)(void);
+    static bool looked;
+    if (!looked) {
+        looked = true;
+        release = (void (*)(void))dlsym(RTLD_DEFAULT, "_ZN3WTF27releaseFastMallocFreeMemoryEv");
+    }
+    if (JSSynchronousGarbageCollectForDebugging) JSSynchronousGarbageCollectForDebugging(bm_js_ctx);
+    if (release) release();
+}
+
 JSContextRef bm_js(void) {
     if (bm_js_ctx) return bm_js_ctx;
     double t0 = bm_performance_now();
-    /* SharedArrayBuffer, which JavaScriptCore leaves out of API contexts unless asked: its
-     * options come from the environment when the first VM starts, and only then (so the program
-     * and its children never see the variable) */
-    bool sab = !getenv("JSC_useSharedArrayBuffer");
-    if (sab) setenv("JSC_useSharedArrayBuffer", "1", 0);
+    /* JavaScriptCore's options come from the environment when the first VM starts, and only then
+     * (so the program and its children never see the variables; one set already wins):
+     * SharedArrayBuffer, which it leaves out of API contexts unless asked; and one compiler
+     * thread per optimizing tier, as what a compiler thread allocates stays held until the
+     * allocator scavenges it (an http server's hot paths tier up at ~70 MB with the default
+     * threads, ~52 MB with one each, at the same speed) */
+    static const char *const options[][2] = {
+        {"JSC_useSharedArrayBuffer", "1"},
+        {"JSC_numberOfDFGCompilerThreads", "1"},
+        {"JSC_numberOfFTLCompilerThreads", "1"},
+    };
+    enum { noptions = sizeof options / sizeof options[0] };
+    bool set[noptions];
+    for (int i = 0; i < noptions; i++) {
+        set[i] = !getenv(options[i][0]);
+        if (set[i]) setenv(options[i][0], options[i][1], 0);
+    }
     JSGlobalContextRef ctx = JSGlobalContextCreate(NULL);
-    if (sab) unsetenv("JSC_useSharedArrayBuffer");
+    for (int i = 0; i < noptions; i++)
+        if (set[i]) unsetenv(options[i][0]);
     bm_js_trace_phase("created the JavaScript context", t0);
     bm_js_ctx = ctx;
+#ifdef __APPLE__
+    bm_loop_host_due = bm_js_host_due;
+    bm_loop_host_run = bm_js_host_run;
+#endif
+    bm_loop_idle = bm_js_idle;
     /* values made without the engine (js.h): only if it encodes them as expected */
     bm_js_encoded = bm_js_bits(JSValueMakeNumber(ctx, 1.5)) == 0x3ffa000000000000ull && bm_js_bits(JSValueMakeNumber(ctx, -1)) == 0xfffe0000ffffffffull
         && bm_js_bits(JSValueMakeBoolean(ctx, true)) == BM_JS_TRUE && bm_js_bits(JSValueMakeBoolean(ctx, false)) == BM_JS_FALSE

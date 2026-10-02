@@ -1,0 +1,6 @@
+import run from "engine-jobs"
+
+function main() {
+  // work the engine schedules itself: finalizers and WebAssembly compiled off the main thread
+  try run()
+}
