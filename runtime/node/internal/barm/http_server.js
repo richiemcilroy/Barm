@@ -44,7 +44,7 @@ class NativeSocket extends EventEmitter {
     if (end) this[kDone] = true;
     if (chunks === null) {
       native.write(this[kId], null, end, false);
-    } else if (chunks.length === 2 && typeof chunks[0] === 'string') {
+    } else if (chunks.length === 2 && (chunks[1] === 'utf8' || chunks[1] === 'latin1')) {
       native.write(this[kId], chunks[0], end, chunks[1] === 'latin1');
     } else {
       const parts = [];
@@ -61,17 +61,23 @@ class NativeSocket extends EventEmitter {
       encoding = undefined;
     }
     if (this[kDone]) return false;
-    this[kChunks] ??= [];
+    if (typeof callback === 'function') process.nextTick(callback);
+    // (nothing to send: the end of a response writes '' after its last chunk)
+    if (typeof data === 'string' ? data.length === 0 : data.byteLength === 0) return true;
+    const chunks = this[kChunks] ??= [];
     if (typeof data === 'string') {
-      const enc = encoding === 'latin1' || encoding === 'binary' || encoding === 'ascii' ? 'latin1' : (encoding ?? 'utf8');
-      this[kChunks].push(data, enc);
+      const enc = encoding === undefined || encoding === null || encoding === 'utf8' || encoding === 'utf-8' ? 'utf8'
+        : encoding === 'latin1' || encoding === 'binary' || encoding === 'ascii' ? 'latin1' : encoding;
+      // (a string after one in the same encoding joins it: the response goes out as one string)
+      const n = chunks.length;
+      if (n > 0 && chunks[n - 1] === enc && typeof chunks[n - 2] === 'string') chunks[n - 2] += data;
+      else chunks.push(data, enc);
       // (characters: exact for ASCII, which is what responses mostly are; encoding happens natively)
       this.bytesWritten += data.length;
     } else {
-      this[kChunks].push(data, null);
+      chunks.push(data, null);
       this.bytesWritten += data.byteLength;
     }
-    if (typeof callback === 'function') process.nextTick(callback);
     // (more of a response that hasn't ended goes out when the tick ends)
     if (!this[kFlushQueued]) {
       this[kFlushQueued] = true;
