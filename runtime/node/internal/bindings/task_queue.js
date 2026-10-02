@@ -43,14 +43,25 @@ function setTickScheduled() {
   }
 }
 
+// what runs when the host's callback returns (once each)
+let onReturn = null;
+
 // a callback from the host (Barm's loop): fn(...args), then the tick queue
 function callFromHost(fn, a, b, c, d, e, f) {
   hostDepth++;
   try {
     return fn(a, b, c, d, e, f);
   } finally {
+    // (the queue runs while still in the callback: ticks it schedules join it, not a promise job)
+    if (hostDepth === 1) {
+      if (tickInfo[kHasTickScheduled] === 1) drain();
+      if (onReturn !== null) {
+        const ret = onReturn;
+        onReturn = null;
+        ret();
+      }
+    }
     hostDepth--;
-    if (hostDepth === 0 && tickInfo[kHasTickScheduled] === 1) drain();
   }
 }
 
@@ -79,6 +90,11 @@ module.exports = {
   runTicks: drain,
   setTickScheduled,
   callFromHost,
+  inHostCallback: () => hostDepth > 0,
+  // (one at a time: the timers' cached loop time)
+  onHostReturn(fn) {
+    onReturn = fn;
+  },
   kHasTickScheduled,
   kHasRejectionToWarn,
 };
