@@ -3,6 +3,7 @@
 bench/http/out/
 bench/http/rust/target/
 bench/fetch/out/
+bench/cap-media/out/
 bench/fetch/server/target/
 bench/fetch/rust-client/target/
 
