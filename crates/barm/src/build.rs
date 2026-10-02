@@ -371,7 +371,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
                 cmd.arg("-rdynamic");
             }
         }
-        cmd.args(["-framework", "JavaScriptCore", "-framework", "CoreFoundation"]);
+        cmd.args(["-framework", "JavaScriptCore", "-framework", "CoreFoundation", "-lobjc"]);
     }
     if let Some(t) = &tls {
         cmd.arg(t.build(&cc, &c_dir)?);

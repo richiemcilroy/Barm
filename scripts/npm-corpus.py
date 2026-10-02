@@ -14,6 +14,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "target", "npm-corpus")
 BARM = os.path.join(ROOT, "target", "release", "barm")
 RUNNER = os.path.join(OUT, "runner")
+# (the runner reads its blob from a file, so it has no bytecode cache to write)
+os.environ["BARM_JS_CACHE"] = "0"
 
 PROBE = """
 var __log = typeof __out === "function" ? __out : function (s) { console.log(s); };
@@ -35,7 +37,7 @@ def build():
     sh(["cargo", "build", "-q", "--release"], cwd=ROOT)
     rt = os.path.join(ROOT, "runtime")
     srcs = [os.path.join(ROOT, "scripts", "npm-corpus-runner.c")] + [os.path.join(rt, f) for f in ("js.c", "node.c", "napi.c", "barm.c")]
-    sh(["cc", "-O1", "-std=gnu11", "-w", "-I", rt, *srcs, "-framework", "JavaScriptCore", "-framework", "CoreFoundation", "-o", RUNNER])
+    sh(["cc", "-O1", "-std=gnu11", "-w", "-I", rt, *srcs, "-framework", "JavaScriptCore", "-framework", "CoreFoundation", "-lobjc", "-o", RUNNER])
     plist = os.path.join(OUT, "jit.plist")
     with open(plist, "w") as f:
         f.write('<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>com.apple.security.cs.allow-jit</key><true/></dict></plist>\n')

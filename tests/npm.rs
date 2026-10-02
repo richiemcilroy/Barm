@@ -38,11 +38,34 @@ fn main() {
                 continue;
             }
         };
-        let out = Command::new(&built.binary).output().expect("run binary");
-        let actual = String::from_utf8_lossy(&out.stdout).into_owned();
         let expected = std::fs::read_to_string(case.with_extension("stdout")).unwrap_or_default();
-        if actual != expected || !out.status.success() {
-            failed.push(format!("{name}: output differs (exit {:?})\n--- expected\n{expected}--- actual\n{actual}{}", out.status.code(), String::from_utf8_lossy(&out.stderr)));
+        // `cache`: runs twice, with a cache of its own: compiled (writing the bytecode cache as it
+        // exits), then from the cache
+        let cache = (name == "cache").then(|| std::env::temp_dir().join(format!("barm-npm-cache-{}", std::process::id())));
+        let runs = if cache.is_some() { 2 } else { 1 };
+        for run in 0..runs {
+            let mut cmd = Command::new(&built.binary);
+            if let Some(dir) = &cache {
+                if run == 0 {
+                    let _ = std::fs::remove_dir_all(dir);
+                    std::fs::create_dir_all(dir).unwrap();
+                } else {
+                    wait_for_cache(dir);
+                    cmd.env("BARM_JS_TRACE", "1");
+                }
+                cmd.env("BARM_JS_CACHE_DIR", dir);
+            }
+            let out = cmd.output().expect("run binary");
+            let actual = String::from_utf8_lossy(&out.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if actual != expected || !out.status.success() {
+                failed.push(format!("{name} (run {}): output differs (exit {:?})\n--- expected\n{expected}--- actual\n{actual}{stderr}", run + 1, out.status.code()));
+            } else if run == 1 && !stderr.contains("node_modules/cache-lib/index.js") || run == 1 && !stderr.lines().any(|l| l.starts_with("barm: loaded") && l.contains("cache-lib")) {
+                failed.push(format!("{name}: the second run didn't load cache-lib from the bytecode cache\n{stderr}"));
+            }
+        }
+        if let Some(dir) = &cache {
+            let _ = std::fs::remove_dir_all(dir);
         }
     }
     for f in &failed {
@@ -51,5 +74,20 @@ fn main() {
     println!("npm: {} programs, {} failed", cases.len(), failed.len());
     if !failed.is_empty() {
         std::process::exit(1);
+    }
+}
+
+/// Waits for the process a program starts as it exits to finish writing its bytecode cache (the
+/// directory's files stop changing, none of them temporary).
+fn wait_for_cache(dir: &Path) {
+    let mut last = usize::MAX;
+    for _ in 0..100 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let names: Vec<String> = std::fs::read_dir(dir).map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default();
+        let done = names.iter().any(|n| n.ends_with(".jsc")) && !names.iter().any(|n| n.ends_with(".tmp"));
+        if done && names.len() == last {
+            return;
+        }
+        last = names.len();
     }
 }
