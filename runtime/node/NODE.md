@@ -44,7 +44,7 @@ Per-context files also get `privateSymbols` and `perIsolateSymbols`.
 
 - `internal/util/types.js`: `isKeyObject` and `isCryptoKey` answer false without loading `internal/crypto/keys` (Barm's crypto has neither yet).
 - `internal/primordials.js`: defines `Symbol.dispose` and `Symbol.asyncDispose` when the engine lacks them (JavaScriptCore does), as Node.js once did.
-- `internal/url.js`: blob URLs get their UUIDs from `internal/barm/random` rather than `internal/crypto/random`, so `URL` doesn't bring `crypto` into every bundle.
+- `internal/url.js`: blob URLs get their UUIDs from `internal/barm/random` rather than `internal/crypto/random`, so `URL` doesn't bring `crypto` into every bundle. `installObjectURLMethods()` runs as the module loads (Node.js's bootstrap calls it), and the `blob` binding loads with the first blob URL.
 - `internal/tls/wrap.js`: `internal/crypto/x509` loads when a peer certificate is asked for, so `tls` and `https` load without Node.js's key objects.
 - `cluster.js`: requires `internal/cluster/child` and `internal/cluster/primary` by name, not through a template string, so the bundler sees them.
 - `internal/process/task_queues.js`: `setHasTickScheduled` tells the `task_queue` binding when a tick is scheduled, so it can run the queue when the host's callback returns.

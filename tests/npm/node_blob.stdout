@@ -1,0 +1,10 @@
+12 text/plain héllo world
+8 x/y "�llo wor" a96c6c6f20776f72
+stream [ 7, 2, 3 ] 12
+a.txt 3 5 abc true
+file 200000 application/octet-stream 200000 7,7,7,7,7,7,7,7,7,7
+file stream 200000
+response 10 null
+url true héllo world
+revoked undefined
+changed NotReadableError The blob could not be read

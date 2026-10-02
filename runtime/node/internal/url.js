@@ -1212,7 +1212,12 @@ ObjectDefineProperties(URL, {
 });
 
 function installObjectURLMethods() {
-  const bindingBlob = internalBinding('blob');
+  // (Barm: the binding loads with the first blob: URL)
+  let binding;
+  const bindingBlob = {
+    storeDataObject: (...args) => (binding ??= internalBinding('blob')).storeDataObject(...args),
+    revokeObjectURL: (...args) => (binding ??= internalBinding('blob')).revokeObjectURL(...args),
+  };
 
   function createObjectURL(obj) {
     const cryptoRandom = lazyCryptoRandom();
@@ -1730,3 +1735,6 @@ module.exports = {
   hostlessProtocol,
   slashedProtocol,
 };
+
+// (Barm: Node.js's bootstrap installs these; here internal/url does, as it loads)
+installObjectURLMethods();

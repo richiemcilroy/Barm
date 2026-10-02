@@ -1,0 +1,6 @@
+import run from "node-blob"
+
+async function main() {
+  // Blob, File, file-backed blobs and blob: URLs
+  try await run()
+}
