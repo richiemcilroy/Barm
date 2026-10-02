@@ -99,7 +99,12 @@ function createRequire(filename) {
   function require(spec) {
     if (typeof spec !== 'string') throw new ERR_INVALID_ARG_TYPE('id', 'string', spec);
     const id = resolveId(spec, dir);
-    if (id === undefined) throw notFound(spec, from);
+    if (id === undefined) {
+      // not in the bundle: on disk where the program runs (a computed name, a native addon)
+      const found = registry()?.requireFrom?.(spec.startsWith('file://') ? decodeURIComponent(spec.slice(7)) : spec, from);
+      if (found !== undefined) return found.exports;
+      throw notFound(spec, from);
+    }
     return registry().load(id);
   }
   require.resolve = function resolve(spec) {

@@ -394,8 +394,9 @@ static void bm_napi_global_init(JSContextRef ctx) {
         "({"
         " wrapKey: Symbol('napi.wrap'), tagKey: Symbol('napi.typeTag'), finKey: Symbol('napi.finalizers'),"
         " define: function (o, k, desc) { Object.defineProperty(o, k, desc); },"
-        " accessor: function (o, k, get, set, e, c) { Object.defineProperty(o, k, { get: get, set: set, enumerable: e, configurable: c }); },"
-        " value: function (o, k, v, w, e, c) { Object.defineProperty(o, k, { value: v, writable: w, enumerable: e, configurable: c }); },"
+        /* (as V8's DefineOwnProperty under Node.js: a property that can't be redefined stays, no throw) */
+        " accessor: function (o, k, get, set, e, c) { Reflect.defineProperty(o, k, { get: get, set: set, enumerable: e, configurable: c }); },"
+        " value: function (o, k, v, w, e, c) { Reflect.defineProperty(o, k, { value: v, writable: w, enumerable: e, configurable: c }); },"
         " setHidden: function (o, k, v) { Object.defineProperty(o, k, { value: v, writable: true, configurable: true, enumerable: false }); },"
         " getHidden: function (o, k) { return Object.prototype.hasOwnProperty.call(o, k) ? o[k] : undefined; },"
         " delHidden: function (o, k) { delete o[k]; },"
@@ -2269,7 +2270,8 @@ static JSValueRef bm_napi_dlopen_fn(JSContextRef ctx, JSObjectRef f, JSObjectRef
     bm_napi_global_init(ctx);
     bm_str path = bm_js_to_str(a[0]);
     bm_napi_registered = NULL;
-    void *h = dlopen(path.p->data, RTLD_NOW | RTLD_LOCAL);
+    /* (lazy, as Node.js loads addons: a symbol the addon never calls needn't be there) */
+    void *h = dlopen(path.p->data, RTLD_LAZY | RTLD_LOCAL);
     if (!h) {
         const char *why = dlerror();
         bm_sb sb = {0};

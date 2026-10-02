@@ -689,7 +689,15 @@ var __barm_all_names, __barm_all_maps;
 Object.defineProperty(globalThis, "__barm_modules", { value: {
   get names() { if (!__barm_all_names) { __barm_all_names = []; for (var i = 0; i < __barm_count; i++) __barm_all_names.push(__barm_name(i)); } return __barm_all_names; },
   get maps() { if (!__barm_all_maps) { __barm_all_maps = []; for (var i = 0; i < __barm_count; i++) __barm_all_maps.push(__barm_map_of(i)); } return __barm_all_maps; },
-  load: __barm_load, loaded: function (id) { return __barm_cache[id]; } } });
+  load: __barm_load, loaded: function (id) { return __barm_cache[id]; },
+  // require(spec) from file `from` by every means the bundle has: a bundled module, or one on
+  // disk where the program runs (packages, JSON, CommonJS, native addons); undefined if none
+  requireFrom: function (spec, from) {
+    var to = __barm_find(spec, from);
+    if (to !== undefined) return { exports: __barm_load(to) };
+    var d = __barm_disk(spec, from);
+    return d === undefined ? undefined : { exports: d };
+  } } });
 globalThis.__barm_npm = function (spec) { return __barm_load(entries[spec]); };
 })();
 "#;
