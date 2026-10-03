@@ -437,6 +437,14 @@ NATIVE(n_kill) {
  * listener took it */
 static JSObjectRef bm_node_fatal_handler;
 
+/* typedArrayType(value) -> JavaScriptCore's JSTypedArrayType for it (0..11: Int8Array ..
+ * Float64Array, then ArrayBuffer; 12 none; later kinds after), without throwing */
+NATIVE(n_typed_array_type) {
+    UNUSED;
+    if (n < 1) return num(ctx, kJSTypedArrayTypeNone);
+    return num(ctx, JSValueGetTypedArrayType(ctx, a[0], NULL));
+}
+
 /* setFatalHandler(fn); fatal(err): report an uncaught exception from JavaScript */
 NATIVE(n_set_fatal_handler) {
     UNUSED;
@@ -3234,9 +3242,11 @@ NATIVE(n_fetch_read) {
 NATIVE(n_fetch_take) {
     UNUSED;
     bm_int id = bm_node_fetch_id(ctx, n, a);
-    bm_arr arr = id ? bm_native_fetchTake(id) : BM_EMPTY_ARR;
-    JSValueRef r = bm_js_bytes_copy(arr.p ? arr.p->data : (const unsigned char *)"", (size_t)arr.len);
-    bm_arr_release(arr, &bm_type_u8);
+    size_t len = 0;
+    const char *p = id ? bm_native_fetchData(id, &len) : NULL;
+    /* (one copy, straight into the engine's array) */
+    JSValueRef r = bm_js_bytes_copy(p ? p : "", len);
+    if (id) bm_native_fetchTaken(id);
     return r;
 }
 
@@ -3303,7 +3313,12 @@ extern void JSReportExtraMemoryCost(JSContextRef ctx, size_t size) __attribute__
  * next collection (a response read partway and dropped holds its buffer and connection until
  * then) */
 static void bm_node_fetch_bytes(size_t n) {
-    if (JSReportExtraMemoryCost && bm_js_ctx) JSReportExtraMemoryCost(bm_js_ctx, n);
+    /* (in 256 KB steps: the engine's accounting is slow per call) */
+    static size_t pending;
+    pending += n;
+    if (pending < (256 << 10)) return;
+    if (JSReportExtraMemoryCost && bm_js_ctx) JSReportExtraMemoryCost(bm_js_ctx, pending);
+    pending = 0;
 }
 
 static void bm_node_fetch_install(JSContextRef ctx, JSObjectRef native) {
@@ -3903,6 +3918,7 @@ void bm_node_install(JSContextRef ctx, JSObjectRef native) {
     bm_js_def(ctx, native, "cpuUsage", n_cpu_usage);
     bm_js_def(ctx, native, "ids", n_ids);
     bm_js_def(ctx, native, "kill", n_kill);
+    bm_js_def(ctx, native, "typedArrayType", n_typed_array_type);
     bm_js_def(ctx, native, "env", n_env);
     bm_js_def(ctx, native, "signal", n_signal);
     bm_js_def(ctx, native, "signalHandler", n_signal_handler);
