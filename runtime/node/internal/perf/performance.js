@@ -137,7 +137,9 @@ class Performance extends EventTarget {
   }
 
   now() {
-    validateThisInternalField(this, kPerformanceBrand, 'Performance');
+    // (Barm: the brand check inline, the validator only to throw; the clock is a native call)
+    if (typeof this !== 'object' || this === null || !(kPerformanceBrand in this))
+      validateThisInternalField(this, kPerformanceBrand, 'Performance');
     return now();
   }
 

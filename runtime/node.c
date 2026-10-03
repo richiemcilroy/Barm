@@ -303,6 +303,12 @@ NATIVE(n_hrtime) {
     return num(ctx, bm_performance_now() * 1e6);
 }
 
+/* nowMs() -> milliseconds since the program started (performance.now's clock) */
+NATIVE(n_now_ms) {
+    UNUSED;
+    return num(ctx, bm_performance_now());
+}
+
 /* write(fd, string | bytes): stdout through Barm's buffer (in order with the program's own
  * output), other fds directly */
 NATIVE(n_write) {
@@ -3918,6 +3924,7 @@ void bm_node_install(JSContextRef ctx, JSObjectRef native) {
     bm_js_def(ctx, native, "cpuUsage", n_cpu_usage);
     bm_js_def(ctx, native, "ids", n_ids);
     bm_js_def(ctx, native, "kill", n_kill);
+    bm_js_def(ctx, native, "nowMs", n_now_ms);
     bm_js_def(ctx, native, "typedArrayType", n_typed_array_type);
     bm_js_def(ctx, native, "env", n_env);
     bm_js_def(ctx, native, "signal", n_signal);
