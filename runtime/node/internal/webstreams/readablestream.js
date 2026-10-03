@@ -2882,6 +2882,8 @@ function readableByteStreamControllerFillHeadPullIntoDescriptor(
   desc.bytesFilled += size;
 }
 
+const kFreshChunk = Symbol.for('nodejs.barm.freshChunk');
+
 function readableByteStreamControllerEnqueue(controller, chunk) {
   const {
     closeRequested,
@@ -2897,7 +2899,9 @@ function readableByteStreamControllerEnqueue(controller, chunk) {
   if (closeRequested || stream[kState].state !== 'readable')
     return;
 
-  const transferredBuffer = ArrayBufferPrototypeTransfer(buffer);
+  // (Barm: a chunk a native source just made for this stream alone needn't be transferred:
+  // JavaScriptCore copies a buffer it handed native code a pointer to)
+  const transferredBuffer = chunk[kFreshChunk] === true ? buffer : ArrayBufferPrototypeTransfer(buffer);
 
   if (pendingPullIntos.length) {
     const firstPendingPullInto = pendingPullIntos[0];
