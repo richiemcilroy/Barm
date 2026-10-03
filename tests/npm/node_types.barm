@@ -1,0 +1,6 @@
+import run from "node-types"
+
+function main() {
+  // util.types brand checks
+  try run()
+}
