@@ -95,6 +95,16 @@ def footprint(pid, peak=False):
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
+def cpu(pid):
+    """The process's own CPU time in seconds (user + system; not its children, e.g. ffmpeg)."""
+    t = subprocess.run(["ps", "-o", "time=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    parts = [float(x) for x in t.replace("-", ":").split(":")]
+    secs = 0.0
+    for x in parts:
+        secs = secs * 60 + x
+    return secs
+
+
 def get(path, timeout=1):
     with OPENER.open(f"http://127.0.0.1:{PORT}{path}", timeout=timeout) as r:
         return r.status, r.read()
@@ -138,6 +148,7 @@ def run_once(name, secs):
     time.sleep(3)
     r["idle_mb"] = footprint(proc.pid)
     for attempt in range(2):
+        c0 = cpu(proc.pid)
         load = subprocess.run([os.path.join(OUT, "load"), "-c", "64", "-d", str(secs), "-j", f"http://127.0.0.1:{PORT}/health"],
                               capture_output=True, text=True)
         if load.returncode == 0:
@@ -146,10 +157,15 @@ def run_once(name, secs):
         time.sleep(1)
     h = json.loads(load.stdout)
     r["health_rps"], r["health_p50_us"], r["health_p99_us"] = h["rps"], h["p50_us"], h["p99_us"]
+    r["health_cpu_us"] = (cpu(proc.pid) - c0) * 1e6 / max(1, h["requests"])
+    c0 = cpu(proc.pid)
     p = client("/video/probe", {"videoUrl": VIDEO}, 4, secs)
     r["probe_ops"], r["probe_p50_ms"], r["probe_p99_ms"], r["probe_failed"] = p["ops"], p["p50"], p["p99"], p["failed"]
+    r["probe_cpu_us"] = (cpu(proc.pid) - c0) * 1e6 / max(1, p["ok"])
+    c0 = cpu(proc.pid)
     a = client("/audio/extract", {"videoUrl": VIDEO}, 2, secs)
     r["extract_ops"], r["extract_p50_ms"], r["extract_p99_ms"], r["extract_failed"] = a["ops"], a["p50"], a["p99"], a["failed"]
+    r["extract_cpu_us"] = (cpu(proc.pid) - c0) * 1e6 / max(1, a["ok"])
     time.sleep(3)
     r["after_mb"] = footprint(proc.pid)
     r["peak_mb"] = footprint(proc.pid, peak=True)
