@@ -642,6 +642,26 @@ static void bm_js_idle(bool deep) {
 #endif
 }
 
+/* BARM_JS_PROFILE=<file>: JavaScriptCore's sampling profiler runs from the start, and its stack
+ * traces (JSON) go to the file at exit, for scripts/js-profile.py (exported, not in headers) */
+extern bool JSContextGroupEnableSamplingProfiler(JSContextGroupRef group) __attribute__((weak_import));
+extern JSStringRef JSContextGroupTakeSamplesFromSamplingProfiler(JSContextGroupRef group) __attribute__((weak_import));
+
+static void bm_js_profile_write(void) {
+    const char *path = getenv("BARM_JS_PROFILE");
+    if (!path || !bm_js_ctx || !JSContextGroupTakeSamplesFromSamplingProfiler) return;
+    JSStringRef json = JSContextGroupTakeSamplesFromSamplingProfiler(JSContextGetGroup(bm_js_ctx));
+    if (!json) return;
+    size_t cap = JSStringGetMaximumUTF8CStringSize(json);
+    char *buf = malloc(cap);
+    size_t n = buf ? JSStringGetUTF8CString(json, buf, cap) : 0;
+    FILE *f = fopen(path, "w");
+    if (f && n) fwrite(buf, 1, n - 1, f);
+    if (f) fclose(f);
+    free(buf);
+    JSStringRelease(json);
+}
+
 JSContextRef bm_js(void) {
     if (bm_js_ctx) return bm_js_ctx;
     double t0 = bm_performance_now();
@@ -667,6 +687,8 @@ JSContextRef bm_js(void) {
         if (set[i]) unsetenv(options[i][0]);
     bm_js_trace_phase("created the JavaScript context", t0);
     bm_js_ctx = ctx;
+    if (getenv("BARM_JS_PROFILE") && JSContextGroupEnableSamplingProfiler && JSContextGroupEnableSamplingProfiler(JSContextGetGroup(ctx)))
+        atexit(bm_js_profile_write);
 #ifdef __APPLE__
     bm_loop_host_due = bm_js_host_due;
     bm_loop_host_run = bm_js_host_run;
