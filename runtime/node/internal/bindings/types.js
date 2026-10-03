@@ -8,15 +8,31 @@ const { apply } = Reflect;
 const getPrototypeOf = Object.getPrototypeOf;
 const toString = Object.prototype.toString;
 
-function branded(method) {
+function brandOk(method, value) {
+  try {
+    apply(method, value, []);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// (a brand check throws for every "no", and a throw costs microseconds: one only for values that
+// look like the kind, by prototype or tag, so most answers are quick; a value of the kind from
+// another realm with its tag changed is the one that looks otherwise)
+function branded(method, Ctor, tag) {
   return (value) => {
     if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return false;
-    try {
-      apply(method, value, []);
-      return true;
-    } catch {
-      return false;
+    if (Ctor !== undefined) {
+      let looks;
+      try {
+        looks = value instanceof Ctor || apply(toString, value, []) === tag;
+      } catch {
+        looks = false;   // (a revoked proxy)
+      }
+      if (!looks) return false;
     }
+    return brandOk(method, value);
   };
 }
 
@@ -46,23 +62,36 @@ function hasProto(value, proto) {
   return false;
 }
 
-const boxed = (valueOf) => {
-  const check = branded(valueOf);
+const boxed = (C, tag) => {
+  const check = branded(C.prototype.valueOf, C, tag);
   return (v) => typeof v === 'object' && check(v);
 };
-const isBigIntObject = boxed(BigInt.prototype.valueOf);
-const isBooleanObject = boxed(Boolean.prototype.valueOf);
-const isNumberObject = boxed(Number.prototype.valueOf);
-const isStringObject = boxed(String.prototype.valueOf);
-const isSymbolObject = boxed(Symbol.prototype.valueOf);
-const isMap = branded(Object.getOwnPropertyDescriptor(Map.prototype, 'size').get);
-const isSet = branded(Object.getOwnPropertyDescriptor(Set.prototype, 'size').get);
-const isArrayBuffer = branded(arrayBufferByteLength);
-const isSharedArrayBuffer = sharedByteLength ? branded(sharedByteLength) : () => false;
+const isBigIntObject = boxed(BigInt, '[object BigInt]');
+const isBooleanObject = boxed(Boolean, '[object Boolean]');
+const isNumberObject = boxed(Number, '[object Number]');
+const isStringObject = boxed(String, '[object String]');
+const isSymbolObject = boxed(Symbol, '[object Symbol]');
+const isMap = branded(Object.getOwnPropertyDescriptor(Map.prototype, 'size').get, Map, '[object Map]');
+const isSet = branded(Object.getOwnPropertyDescriptor(Set.prototype, 'size').get, Set, '[object Set]');
+
+// ArrayBuffer (1) or SharedArrayBuffer (2), else 0: the engine says which objects are either,
+// without a throw (globalThis.__barm_native.typedArrayType: 9), and the likelier getter says which
+const typedArrayType = globalThis.__barm_native?.typedArrayType;
+function arrayBufferKind(v) {
+  if (v === null || (typeof v !== 'object' && typeof v !== 'function')) return 0;
+  if (typedArrayType !== undefined && typedArrayType(v) !== 9) return 0;
+  const sharedFirst = sharedByteLength !== null && v instanceof SharedArrayBuffer;
+  if (brandOk(sharedFirst ? sharedByteLength : arrayBufferByteLength, v)) return sharedFirst ? 2 : 1;
+  if (sharedFirst) return brandOk(arrayBufferByteLength, v) ? 1 : 0;
+  return sharedByteLength !== null && brandOk(sharedByteLength, v) ? 2 : 0;
+}
+const isArrayBuffer = (v) => arrayBufferKind(v) === 1;
+const isRegExpBranded = branded(Object.getOwnPropertyDescriptor(RegExp.prototype, 'source').get, RegExp, '[object RegExp]');
+const isSharedArrayBuffer = (v) => arrayBufferKind(v) === 2;
 
 module.exports = {
   isExternal: () => false,
-  isDate: branded(Date.prototype.getTime),
+  isDate: branded(Date.prototype.getTime, Date, '[object Date]'),
   isArgumentsObject: (v) => v !== null && typeof v === 'object' && apply(toString, v, []) === '[object Arguments]',
   isBigIntObject,
   isBooleanObject,
@@ -77,7 +106,7 @@ module.exports = {
     return apply(toString, v, []) === '[object Error]' && v instanceof Error;
   },
   // (the source getter throws for anything but a RegExp, without running it)
-  isRegExp: (v) => v !== RegExp.prototype && branded(Object.getOwnPropertyDescriptor(RegExp.prototype, 'source').get)(v),
+  isRegExp: (v) => v !== RegExp.prototype && isRegExpBranded(v),
   isAsyncFunction: (v) => typeof v === 'function' && (hasProto(v, AsyncFunction) || hasProto(v, AsyncGeneratorFunction)),
   isGeneratorFunction: (v) => typeof v === 'function' && (hasProto(v, GeneratorFunction) || hasProto(v, AsyncGeneratorFunction)),
   isGeneratorObject: (v) => v !== null && typeof v === 'object' && (hasProto(v, Generator) || hasProto(v, AsyncGenerator)),
@@ -87,12 +116,12 @@ module.exports = {
   isSet,
   isMapIterator: (v) => v !== null && typeof v === 'object' && getPrototypeOf(v) === mapIteratorProto,
   isSetIterator: (v) => v !== null && typeof v === 'object' && getPrototypeOf(v) === setIteratorProto,
-  isWeakMap: branded(WeakMap.prototype.has),
-  isWeakSet: branded(WeakSet.prototype.has),
+  isWeakMap: branded(WeakMap.prototype.has, WeakMap, '[object WeakMap]'),
+  isWeakSet: branded(WeakSet.prototype.has, WeakSet, '[object WeakSet]'),
   isArrayBuffer,
-  isDataView: branded(dataViewByteLength),
+  isDataView: (v) => ArrayBuffer.isView(v) && typedArrayKind(v) === undefined && brandOk(dataViewByteLength, v),
   isSharedArrayBuffer,
-  isAnyArrayBuffer: (v) => isArrayBuffer(v) || isSharedArrayBuffer(v),
+  isAnyArrayBuffer: (v) => arrayBufferKind(v) !== 0,
   isProxy: () => false, // not visible from JS
   isModuleNamespaceObject: (v) => v !== null && typeof v === 'object' && getPrototypeOf(v) === null && apply(toString, v, []) === '[object Module]',
   // (the TypedArray checks Node.js does in JS, via the tag getter, are in internal/util/types)
