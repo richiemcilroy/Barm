@@ -62,12 +62,91 @@ function serialize(url) {
   return href;
 }
 
+// The common case without the state machine: an http, https, ws or wss URL that's already
+// what the parser would make of it, save the case of its scheme and host and a default port:
+// an ASCII host (not punycode, and a number only as a canonical IPv4 address), no userinfo, a
+// path without dot segments, and nothing to percent-encode. Anything else returns undefined and
+// takes the full parser; what this returns is what that would.
+const FAST = /^([A-Za-z]+):\/\/([A-Za-z0-9.-]+)(?::([0-9]{1,5}))?(\/[!$%&'()*+,\-./0-9:;=@A-Z[\]_a-z|~]*)?(\?[!$%&()*+,\-./0-9:;=?@A-Z[\\\]^_`a-z{|}~]*)?(#[!#$%&'()*+,\-./0-9:;=?@A-Z[\\\]^_a-z{|}~]*)?$/;
+const DEFAULT_PORTS = { __proto__: null, http: 80, https: 443, ws: 80, wss: 443 };
+const IPV4 = /^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}$/;
+const DOT_SEGMENT = /\/(\.|%2e){1,2}(\/|$)/i;
+
+function fastParse(input) {
+  if (input.length > 2048) return undefined;
+  const m = FAST.exec(input);
+  if (m === null) return undefined;
+  const scheme = m[1].toLowerCase();
+  const defaultPort = DEFAULT_PORTS[scheme];
+  if (defaultPort === undefined) return undefined;
+  const host = m[2].toLowerCase();
+  // (a host that ends in a number is an IPv4 address: only the canonical form is as it reads)
+  const labels = host.split('.');
+  let last = labels[labels.length - 1];
+  if (last === '' && labels.length > 1) last = labels[labels.length - 2];
+  if (last === '' || /^(0x|[0-9])/.test(last) && /^(0x[0-9a-f]*|[0-9]+)$/.test(last)) {
+    if (!IPV4.test(host)) return undefined;
+  }
+  if (host.includes('xn--')) return undefined;
+  let port = null;
+  if (m[3] !== undefined) {
+    const n = +m[3];
+    if (n > 65535) return undefined;
+    if (n !== defaultPort) port = n;
+  }
+  const path = m[4] ?? '/';
+  if (DOT_SEGMENT.test(path)) return undefined;
+  const query = m[5];
+  const fragment = m[6];
+  const c = urlComponents;
+  const protocolEnd = scheme.length + 1;
+  const hostStart = protocolEnd + 2;
+  const hostEnd = hostStart + host.length;
+  let href = `${scheme}://${host}`;
+  c[0] = protocolEnd;
+  c[1] = hostStart;
+  c[2] = hostStart;
+  c[3] = hostEnd;
+  if (port !== null) {
+    href += `:${port}`;
+    c[4] = port;
+  } else {
+    c[4] = omitted;
+  }
+  c[5] = href.length;
+  href += path;
+  if (query !== undefined) {
+    c[6] = href.length;
+    href += query;
+  } else {
+    c[6] = omitted;
+  }
+  if (fragment !== undefined) {
+    c[7] = href.length;
+    href += fragment;
+  } else {
+    c[7] = omitted;
+  }
+  c[8] = schemeTypes[scheme];
+  return href;
+}
+
 function parseBase(base) {
   if (base === undefined) return null;
   return usm.basicURLParse(base);
 }
 
+// (a path against a base the fast path takes, as servers resolve a request's target)
+function fastParseRelative(input, base) {
+  if (input.charCodeAt(0) !== 47 || input.charCodeAt(1) === 47 || input.charCodeAt(1) === 92) return undefined;
+  const b = fastParse(base);
+  if (b === undefined) return undefined;
+  return fastParse(b.slice(0, urlComponents[5]) + input);
+}
+
 function parse(input, base, raiseException) {
+  const href = base === undefined ? fastParse(`${input}`) : fastParseRelative(`${input}`, `${base}`);
+  if (href !== undefined) return href;
   const parsedBase = parseBase(base);
   const url = base !== undefined && parsedBase === null ? null : usm.basicURLParse(input, { baseURL: parsedBase });
   if (url === null) {
@@ -78,6 +157,7 @@ function parse(input, base, raiseException) {
 }
 
 function canParse(input, base) {
+  if ((base === undefined ? fastParse(`${input}`) : fastParseRelative(`${input}`, `${base}`)) !== undefined) return true;
   const parsedBase = parseBase(base);
   if (base !== undefined && parsedBase === null) return false;
   return usm.basicURLParse(input, { baseURL: parsedBase }) !== null;
@@ -222,6 +302,8 @@ function format(href, fragment, unicode, search, auth) {
 
 module.exports = {
   urlComponents,
+  _barmFastParse: fastParse,
+  _barmFastParseRelative: fastParseRelative,
   parse,
   canParse,
   pathToFileURL,
