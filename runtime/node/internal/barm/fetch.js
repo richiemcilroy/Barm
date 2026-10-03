@@ -15,6 +15,7 @@ const kGuard = Symbol('kGuard');
 const kBody = Symbol('kBody');
 const kState = Symbol('kState');
 const kDisturbed = Symbol.for('nodejs.stream.disturbed');
+const kFreshChunk = Symbol.for('nodejs.barm.freshChunk');   // (see internal/webstreams/readablestream)
 
 let ReadableStreamClass;
 function ReadableStream() {
@@ -369,25 +370,32 @@ class BodyState {
   }
 }
 
-function fetchedStream(handle, signal) {
+const noop = () => {};
+
+function fetchedStream(handle, signal, done = noop) {
   return new (ReadableStream())({
     type: 'bytes',
     pull(controller) {
       return new Promise((resolve, reject) => {
         native.read(handle, (n) => {
           if (n > 0) {
-            controller.enqueue(native.take(handle));
+            const chunk = native.take(handle);
+            chunk[kFreshChunk] = true;
+            controller.enqueue(chunk);
             resolve();
           } else if (n === 0) {
+            done();
             controller.close();
             resolve();
           } else {
+            done();
             reject(fetchError(handle, n, signal));
           }
         });
       });
     },
     cancel() {
+      done();
       native.abort(handle);
     },
   }, { highWaterMark: 0 });
@@ -397,7 +405,7 @@ function bodyStream(state) {
   if (state.stream) return state.stream;
   const b = state.body;
   if (state.fetched) {
-    state.stream = fetchedStream(state.fetched.handle, state.fetched.signal);
+    state.stream = fetchedStream(state.fetched.handle, state.fetched.signal, state.fetched.done);
   } else if (b === null) {
     return null;
   } else if (b instanceof ReadableStream()) {
@@ -423,8 +431,9 @@ async function consume(owner, kind) {
   state.used = true;
   let bytes;
   if (state.fetched && !state.stream) {
-    const { handle, signal } = state.fetched;
+    const { handle, signal, done } = state.fetched;
     const r = await new Promise((resolve) => native.bodyWait(handle, resolve));
+    done?.();
     if (r !== 0) throw fetchError(handle, r, signal);
     bytes = native.body(handle);
   } else if (state.stream) {
@@ -710,11 +719,21 @@ async function fetch(input, init = undefined) {
   if (body !== null && !headers.has('content-length')) headers.set('content-length', `${body.byteLength}`);
   const redirect = s.redirect === 'manual' ? 1 : s.redirect === 'error' ? 2 : 0;
   const handle = native.start(s.method, s.url, headersWire(headers), body, redirect, 1, null, null, null);
-  const onAbort = () => native.abort(handle);
-  signal?.addEventListener('abort', onAbort, { once: true });
+  // (the signal can outlive the request by far, as AbortSignal.timeout's does: its listener holds
+  // the request only weakly, and goes once the body is done)
+  let done = noop;
+  if (signal) {
+    const ref = new WeakRef(handle);
+    const onAbort = () => {
+      const h = ref.deref();
+      if (h !== undefined) native.abort(h);
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    done = () => signal.removeEventListener('abort', onAbort);
+  }
   const result = await new Promise((resolve) => native.wait(handle, resolve));
   if (result !== 0) {
-    signal?.removeEventListener('abort', onAbort);
+    done();
     throw fetchError(handle, result, signal);
   }
   const [status, statusText, wire, finalUrl, redirected] = native.info(handle);
@@ -722,7 +741,8 @@ async function fetch(input, init = undefined) {
   response[kState] = { status, statusText, type: 'basic', url: finalUrl, redirected };
   response[kHeaders] = headersFromWire(wire, 'immutable');
   const noBody = s.method === 'HEAD' || NULL_BODY_STATUS.has(status);
-  response[kBody] = new BodyState(noBody ? null : undefined, noBody ? null : { handle, signal });
+  if (noBody) done();
+  response[kBody] = new BodyState(noBody ? null : undefined, noBody ? null : { handle, signal, done });
   if (noBody) response[kBody].body = null;
   return response;
 }

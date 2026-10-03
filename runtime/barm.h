@@ -542,6 +542,8 @@ bm_str bm_native_fetchErrorCode(bm_int id);
 bm_str bm_native_fetchErrorMessage(bm_int id);
 void bm_native_fetchAbort(bm_int id);
 void bm_native_fetchFree(bm_int id);
+const char *bm_native_fetchData(bm_int id, size_t *len);   /* the bytes that have arrived (NULL: none), then: */
+void bm_native_fetchTaken(bm_int id);                      /* they've been read */
 extern void (*bm_fetch_on_bytes)(size_t n);   /* response bytes as they arrive (the host's GC accounting) */
 void bm_native_timerUnref(bm_int id);
 

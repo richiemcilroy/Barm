@@ -5610,7 +5610,7 @@ static void bm_fr_head_ready(bm_fr *r) {
 /* A body streamed as it arrives: at most this much waits for the reader before the socket pauses
  * (a reader that stops partway and drops the body leaves no more than this held until it's
  * collected). */
-#define BM_STREAM_HIGH (1 << 20)
+#define BM_STREAM_HIGH (256 << 10)
 
 /* Set by the host (runtime/node.c): bytes of response bodies as they arrive, which the
  * JavaScript objects reading them hold until they're collected. */
@@ -6006,8 +6006,9 @@ static bool bm_fr_head(bm_fr *r, const char *p, size_t n) {
     r->discard = r->redirect_mode != BM_FETCH_MANUAL && bm_redirect_status(s) && r->location.len > 0;
     if (!r->discard && length > 0 && r->state == BM_FR_FIXED) {
         if (length > INT32_MAX) return false;
-        size_t most = r->whole ? (64 << 20) : BM_STREAM_HIGH;   /* (until it's known to be read whole) */
-        bm_sb_grow(bm_fr_sink(r), (size_t)length < most ? (size_t)length : most);
+        /* (sized for the whole body once it's known to be read whole; read as a stream, or
+         * not read yet, it grows as bytes come) */
+        if (r->whole) bm_sb_grow(bm_fr_sink(r), (size_t)length < ((size_t)64 << 20) ? (size_t)length : ((size_t)64 << 20));
     }
     return true;
 }
@@ -6695,7 +6696,8 @@ static void bm_fc_ready(bm_io *h, bool readable, bool writable, bool broken) {
     for (;;) {
         /* a known-length body goes straight into its buffer */
         if (r->state == BM_FR_FIXED && c->in_off == c->in_len && !r->discard) {
-            size_t want = (size_t)(r->remaining < (1 << 20) ? r->remaining : (1 << 20));
+            size_t step = r->whole ? (size_t)1 << 20 : BM_STREAM_HIGH;
+            size_t want = (size_t)r->remaining < step ? (size_t)r->remaining : step;
             bm_sb *sink = bm_fr_sink(r);
             if (sink->cap - sink->len < want) bm_sb_grow(sink, sink->len + want);
             long n = bm_fc_recv(c, sink->data + sink->len, want);
@@ -6931,6 +6933,14 @@ bm_promise *bm_native_fetchRead(bm_int id) {
     return bm_fr_promise(&r->read_p, r->result == 1, r->result);
 }
 
+/* The body bytes that have arrived and haven't been taken (*len of them; NULL if none): read
+ * them, then bm_native_fetchTaken. */
+const char *bm_native_fetchData(bm_int id, size_t *len) {
+    bm_fr *r = bm_fr_get(id);
+    *len = r ? r->rbody.len : 0;
+    return r && r->rbody.len ? r->rbody.data : NULL;
+}
+
 /* The body bytes that have arrived (and haven't been taken). */
 bm_arr bm_native_fetchTake(bm_int id) {
     bm_fr *r = bm_fr_get(id);
@@ -6938,10 +6948,23 @@ bm_arr bm_native_fetchTake(bm_int id) {
     bm_arr a = bm_arr_with_capacity(&bm_type_u8, (bm_int)r->rbody.len);
     if (r->rbody.len) memcpy(bm_arr_data(a), r->rbody.data, r->rbody.len);
     a.len = (bm_int)r->rbody.len;
+    bm_native_fetchTaken(id);
+    return a;
+}
+
+/* What bm_native_fetchData gave has been read: room for more. */
+void bm_native_fetchTaken(bm_int id) {
+    bm_fr *r = bm_fr_get(id);
+    if (!r) return;
     r->rbody.len = 0;
+    /* (the whole body has been taken: its buffer goes now) */
+    if (r->result != 1 && !r->draining && r->raw_off >= r->raw.len) {
+        bm_sb_free(&r->rbody);
+        return;
+    }
     /* decode what waited for room (while it's still more than the reader wants, stay paused) */
-    if (r->draining) { bm_fr_drain(r, false); return a; }
-    if (r->raw_off < r->raw.len && r->result == 1 && (!bm_fr_decode(r, false) || r->raw_off < r->raw.len)) return a;
+    if (r->draining) { bm_fr_drain(r, false); return; }
+    if (r->raw_off < r->raw.len && r->result == 1 && (!bm_fr_decode(r, false) || r->raw_off < r->raw.len)) return;
     if (r->paused && r->c) {
         /* the reader caught up: read on (what's buffered in TLS or unparsed won't raise an event) */
         r->paused = false;
@@ -6949,7 +6972,6 @@ bm_arr bm_native_fetchTake(bm_int id) {
         bm_fc_interest(c, true, false);
         bm_fc_ready(&c->io, true, false, false);
     }
-    return a;
 }
 
 /* Response.clone(): one more reader will take the whole body. */
@@ -7024,6 +7046,10 @@ void bm_native_fetchAbort(bm_int id) {
 unlinked:
     r->code = "AbortError";
     bm_fr_settle(r, -2);
+    /* (nothing will read what arrived: its buffers go now, not when the request is freed) */
+    bm_sb_free(&r->rbody);
+    bm_sb_free(&r->raw);
+    r->raw_off = 0;
 }
 
 void bm_native_fetchFree(bm_int id) {
