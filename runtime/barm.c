@@ -2668,13 +2668,32 @@ double bm_date_now(void) {
     return (double)tv.tv_sec * 1000.0 + (double)(tv.tv_usec / 1000);
 }
 
+#ifndef __APPLE__
 static struct timespec bm_start_time;
+#endif
+#ifdef __APPLE__
+#include <mach/mach_time.h>
+/* (mach_absolute_time reads the commpage, ~10 ns; CLOCK_MONOTONIC adds the boot time to it) */
+double bm_performance_now(void) {
+    static uint64_t start;
+    static double ms_per_tick;
+    uint64_t t = mach_absolute_time();
+    if (BM_UNLIKELY(ms_per_tick == 0)) {
+        mach_timebase_info_data_t tb;
+        mach_timebase_info(&tb);
+        ms_per_tick = (double)tb.numer / (double)tb.denom / 1e6;
+        start = t;
+    }
+    return (double)(t - start) * ms_per_tick;
+}
+#else
 double bm_performance_now(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     if (bm_start_time.tv_sec == 0 && bm_start_time.tv_nsec == 0) bm_start_time = ts;
     return (double)(ts.tv_sec - bm_start_time.tv_sec) * 1e3 + (double)(ts.tv_nsec - bm_start_time.tv_nsec) / 1e6;
 }
+#endif
 
 void bm_write_stdout(bm_str s) { bm_out_write(s.p->data, (size_t)s.p->len); }
 
@@ -6696,7 +6715,7 @@ static void bm_fc_ready(bm_io *h, bool readable, bool writable, bool broken) {
     for (;;) {
         /* a known-length body goes straight into its buffer */
         if (r->state == BM_FR_FIXED && c->in_off == c->in_len && !r->discard) {
-            size_t step = r->whole ? (size_t)1 << 20 : BM_STREAM_HIGH;
+            size_t step = r->whole ? (size_t)1 << 20 : r->streaming ? (size_t)64 << 10 : BM_STREAM_HIGH;
             size_t want = (size_t)r->remaining < step ? (size_t)r->remaining : step;
             bm_sb *sink = bm_fr_sink(r);
             if (sink->cap - sink->len < want) bm_sb_grow(sink, sink->len + want);
@@ -6710,6 +6729,9 @@ static void bm_fc_ready(bm_io *h, bool readable, bool writable, bool broken) {
                 if (r->result != 1) return; /* the body couldn't be decoded */
                 if (r->remaining == 0) { r->state = BM_FR_DONE; break; }
                 if (full) { r->paused = true; bm_fc_interest(c, false, false); break; }
+                /* a stream's reader gets each 64 KB as it arrives, before more is read (the socket
+                 * raises its next event for the rest; TLS's buffered records wouldn't) */
+                if (r->streaming && !c->tls && r->rbody.len >= ((size_t)64 << 10)) break;
                 /* TLS returns a record at a time: read until it has no more */
                 if ((size_t)n == want || c->tls) continue;
                 break;

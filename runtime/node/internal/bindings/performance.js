@@ -53,7 +53,7 @@ milestones[4] = 0;
 milestones[5] = 0;
 
 // milliseconds since the time origin
-const now = () => hrtime() / 1e6;
+const now = native?.nowMs ?? (() => hrtime() / 1e6);
 
 const kAdd = Symbol('kAdd');
 
