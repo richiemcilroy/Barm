@@ -6874,7 +6874,11 @@ static bm_fr *bm_fr_get(bm_int id) {
 bm_int bm_native_fetchStart(bm_str method, bm_str url, bm_str headers, bm_str body, bm_int redirect, bm_int flags, bm_str ca, bm_str unix_path, bm_str proxy) {
     bm_io_after_batch = bm_fc_reap;
     bm_io_after_fork = bm_fetch_after_fork;
-    signal(SIGPIPE, SIG_IGN);
+    static bool sigpipe_ignored;   /* (once: it's a syscall) */
+    if (!sigpipe_ignored) {
+        signal(SIGPIPE, SIG_IGN);
+        sigpipe_ignored = true;
+    }
     if (bm_fr_nfree == 0) {
         bm_int cap = bm_fr_cap ? bm_fr_cap * 2 : 16;
         bm_fr_table = bm_realloc(bm_fr_table, (size_t)cap * sizeof *bm_fr_table);
