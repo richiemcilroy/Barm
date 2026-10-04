@@ -26,6 +26,9 @@ const kFlushQueued = Symbol('kFlushQueued');
 const kDone = Symbol('kDone');
 const kAddress = Symbol('kAddress');
 
+// sockets of requests being answered, by native id (a client that leaves is told to its socket)
+const live = new Map();
+
 // the request's socket: writes go to the native server for request id
 class NativeSocket extends EventEmitter {
   // (one per request: what doesn't change is on the prototype, so each holds only its own state)
@@ -88,7 +91,29 @@ class NativeSocket extends EventEmitter {
 
   // the response is complete: what's gathered goes with the end (2: then close the connection)
   _barmEnd(close) {
+    live.delete(this[kId]);
     this._barmFlush(close ? 2 : 1);
+  }
+
+  // the client went away before the response was done: as Node.js's server does when a
+  // connection closes, the request is destroyed (the response then closes with the socket)
+  _barmGone() {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.writable = false;
+    // (the native request is answered now, with nothing: what the response writes later goes
+    // nowhere)
+    if (!this[kDone]) {
+      this[kDone] = true;
+      this[kChunks] = null;
+      native.write(this[kId], null, 2, false);
+    }
+    const req = this._httpMessage?.req;
+    if (req && !req.destroyed) {
+      const { ConnResetException } = require('internal/errors');
+      req.destroy(new ConnResetException('aborted'));
+    }
+    this.emit('close', false);
   }
 
   end(data, encoding, callback) {
@@ -276,6 +301,7 @@ function install(Server, { IncomingMessage, kServerResponse, kIncomingMessage, k
       }
     }
     const socket = new NativeSocket(server, id);
+    live.set(id, socket);
     const req = new (server[kIncomingMessage] ?? IncomingMessage)(socket);
     fill(req, method, target, raw, http10);
     if (body) req.push(Buffer.from(body.buffer, body.byteOffset, body.byteLength));
@@ -341,6 +367,11 @@ function install(Server, { IncomingMessage, kServerResponse, kIncomingMessage, k
     if (!eligible) return netListen.apply(this, args);
     const bindHost = host === undefined || host === null ? '::' : host;
     const { callFromHost } = require('internal/bindings/task_queue');
+    // (one hook for every server; a Bun.serve server shares it through bun.js's)
+    if (!goneHooked && typeof native.onGone === 'function') {
+      goneHooked = true;
+      hookGone(callFromHost);
+    }
     const id = native.listen(Number(port ?? 0), bindHost, true, (rid, method, target, wire, body, http10) => {
       callFromHost(onRequest, this, rid, method, target, wire, body, http10);
     });
@@ -379,4 +410,20 @@ function install(Server, { IncomingMessage, kServerResponse, kIncomingMessage, k
   };
 }
 
-module.exports = { install, NativeSocket };
+// the native server's one gone hook, shared with Bun.serve (bun.js): each side answers for its
+// own requests
+let goneHooked = false;
+const goneHandlers = [(id) => {
+  const socket = live.get(id);
+  if (socket === undefined) return false;
+  live.delete(id);
+  socket._barmGone();
+  return true;
+}];
+function hookGone(callFromHost) {
+  native.onGone((id) => callFromHost(() => {
+    for (const h of goneHandlers) if (h(id)) return;
+  }));
+}
+
+module.exports = { install, NativeSocket, goneHandlers, hookGone, isGoneHooked: () => goneHooked, setGoneHooked() { goneHooked = true; } };

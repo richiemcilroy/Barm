@@ -3696,8 +3696,31 @@ typedef struct bm_http_req {
     bm_int id;            /* 0: answered already, waiting for the ones ahead of it */
     bool keep, head, ready;
     bool streaming;       /* raw output so far goes out as soon as it's this request's turn */
+    bool gone;            /* its client has gone (told bm_http_on_gone) */
     bm_sb out;            /* the response, once ready */
 } bm_http_req;
+
+/* Deferred requests whose clients went away (the connection closed or reset, or the client ended
+ * its side) before they were answered: bm_http_on_gone hears each id once, after the event batch.
+ * Their responses can still be given; they go nowhere. */
+void (*bm_http_on_gone)(bm_int id);
+static bm_int *bm_http_gone;
+static size_t bm_http_ngone, bm_http_gone_cap;
+
+static void bm_http_note_gone(bm_http_req *r) {
+    if (!r->id || r->gone || !bm_http_on_gone) return;
+    r->gone = true;
+    if (bm_http_ngone == bm_http_gone_cap) {
+        bm_http_gone_cap = bm_http_gone_cap ? bm_http_gone_cap * 2 : 16;
+        bm_http_gone = bm_realloc(bm_http_gone, bm_http_gone_cap * sizeof *bm_http_gone);
+    }
+    bm_http_gone[bm_http_ngone++] = r->id;
+}
+
+static void bm_http_flush_gone(void) {
+    for (size_t i = 0; i < bm_http_ngone; i++) bm_http_on_gone(bm_http_gone[i]);
+    bm_http_ngone = 0;
+}
 
 /* Pipelined requests handled ahead of a slow one, per connection, before reading pauses. */
 #define BM_HTTP_MAX_PENDING 64
@@ -4310,6 +4333,7 @@ static void bm_http_release(bm_http_conn *c, bool close_fd) {
     for (bm_http_req *r = c->pend_head, *next; r; r = next) {
         next = r->next;
         if (r->id) {
+            bm_http_note_gone(r);
             r->c = NULL;
         } else {
             bm_sb_free(&r->out);
@@ -4474,7 +4498,12 @@ static bool bm_http_service(bm_http_conn *c, bool readable, bool broken) {
             /* Level-triggered: a short read means the socket is drained, so skip the read that
              * would only return EAGAIN (one syscall per request saved). */
             if (r > 0) { c->in_len += (size_t)r; if ((size_t)r == room && c->in_len < BM_HTTP_MAX_BODY + BM_HTTP_MAX_HEAD) continue; break; }
-            if (r == 0) { c->eof = true; break; }
+            if (r == 0) {
+                c->eof = true;
+                /* (as Node.js's http and Bun do: a client that ends its side has gone) */
+                for (bm_http_req *q = c->pend_head; q; q = q->next) bm_http_note_gone(q);
+                break;
+            }
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
             if (errno == EINTR) continue;
             ok = false;
@@ -4635,6 +4664,7 @@ static void bm_http_loop(void) {
             }
         }
         if (bm_io_after_batch) bm_io_after_batch();
+        if (bm_http_ngone) bm_http_flush_gone();
         bm_run_microtasks();
         bm_loop_run_check();
         if (worked) bm_loop_work(bm_loop_update());

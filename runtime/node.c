@@ -3465,6 +3465,23 @@ NATIVE(n_http_buffered) {
     return num(ctx, (double)bm_native_httpBuffered((bm_int)arg_num(ctx, n, a, 0, 0)));
 }
 
+/* httpOnGone(fn): fn(id) for each deferred request whose client goes away before it's answered */
+static JSObjectRef bm_node_http_gone_fn;
+static void bm_node_http_gone(bm_int id) {
+    if (!bm_node_http_gone_fn) return;
+    JSValueRef arg = JSValueMakeNumber(bm_js_ctx, (double)id);
+    bm_node_call_args(bm_node_http_gone_fn, 1, &arg);
+}
+
+NATIVE(n_http_on_gone) {
+    UNUSED;
+    if (bm_node_http_gone_fn) JSValueUnprotect(ctx, bm_node_http_gone_fn);
+    bm_node_http_gone_fn = n > 0 && JSValueIsObject(ctx, a[0]) ? (JSObjectRef)a[0] : NULL;
+    if (bm_node_http_gone_fn) JSValueProtect(ctx, bm_node_http_gone_fn);
+    bm_http_on_gone = bm_node_http_gone_fn ? bm_node_http_gone : NULL;
+    return undef(ctx);
+}
+
 /* httpFd(id) -> the connection's fd (-1 if it's gone) */
 NATIVE(n_http_fd) {
     UNUSED;
@@ -3501,6 +3518,7 @@ static void bm_node_http_install(JSContextRef ctx, JSObjectRef native) {
     bm_js_def(ctx, h, "listen", n_http_listen);
     bm_js_def(ctx, h, "write", n_http_write);
     bm_js_def(ctx, h, "fd", n_http_fd);
+    bm_js_def(ctx, h, "onGone", n_http_on_gone);
     bm_js_def(ctx, h, "buffered", n_http_buffered);
     bm_js_def(ctx, h, "takeover", n_http_takeover);
     bm_js_def(ctx, h, "port", n_http_port);

@@ -512,6 +512,7 @@ void bm_native_httpRespondTo(bm_int id, bm_int status, bm_str headers, bm_str bo
  * HTTP version, and taking its connection over as a raw socket (an upgrade). */
 void bm_native_httpWriteRaw(bm_int id, const char *p, size_t n, int end);
 int bm_native_httpFd(bm_int id);
+extern void (*bm_http_on_gone)(bm_int id);   /* a deferred request's client went away (see barm.c) */
 /* bytes of deferred request id's response not yet taken by the socket (its own, and what's
  * queued ahead of it on the connection), or -1 if the client has gone */
 int64_t bm_native_httpBuffered(bm_int id);

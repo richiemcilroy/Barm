@@ -630,6 +630,18 @@ const HIGH_WATER = 1 << 20;
 
 let callFromHost;
 const requestIds = new WeakMap();
+// requests being answered, by native id: their clients can go away (http.onGone)
+const live = new Map();
+let goneHooked = false;
+
+function onGone(id) {
+  const req = live.get(id);
+  if (req === undefined) return false;
+  live.delete(id);
+  const { DOMException } = require('internal/bindings/messaging');
+  fetchApi().internals.abortRequest(req, new DOMException('The connection was closed', 'AbortError'));
+  return true;
+}
 
 function serve(options) {
   if (options === null || typeof options !== 'object') throw new TypeError('Bun.serve expects an object');
@@ -654,6 +666,15 @@ class Server {
     const hostname = options.hostname ?? '0.0.0.0';
     const bind = hostname === '0.0.0.0' || hostname === 'localhost' ? '::' : hostname;
     callFromHost ??= require('internal/bindings/task_queue').callFromHost;
+    if (!goneHooked && typeof http.onGone === 'function') {
+      goneHooked = true;
+      const shared = require('internal/barm/http_server');
+      shared.goneHandlers.push(onGone);
+      if (!shared.isGoneHooked()) {
+        shared.setGoneHooked();
+        shared.hookGone(callFromHost);
+      }
+    }
     const id = http.listen(port, bind, false, (rid, method, target, wire, body, http10) => {
       callFromHost(onRequest, this, rid, method, target, wire, body, http10);
     });
@@ -767,6 +788,7 @@ function onRequest(server, id, method, target, wire, body, http10) {
   const url = target.charCodeAt(0) === 47 ? `http://${host || `${server.hostname}:${server.port}`}${target}` : target;
   const req = serverRequest(url, method, wire, body === null ? null : body, null);
   requestIds.set(req, id);
+  live.set(id, req);
   const connection = /(^|\n)connection:([^\r]*)/i.exec(wire)?.[2].toLowerCase() ?? '';
   const keep = http10 ? connection.includes('keep-alive') : !connection.includes('close');
   server._barmPending(1);
@@ -808,12 +830,15 @@ function onError(server, error) {
 }
 
 function fail(server, id, error) {
+  live.delete(id);
   console.error(error);
   http.write(id, 'HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n', 2, true);
   server._barmPending(-1);
 }
 
 function respond(server, id, res, method, keep, http10) {
+  // (the response is underway: a client leaving now just cuts it short)
+  live.delete(id);
   if (!(res instanceof Response)) {
     if (res !== null && typeof res === 'object' && typeof res.then === 'function') {
       res.then((r) => respond(server, id, r, method, keep, http10), (e) => fail(server, id, e));

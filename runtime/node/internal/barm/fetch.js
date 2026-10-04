@@ -552,8 +552,12 @@ class Request {
   get headers() { return this[kHeaders]; }
   get redirect() { return this[kState].redirect; }
   get signal() {
-    this[kState].signal ??= new AbortController().signal;
-    return this[kState].signal;
+    const s = this[kState];
+    if (s.signal === null) {
+      s.controller = new AbortController();
+      s.signal = s.controller.signal;
+    }
+    return s.signal;
   }
   get mode() { return this[kState].mode; }
   get credentials() { return this[kState].credentials; }
@@ -777,6 +781,16 @@ function serverRequest(url, method, wire, body, signal) {
   return r;
 }
 
-const internals = { kState, kHeaders, kBody, serverRequest, bodyStream, bodyBytes, FormBody, encodeForm };
+// a server's request whose client has gone: its signal aborts (made now if it hasn't been)
+function abortRequest(request, reason) {
+  const s = request[kState];
+  if (s.signal === null) {
+    s.controller = new AbortController();
+    s.signal = s.controller.signal;
+  }
+  s.controller?.abort(reason);
+}
+
+const internals = { kState, kHeaders, kBody, serverRequest, abortRequest, bodyStream, bodyBytes, FormBody, encodeForm };
 
 module.exports = { fetch, Headers, Request, Response, FormData, internals };
