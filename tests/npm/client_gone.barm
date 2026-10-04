@@ -1,0 +1,6 @@
+import run from "client-gone"
+
+async function main() {
+  // clients that leave before they're answered
+  try await run()
+}
