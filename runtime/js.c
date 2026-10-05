@@ -705,11 +705,17 @@ JSContextRef bm_js(void) {
      * SharedArrayBuffer, which it leaves out of API contexts unless asked; and one compiler
      * thread per optimizing tier, as what a compiler thread allocates stays held until the
      * allocator scavenges it (an http server's hot paths tier up at ~70 MB with the default
-     * threads, ~52 MB with one each, at the same speed) */
+     * threads, ~52 MB with one each, at the same speed); and a heap let grow to about twice what
+     * survives a full collection, not four times (the engine's choice on a machine with 16 GB or
+     * more, for a browser), marked by two threads, not one per core (more spin more than they
+     * mark on a server's small heap): Cap's media server probes at 86 MB, not 130, peaking at 126
+     * MB, not 164, on 10% more CPU, still a quarter less than Bun's */
     static const char *const options[][2] = {
         {"JSC_useSharedArrayBuffer", "1"},
         {"JSC_numberOfDFGCompilerThreads", "1"},
         {"JSC_numberOfFTLCompilerThreads", "1"},
+        {"JSC_heapGrowthMaxIncrease", "1"},
+        {"JSC_numberOfGCMarkers", "2"},
     };
     enum { noptions = sizeof options / sizeof options[0] };
     bool set[noptions];
