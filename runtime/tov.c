@@ -3438,6 +3438,7 @@ static void tv_sleep_until(uint64_t ms) {
     uint64_t deadline = ms * 1000000u;
     uint64_t now = tv_mono_ns();
     if (deadline <= now) return;
+    if (tv_loop_will_block) tv_loop_will_block();
 #if defined(__APPLE__) || defined(__FreeBSD__)
     static int kq = -1;
     if (kq < 0) kq = kqueue();
@@ -3567,6 +3568,7 @@ void (*tv_loop_host_run)(void);
 static uint64_t tv_loop_host_at, tv_loop_host_asked;
 
 void (*tv_loop_idle)(bool deep);
+void (*tv_loop_will_block)(void);
 static bool tv_loop_idled;   /* the loop has been idle since the program started */
 /* Set by a tv_io handler whose event was housekeeping, not the program at work (an idle pooled
  * connection closing): it doesn't put off tv_loop_idle. */
@@ -4616,11 +4618,14 @@ static void tv_http_loop(void) {
             nch = 1;
         }
         /* (a pending check phase doesn't wait) */
-        int n = kevent(tv_http_q, &tch, nch, events, 256, (due && due <= now_ms) || tv_loop_check_pending ? &zero : NULL);
+        bool blocks = !((due && due <= now_ms) || tv_loop_check_pending);
+        if (blocks && tv_loop_will_block) tv_loop_will_block();
+        int n = kevent(tv_http_q, &tch, nch, events, 256, blocks ? NULL : &zero);
 #else
         int timeout = -1;
         if (due) timeout = due > now_ms ? (int)(due - now_ms) : 0;
         if (tv_loop_check_pending) timeout = 0; /* (a pending check phase doesn't wait) */
+        if (timeout != 0 && tv_loop_will_block) tv_loop_will_block();
         int n = epoll_wait(tv_http_q, events, 256, timeout);
 #endif
         if (n < 0) { if (errno == EINTR) continue; break; }

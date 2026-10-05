@@ -19,6 +19,7 @@
 #include <unistd.h>
 #include <wtf/FileHandle.h>
 #include <wtf/RunLoop.h>
+#include <wtf/TimeZone.h>
 #include <wtf/text/StringImpl.h>
 
 using namespace JSC;
@@ -152,4 +153,19 @@ bool TVSetOptions(const char* options)
 {
     JSC::initialize();
     return Options::setOptions(options);
+}
+
+void TVTimeZoneDidChange()
+{
+    WTF::timeZoneDidChange();
+}
+
+void TVSetStickyLock(JSContextRef ctx)
+{
+    toJS(ctx)->vm().apiLock().setSticky(true);
+}
+
+void TVReleaseStickyLock(JSContextRef ctx)
+{
+    toJS(ctx)->vm().apiLock().releaseStickyLock();
 }

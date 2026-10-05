@@ -818,6 +818,12 @@ static void tv_js_host_run(void) {
 }
 #endif
 
+#ifdef TV_JSC_OWN
+static void tv_js_will_block(void) {
+    if (tv_js_ctx) TVReleaseStickyLock(tv_js_ctx);
+}
+#endif
+
 /* (JavaScriptCore's, exported though not in its headers) */
 extern void JSSynchronousGarbageCollectForDebugging(JSContextRef ctx) __attribute__((weak_import));
 
@@ -934,6 +940,12 @@ JSContextRef tv_js(void) {
     tv_js_ctx = ctx;
     if (getenv("TOV_JS_PROFILE") && JSContextGroupEnableSamplingProfiler && JSContextGroupEnableSamplingProfiler(JSContextGetGroup(ctx)))
         atexit(tv_js_profile_write);
+#ifdef TV_JSC_OWN
+    /* the engine's lock kept between calls (a call into the engine otherwise takes it and gives
+     * it back: ~25% of a million small calls into a package), given back when the thread blocks */
+    TVSetStickyLock(ctx);
+    tv_loop_will_block = tv_js_will_block;
+#endif
     tv_loop_host_due = tv_js_host_due;
     tv_loop_host_run = tv_js_host_run;
     tv_loop_idle = tv_js_idle;

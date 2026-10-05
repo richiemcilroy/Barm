@@ -45,6 +45,18 @@ JS_EXPORT JSObjectRef TVMakeUint8Array(JSContextRef ctx, size_t len, void **byte
  * environment), before the first context is made; false if one isn't an option. */
 JS_EXPORT bool TVSetOptions(const char *options);
 
+/* The host's time zone changed (process.env.TZ was set, say): the engine's date and Intl caches
+ * are cleared on its next entry. (macOS's own notification says so for the system's time zone.) */
+JS_EXPORT void TVTimeZoneDidChange(void);
+
+/* The engine's lock stays this thread's between calls into it (a "sticky" lock): each call no
+ * longer takes it and gives it back (setting the stack's limits, the heap's access, and back),
+ * while what giving it back does that a program sees happens as before (microtasks run when the
+ * outermost call returns). TVReleaseStickyLock gives it back for real: before the thread blocks,
+ * so a collection on another thread needn't wait for it; the next call takes it again. */
+JS_EXPORT void TVSetStickyLock(JSContextRef ctx);
+JS_EXPORT void TVReleaseStickyLock(JSContextRef ctx);
+
 #ifdef __cplusplus
 }
 #endif
