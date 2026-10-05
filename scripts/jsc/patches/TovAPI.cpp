@@ -176,3 +176,29 @@ void TVReleaseStickyLock(JSContextRef ctx)
 {
     toJS(ctx)->vm().apiLock().releaseStickyLock();
 }
+
+void* TVPropertyName(JSContextRef ctx, const char* utf8)
+{
+    VM& vm = toJS(ctx)->vm();
+    JSLockHolder locker(vm);
+    Identifier name = Identifier::fromString(vm, String::fromUTF8(utf8));
+    RefPtr<UniquedStringImpl> impl = name.impl();
+    return impl.leakRef();
+}
+
+JSValueRef TVGetProperty(JSContextRef ctx, JSValueRef value, void* name, JSValueRef* exception)
+{
+    JSGlobalObject* globalObject = toJS(ctx);
+    VM& vm = globalObject->vm();
+    JSLockHolder locker(vm);
+    auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
+    JSValue base = toJS(globalObject, value);
+    JSValue result = base.get(globalObject, Identifier::fromUid(vm, static_cast<UniquedStringImpl*>(name)));
+    if (Exception* thrown = scope.exception()) [[unlikely]] {
+        if (exception)
+            *exception = toRef(globalObject, thrown->value());
+        scope.clearException();
+        return nullptr;
+    }
+    return toRef(globalObject, result);
+}

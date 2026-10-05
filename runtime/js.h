@@ -153,6 +153,7 @@ typedef struct tv_js_name {
     JSValueRef value;          /* the name as a JavaScript string */
     JSObjectRef get;           /* (o) => o.name */
     JSObjectRef call[5];       /* (o, a0, ...) => o.name(a0, ...), by argument count */
+    void *id;                  /* the name as Tov's own engine keeps it (TVPropertyName) */
 } tv_js_name;
 JSValueRef tv_js_name_get(JSValueRef obj, tv_js_name *k, JSValueRef *exc);
 JSValueRef tv_js_name_call(JSValueRef obj, tv_js_name *k, size_t n, const JSValueRef *args, JSValueRef *exc);

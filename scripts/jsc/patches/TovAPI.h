@@ -57,6 +57,13 @@ JS_EXPORT void TVTimeZoneDidChange(JSContextRef ctx);
  * outermost call returns). TVReleaseStickyLock gives it back for real: before the thread blocks,
  * so a collection on another thread needn't wait for it; the next call takes it again. */
 JS_EXPORT void TVSetStickyLock(JSContextRef ctx);
+
+/* A property name, made once and kept (for TVGetProperty). */
+JS_EXPORT void *TVPropertyName(JSContextRef ctx, const char *utf8);
+/* `value.name`, as JavaScript reads it (from a primitive's prototype, through getters and
+ * proxies), without entering the engine when it's a plain property; NULL with *exception set
+ * if it throws. */
+JS_EXPORT JSValueRef TVGetProperty(JSContextRef ctx, JSValueRef value, void *name, JSValueRef *exception);
 JS_EXPORT void TVReleaseStickyLock(JSContextRef ctx);
 
 #ifdef __cplusplus
