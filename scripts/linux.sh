@@ -10,6 +10,9 @@ docker build -q -t barm-linux "$root/scripts/linux" > /dev/null
 [ $# -gt 0 ] || set -- cargo test --release --test npm
 tty=""
 [ -t 0 ] && tty="-t"
+# Barm's own JavaScriptCore for Linux, when it's built (scripts/jsc/build.sh linux)
+jsc=""
+[ -f "$HOME/.cache/barm/jsc/linux-arm64/lib/libbarmjsc.a" ] && jsc="-v $HOME/.cache/barm/jsc/linux-arm64:/jsc -e BARM_JSC_DIR=/jsc"
 exec docker run --rm -i $tty -v "$root:/barm" -v barm-linux-target:/target -v barm-linux-cargo:/usr/local/cargo/registry -v barm-linux-cache:/root/.cache/barm \
-  -e CARGO_TARGET_DIR=/target -e PATH=/target/release:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  $jsc -e CARGO_TARGET_DIR=/target -e PATH=/target/release:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   -w /barm barm-linux "$@"
