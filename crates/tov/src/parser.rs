@@ -6,7 +6,15 @@ use crate::source::{FileId, Span};
 
 pub fn parse(src: &str, file: FileId, interner: &mut Interner) -> (Ast, Vec<Diagnostic>) {
     let mut diags = Vec::new();
-    let lexed = lexer::lex(src, file, &mut diags);
+    let mut lexed = lexer::lex(src, file, &mut diags);
+    // `type` is a keyword only where a declaration starts (`type T = ...`, `import type { ... }`,
+    // `import { type T }`: a name or `{` follows), and elsewhere a name, as in TypeScript, so
+    // `function f(type: string)` and `const { type } = x` work
+    for i in 0..lexed.tokens.len() {
+        if lexed.tokens[i].kind == Tok::Type && !matches!(lexed.tokens.get(i + 1).map(|t| t.kind), Some(Tok::Ident | Tok::LBrace)) {
+            lexed.tokens[i].kind = Tok::Ident;
+        }
+    }
     let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new() };
     p.module();
     (p.ast, p.diags)
