@@ -35,16 +35,20 @@ done
 cp "$here"/patches/*.cpp "$here"/patches/*.h "$src/Source/JavaScriptCore/API/" 2>/dev/null || true
 
 # what the bytecode cache's format is versioned by (the build's, not the program binary's)
-version=$( (echo "$TAG"; cat "$here"/patches/*) | cksum | cut -d' ' -f1)
+version=$( (echo "$TAG"; cat "$here"/patches/* "$here"/include/*/*) | cksum | cut -d' ' -f1)
 os=$(uname -s | tr A-Z a-z)
 arch=$(uname -m)
 [ "$arch" = aarch64 ] && arch=arm64
 build="$cache/build-$os-$arch"
+# (macOS: libpthread's private header, for the engine's fast thread-local slots: include/)
+flags="-ffunction-sections -fdata-sections"
+[ "$os" = darwin ] && flags="$flags -I$here/include"
 out="$cache/$os-$arch"
 cmake -S "$src" -B "$build" -G Ninja -DPORT=JSCOnly -DCMAKE_BUILD_TYPE=Release -DENABLE_STATIC_JSC=ON \
     -DUSE_THIN_ARCHIVES=OFF -DENABLE_FTL_JIT=ON -DDEVELOPER_MODE=OFF -DENABLE_API_TESTS=OFF -DENABLE_TOOLS=OFF \
-    -DCMAKE_C_FLAGS="-ffunction-sections -fdata-sections" \
-    -DCMAKE_CXX_FLAGS="-ffunction-sections -fdata-sections -DBARM_JSC_CACHE_VERSION=${version}u" > "$cache/configure-$os-$arch.log"
+    -DUSE_CXX_STDLIB_ASSERTIONS=OFF \
+    -DCMAKE_C_FLAGS="$flags" \
+    -DCMAKE_CXX_FLAGS="$flags -DBARM_JSC_CACHE_VERSION=${version}u" > "$cache/configure-$os-$arch.log"
 nice -n 10 cmake --build "$build" --target JavaScriptCore JavaScriptCoreJIT > "$cache/build-$os-$arch.log"
 
 # one archive: JavaScriptCore, its JIT's objects (an object library), WTF and bmalloc
