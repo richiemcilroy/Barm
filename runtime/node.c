@@ -261,6 +261,22 @@ NATIVE(n_env) {
     return env;
 }
 
+/* setTZ(value | undefined): process.env.TZ assigned. The C library and the engine see the new
+ * time zone at once, as under Node.js (Date's local time, Intl). */
+NATIVE(n_set_tz) {
+    UNUSED;
+    char *tz = n > 0 && JSValueIsString(ctx, a[0]) ? arg_cstr(ctx, n, a, 0) : NULL;
+    if (tz) setenv("TZ", tz, 1);
+    else unsetenv("TZ");
+    free(tz);
+    tzset();
+#ifdef TV_JSC_OWN
+    extern void TVTimeZoneDidChange(JSContextRef);
+    TVTimeZoneDidChange(ctx);
+#endif
+    return undef(ctx);
+}
+
 NATIVE(n_cwd) {
     UNUSED;
     char buf[4096];
@@ -3957,6 +3973,7 @@ void tv_node_install(JSContextRef ctx, JSObjectRef native) {
     tv_js_def(ctx, native, "nowMs", n_now_ms);
     tv_js_def(ctx, native, "typedArrayType", n_typed_array_type);
     tv_js_def(ctx, native, "env", n_env);
+    tv_js_def(ctx, native, "setTZ", n_set_tz);
     tv_js_def(ctx, native, "signal", n_signal);
     tv_js_def(ctx, native, "signalHandler", n_signal_handler);
     tv_js_def(ctx, native, "setRawMode", n_set_raw_mode);
