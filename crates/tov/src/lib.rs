@@ -11,4 +11,5 @@ pub mod lexer;
 pub mod npm;
 pub mod parser;
 pub mod source;
+pub mod tls_flags;
 pub mod types;
