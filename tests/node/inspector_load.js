@@ -1,4 +1,4 @@
-// inspector loads (Barm has no inspector to connect to), tls contexts
+// inspector loads (Tov has no inspector to connect to), tls contexts
 const inspector = require('inspector');
 console.log('inspector', typeof inspector.Session, inspector.url());
 const tls = require('tls');

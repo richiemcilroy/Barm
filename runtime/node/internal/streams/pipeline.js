@@ -44,7 +44,7 @@ const {
   isReadableStream,
   isReadableFinished,
 } = require('internal/streams/utils');
-// (Barm: loaded when a pipeline starts)
+// (Tov: loaded when a pipeline starts)
 let AbortController;
 
 let PassThrough;

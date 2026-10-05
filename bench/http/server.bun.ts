@@ -1,4 +1,4 @@
-// Bun.serve — same routes as server.barm.ts. WORKERS>1 spawns processes with reusePort.
+// Bun.serve — same routes as server.tov.ts. WORKERS>1 spawns processes with reusePort.
 const port = Number(process.env.PORT ?? 3000)
 const workers = Number(process.env.WORKERS ?? 1)
 

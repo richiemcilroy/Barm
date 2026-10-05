@@ -1,6 +1,6 @@
 'use strict';
 
-// internal/options: Node.js's command-line options. A Barm program has none of Node.js's
+// internal/options: Node.js's command-line options. A Tov program has none of Node.js's
 // flags: every option has its default.
 
 const defaults = {

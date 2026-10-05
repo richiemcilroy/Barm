@@ -23,7 +23,7 @@
     "node": "v26.3.0",
     "bun": "1.4.0",
     "scriptc": "0.1.7",
-    "barm": "barm 0.0.1"
+    "tov": "tov 0.0.1"
   },
   "results": [
     {
@@ -178,9 +178,9 @@
     },
     {
       "bench": "array_push",
-      "lang": "barm",
+      "lang": "tov",
       "status": "build failed",
-      "reason": "unknown command `build`\nbarm \u2014 the Barm toolchain\nusage:\n  barm check [paths...] [--json] [--time]   type-check .barm files (default: current directory)\n  barm explain <CODE>                       explain a diagnostic code\n  barm version",
+      "reason": "unknown command `build`\ntov \u2014 the Tov toolchain\nusage:\n  tov check [paths...] [--json] [--time]   type-check .tov files (default: current directory)\n  tov explain <CODE>                       explain a diagnostic code\n  tov version",
       "compile_s": null,
       "binary_bytes": null,
       "stripped_bytes": null,
@@ -346,9 +346,9 @@
     },
     {
       "bench": "binary_trees",
-      "lang": "barm",
+      "lang": "tov",
       "status": "build failed",
-      "reason": "unknown command `build`\nbarm \u2014 the Barm toolchain\nusage:\n  barm check [paths...] [--json] [--time]   type-check .barm files (default: current directory)\n  barm explain <CODE>                       explain a diagnostic code\n  barm version",
+      "reason": "unknown command `build`\ntov \u2014 the Tov toolchain\nusage:\n  tov check [paths...] [--json] [--time]   type-check .tov files (default: current directory)\n  tov explain <CODE>                       explain a diagnostic code\n  tov version",
       "compile_s": null,
       "binary_bytes": null,
       "stripped_bytes": null,
@@ -514,9 +514,9 @@
     },
     {
       "bench": "fib",
-      "lang": "barm",
+      "lang": "tov",
       "status": "build failed",
-      "reason": "unknown command `build`\nbarm \u2014 the Barm toolchain\nusage:\n  barm check [paths...] [--json] [--time]   type-check .barm files (default: current directory)\n  barm explain <CODE>                       explain a diagnostic code\n  barm version",
+      "reason": "unknown command `build`\ntov \u2014 the Tov toolchain\nusage:\n  tov check [paths...] [--json] [--time]   type-check .tov files (default: current directory)\n  tov explain <CODE>                       explain a diagnostic code\n  tov version",
       "compile_s": null,
       "binary_bytes": null,
       "stripped_bytes": null,
@@ -682,7 +682,7 @@
     },
     {
       "bench": "map_insert",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.24080087494803593,
@@ -834,7 +834,7 @@
       "bench": "nbody",
       "lang": "scriptc",
       "status": "unsupported",
-      "reason": "/Users/richie/Documents/github/Barm/bench/micro/nbody/main.ts:92:7 - error SC1090: compound assignment to fields of computed receivers are not supported yet\n  91 |       const mj = bodies[j]!.mass * mag\n  92 |       bodies[i]!.vx -= dx * mj\n     |       ^~~~~~~~~~~~~\n  93 |       bodies[i]!.vy -= dy * mj\n/Users/richie/Documents/github/Barm/bench/micro/nbody/main.ts:93:7 - error SC1090: compound assignment to fields of computed receivers are not supported yet\n  92 |       bodies[i]!.vx -= dx * mj\n  93 |       bodies[i]!.vy -= dy * mj\n     |       ^~~~~~~~~~~~~\n  94 |       bodies[i]!.vz -= dz * mj\n/Users/richie/Documents/github/Barm/bench/micro/nbody/main.ts:94:7 - error SC1090: compound assignment to fields of computed receivers are not supported yet\n  93 |       bodies[i]!.vy -= dy * mj\n  94 |       bodies[i]!.vz -= dz * mj\n     |       ^~~~~~~~~~~~~\n  95 |       bodies[j]!.vx += dx * mi\n/Users/richie/Documents/github/Barm/bench/micro/nbody/main.ts:95:7 - error SC1090: compound assignment to fields of computed receivers are not supported yet\n  94 |       bodies[i]!.vz -= dz * mj\n  95 |       bodies[j]!.vx += dx * mi\n     |       ^~~~~~~~~~~~~\n  96 |       bodies[j]!.vy += dy * mi",
+      "reason": "/Users/richie/Documents/github/Tov/bench/micro/nbody/main.ts:92:7 - error SC1090: compound assignment to fields of computed receivers are not supported yet\n  91 |       const mj = bodies[j]!.mass * mag\n  92 |       bodies[i]!.vx -= dx * mj\n     |       ^~~~~~~~~~~~~\n  93 |       bodies[i]!.vy -= dy * mj\n/Users/richie/Documents/github/Tov/bench/micro/nbody/main.ts:93:7 - error SC1090: compound assignment to fields of computed receivers are not supported yet\n  92 |       bodies[i]!.vx -= dx * mj\n  93 |       bodies[i]!.vy -= dy * mj\n     |       ^~~~~~~~~~~~~\n  94 |       bodies[i]!.vz -= dz * mj\n/Users/richie/Documents/github/Tov/bench/micro/nbody/main.ts:94:7 - error SC1090: compound assignment to fields of computed receivers are not supported yet\n  93 |       bodies[i]!.vy -= dy * mj\n  94 |       bodies[i]!.vz -= dz * mj\n     |       ^~~~~~~~~~~~~\n  95 |       bodies[j]!.vx += dx * mi\n/Users/richie/Documents/github/Tov/bench/micro/nbody/main.ts:95:7 - error SC1090: compound assignment to fields of computed receivers are not supported yet\n  94 |       bodies[i]!.vz -= dz * mj\n  95 |       bodies[j]!.vx += dx * mi\n     |       ^~~~~~~~~~~~~\n  96 |       bodies[j]!.vy += dy * mi",
       "compile_s": null,
       "binary_bytes": null,
       "stripped_bytes": null,
@@ -850,7 +850,7 @@
     },
     {
       "bench": "nbody",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.28132908401312307,
@@ -1030,7 +1030,7 @@
     },
     {
       "bench": "points",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.23970220802584663,
@@ -1198,7 +1198,7 @@
     },
     {
       "bench": "sort",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.33547654194990173,
@@ -1378,7 +1378,7 @@
     },
     {
       "bench": "strings",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.3233073329902254,

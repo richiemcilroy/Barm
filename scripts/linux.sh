@@ -1,18 +1,18 @@
 #!/bin/sh
-# Runs a command in Barm's Linux build container (scripts/linux/Dockerfile: Rust, a C compiler
-# and WebKitGTK's JavaScriptCore), with this checkout at /barm and the build cached in volumes.
+# Runs a command in Tov's Linux build container (scripts/linux/Dockerfile: Rust, a C compiler
+# and WebKitGTK's JavaScriptCore), with this checkout at /tov and the build cached in volumes.
 #   scripts/linux.sh                                   # the npm tests
 #   scripts/linux.sh cargo test --release              # every test
-#   scripts/linux.sh sh -c 'barm build x.barm && ./x'  # anything (target/release is on PATH)
+#   scripts/linux.sh sh -c 'tov build x.tov && ./x'  # anything (target/release is on PATH)
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
-docker build -q -t barm-linux "$root/scripts/linux" > /dev/null
+docker build -q -t tov-linux "$root/scripts/linux" > /dev/null
 [ $# -gt 0 ] || set -- cargo test --release --test npm
 tty=""
 [ -t 0 ] && tty="-t"
-# Barm's own JavaScriptCore for Linux, when it's built (scripts/jsc/build.sh linux)
+# Tov's own JavaScriptCore for Linux, when it's built (scripts/jsc/build.sh linux)
 jsc=""
-[ -f "$HOME/.cache/barm/jsc/linux-arm64/lib/libbarmjsc.a" ] && jsc="-v $HOME/.cache/barm/jsc/linux-arm64:/jsc -e BARM_JSC_DIR=/jsc"
-exec docker run --rm -i $tty -v "$root:/barm" -v barm-linux-target:/target -v barm-linux-cargo:/usr/local/cargo/registry -v barm-linux-cache:/root/.cache/barm \
+[ -f "$HOME/.cache/tov/jsc/linux-arm64/lib/libtovjsc.a" ] && jsc="-v $HOME/.cache/tov/jsc/linux-arm64:/jsc -e TOV_JSC_DIR=/jsc"
+exec docker run --rm -i $tty -v "$root:/tov" -v tov-linux-target:/target -v tov-linux-cargo:/usr/local/cargo/registry -v tov-linux-cache:/root/.cache/tov \
   $jsc -e CARGO_TARGET_DIR=/target -e PATH=/target/release:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-  -w /barm barm-linux "$@"
+  -w /tov tov-linux "$@"

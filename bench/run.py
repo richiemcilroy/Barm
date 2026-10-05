@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cross-language micro-benchmark runner for Barm.
+"""Cross-language micro-benchmark runner for Tov.
 
 For every benchmark in bench/micro/<name>/ and every selected language this script
 builds the program (recording compile time and binary size), runs it --runs times,
@@ -9,7 +9,7 @@ C version, prints markdown tables and writes bench/results/<timestamp>.json.
 Standard library only. Usage:
 
     python3 bench/run.py                          # everything, 5 runs each
-    python3 bench/run.py --runs 3 --only fib,sort --langs c,rust,barm
+    python3 bench/run.py --runs 3 --only fib,sort --langs c,rust,tov
     python3 bench/run.py --list
 """
 
@@ -38,10 +38,10 @@ BUILD_DIR = BENCH_DIR / ".build"
 RESULTS_DIR = BENCH_DIR / "results"
 TOOLS_DIR = BENCH_DIR / ".tools"
 
-# `rust-checked` is Rust with integer overflow checks (Barm's default semantics); `barm-unchecked`
+# `rust-checked` is Rust with integer overflow checks (Tov's default semantics); `tov-unchecked`
 # wraps on overflow (Rust release semantics).
-LANGS = ["c", "rust", "rust-checked", "node", "bun", "scriptc", "barm", "barm-unchecked"]
-SOURCE = {"c": "main.c", "rust": "main.rs", "rust-checked": "main.rs", "node": "main.ts", "bun": "main.ts", "scriptc": "main.ts", "barm": "main.barm", "barm-unchecked": "main.barm"}
+LANGS = ["c", "rust", "rust-checked", "node", "bun", "scriptc", "tov", "tov-unchecked"]
+SOURCE = {"c": "main.c", "rust": "main.rs", "rust-checked": "main.rs", "node": "main.ts", "bun": "main.ts", "scriptc": "main.ts", "tov": "main.tov", "tov-unchecked": "main.tov"}
 EXE_SUFFIX = ".exe" if os.name == "nt" else ""
 
 # Statuses that mean "we have timing numbers".
@@ -211,33 +211,33 @@ def build_scriptc(src: Path, out: Path, a) -> Build:
     return Build([str(out)], secs, size, stripped_size(out))
 
 
-def barm_bin() -> Path | None:
-    for p in (REPO_DIR / "target" / "release" / ("barm" + EXE_SUFFIX), REPO_DIR / "target" / "debug" / ("barm" + EXE_SUFFIX)):
+def tov_bin() -> Path | None:
+    for p in (REPO_DIR / "target" / "release" / ("tov" + EXE_SUFFIX), REPO_DIR / "target" / "debug" / ("tov" + EXE_SUFFIX)):
         if p.exists():
             return p
     return None
 
 
-BARM_WARMED: set[tuple[str, ...]] = set()
+TOV_WARMED: set[tuple[str, ...]] = set()
 
 
-def build_barm(src: Path, out: Path, a, unchecked: bool = False) -> Build:
-    barm = barm_bin()
-    if barm is None:
-        raise Skip("skipped", "no barm compiler at target/release/barm (run `cargo build --release`)")
+def build_tov(src: Path, out: Path, a, unchecked: bool = False) -> Build:
+    tov = tov_bin()
+    if tov is None:
+        raise Skip("skipped", "no tov compiler at target/release/tov (run `cargo build --release`)")
     # A cache private to this benchmark session, so programs are compiled rather than cache hits.
     # The runtime object is warmed first: like Rust's precompiled std, it's built once per
     # machine and compiler, not per program.
     env = dict(os.environ)
-    env["BARM_CACHE_DIR"] = str(BUILD_DIR / ".barm-cache" / str(os.getpid()))
+    env["TOV_CACHE_DIR"] = str(BUILD_DIR / ".tov-cache" / str(os.getpid()))
     extra = ["--unchecked"] if unchecked else []
-    if tuple(extra) not in BARM_WARMED:
-        warm = BUILD_DIR / "warm.barm"
+    if tuple(extra) not in TOV_WARMED:
+        warm = BUILD_DIR / "warm.tov"
         warm.parent.mkdir(parents=True, exist_ok=True)
         warm.write_text("function main() {}\n")
-        compile_cmd([str(barm), "build", str(warm), *extra, "-o", str(BUILD_DIR / "warm")], BUILD_DIR / "warm", a.build_timeout, env)
-        BARM_WARMED.add(tuple(extra))
-    secs, size = compile_cmd([str(barm), "build", str(src), *extra, "-o", str(out)], out, a.build_timeout, env)
+        compile_cmd([str(tov), "build", str(warm), *extra, "-o", str(BUILD_DIR / "warm")], BUILD_DIR / "warm", a.build_timeout, env)
+        TOV_WARMED.add(tuple(extra))
+    secs, size = compile_cmd([str(tov), "build", str(src), *extra, "-o", str(out)], out, a.build_timeout, env)
     return Build([str(out)], secs, size, stripped_size(out))
 
 
@@ -248,23 +248,23 @@ BUILDERS = {
     "node": build_node,
     "bun": build_bun,
     "scriptc": build_scriptc,
-    "barm": build_barm,
-    "barm-unchecked": lambda src, out, a: build_barm(src, out, a, unchecked=True),
+    "tov": build_tov,
+    "tov-unchecked": lambda src, out, a: build_tov(src, out, a, unchecked=True),
 }
 
 
 def toolchain_versions() -> dict[str, str | None]:
     sc = scriptc_bin()
-    tv = barm_bin()
+    tv = tov_bin()
     return {
         "c": tool_version([os.environ.get("CC") or "cc", "--version"]),
         "rust": tool_version(["rustc", "--version"]),
         "node": tool_version(["node", "--version"]),
         "bun": tool_version(["bun", "--version"]),
         "scriptc": tool_version([str(sc), "--version"]) if sc else None,
-        "barm": tool_version([str(tv), "version"]) if tv else None,
+        "tov": tool_version([str(tv), "version"]) if tv else None,
         "rust-checked": None,
-        "barm-unchecked": None,
+        "tov-unchecked": None,
     }
 
 
@@ -462,7 +462,7 @@ def main() -> None:
     versions = toolchain_versions()
     started = dt.datetime.now()
 
-    print(f"# Barm micro-benchmarks — {started:%Y-%m-%d %H:%M}", file=sys.stderr)
+    print(f"# Tov micro-benchmarks — {started:%Y-%m-%d %H:%M}", file=sys.stderr)
     print(f"{platform.platform()} · {platform.machine()} · runs={a.runs} warmup={a.warmup}", file=sys.stderr)
 
     results: list[Result] = []

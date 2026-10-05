@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""fetch() client benchmark: Barm vs Bun vs Node (undici) vs Rust (reqwest on hyper).
+"""fetch() client benchmark: Tov vs Bun vs Node (undici) vs Rust (reqwest on hyper).
 
-    bench/fetch/run.py [--only barm,bun] [--scenarios hello-1,hello-64] [--reps 3] [--scale 1]
+    bench/fetch/run.py [--only tov,bun] [--scenarios hello-1,hello-64] [--reps 3] [--scale 1]
 
-Every client does the same work (client.barm, run by Barm natively and by Bun and Node as
+Every client does the same work (client.tov, run by Tov natively and by Bun and Node as
 TypeScript; rust-client/ for Rust) against one server (server/: axum on a 4-thread tokio
 runtime, so the server is never the limit). For each scenario (a route, and how many request
 loops run at once) it reports requests/s, the client's CPU time per request (user + system)
@@ -48,9 +48,9 @@ def build():
     sh(["cargo", "build", "--release", "-q", "--manifest-path", os.path.join(ROOT, "Cargo.toml")])
     sh(["cargo", "build", "--release", "-q", "--offline", "--manifest-path", os.path.join(HERE, "server/Cargo.toml")])
     sh(["cargo", "build", "--release", "-q", "--offline", "--manifest-path", os.path.join(HERE, "rust-client/Cargo.toml")])
-    sh([os.path.join(ROOT, "target/release/barm"), "build", os.path.join(HERE, "client.barm"), "-o", os.path.join(OUT, "barm-client")], stdout=subprocess.DEVNULL)
-    # Bun and Node run the same file as TypeScript, without Barm's `try` markers and `throws`.
-    text = open(os.path.join(HERE, "client.barm")).read()
+    sh([os.path.join(ROOT, "target/release/tov"), "build", os.path.join(HERE, "client.tov"), "-o", os.path.join(OUT, "tov-client")], stdout=subprocess.DEVNULL)
+    # Bun and Node run the same file as TypeScript, without Tov's `try` markers and `throws`.
+    text = open(os.path.join(HERE, "client.tov")).read()
     import re
     text = re.sub(r"\btry (?=await|new |[A-Za-z_]+\()", "", text)
     text = re.sub(r"\s+throws\s+[A-Za-z]+(?=\s*\{)", "", text)
@@ -58,7 +58,7 @@ def build():
 
 
 CLIENTS = {
-    "barm": [os.path.join(OUT, "barm-client")],
+    "tov": [os.path.join(OUT, "tov-client")],
     "bun": ["bun", os.path.join(OUT, "client.ts")],
     "node": ["node", "--no-warnings", os.path.join(OUT, "client.ts")],
     "rust": [os.path.join(HERE, "rust-client/target/release/fetch-bench-client")],
@@ -100,7 +100,7 @@ def wait_port(port):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--only", default="barm,bun,node,rust,rust-mt")
+    ap.add_argument("--only", default="tov,bun,node,rust,rust-mt")
     ap.add_argument("--scenarios", default=",".join(s[0] for s in SCENARIOS))
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--scale", type=float, default=1.0, help="multiply every request count")

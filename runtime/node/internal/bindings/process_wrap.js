@@ -1,10 +1,10 @@
 'use strict';
 
-// internalBinding('process_wrap'): child processes (Node.js's src/process_wrap.cc) over Barm's
+// internalBinding('process_wrap'): child processes (Node.js's src/process_wrap.cc) over Tov's
 // natives (runtime/node.c): spawn() starts the program, connecting its pipes to the Pipe handles
 // in options.stdio, and onexit(exitCode, signal) runs when it exits.
 
-const native = globalThis.__barm_native?.process;
+const native = globalThis.__tov_native?.process;
 
 // a callback from the loop: then process.nextTick's queue, as Node.js's MakeCallback does
 const { callFromHost } = require('internal/bindings/task_queue');
@@ -69,7 +69,7 @@ class Process {
     this.#handle = handle;
     if (!this.#refed) native.ref(handle, false);
     for (const [i, s] of (options.stdio ?? []).entries()) {
-      if ((s?.type === 'pipe' || s?.type === 'overlapped') && s.handle && fds[i] >= 0) s.handle._barmOpen(fds[i]);
+      if ((s?.type === 'pipe' || s?.type === 'overlapped') && s.handle && fds[i] >= 0) s.handle._tovOpen(fds[i]);
     }
     return 0;
   }

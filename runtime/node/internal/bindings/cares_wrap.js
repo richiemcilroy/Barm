@@ -1,17 +1,17 @@
 'use strict';
 
 // internalBinding('cares_wrap'): Node.js's src/cares_wrap.cc. Lookups (getaddrinfo,
-// getnameinfo) run the system resolver on Barm's work queue (globalThis.__barm_native.dns, in
+// getnameinfo) run the system resolver on Tov's work queue (globalThis.__tov_native.dns, in
 // runtime/node.c). Queries (ChannelWrap's resolve* family, which Node.js sends with c-ares) are
 // DNS messages built and read here and sent by the natives over UDP, then TCP when the answer
 // is truncated, to the system's name servers (/etc/resolv.conf) or those set with setServers().
 // Answers come back in c-ares's shapes, and failures with its error codes.
 
-const native = globalThis.__barm_native?.dns;
+const native = globalThis.__tov_native?.dns;
 
 function dns() {
   if (native) return native;
-  const e = new Error('DNS is not available outside Barm\'s runtime');
+  const e = new Error('DNS is not available outside Tov\'s runtime');
   e.code = 'ERR_METHOD_NOT_IMPLEMENTED';
   throw e;
 }
@@ -295,7 +295,7 @@ const shapes = {
 // the system's name servers
 function systemServers() {
   try {
-    const text = globalThis.__barm_native.fs.readFileUtf8('/etc/resolv.conf', 0);
+    const text = globalThis.__tov_native.fs.readFileUtf8('/etc/resolv.conf', 0);
     const out = [];
     for (const line of text.split('\n')) {
       const m = /^\s*nameserver\s+(\S+)/.exec(line);

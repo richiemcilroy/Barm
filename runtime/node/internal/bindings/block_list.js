@@ -15,7 +15,7 @@ function toBytes(address, family) {
     if (!m || m.slice(1).some((o) => Number(o) > 255)) return null;
     return Uint8Array.of(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, ...m.slice(1).map(Number));
   }
-  dns ??= globalThis.__barm_native?.dns;
+  dns ??= globalThis.__tov_native?.dns;
   const b = dns?.ipv6Bytes(address);
   return b ? new Uint8Array(b) : null;
 }

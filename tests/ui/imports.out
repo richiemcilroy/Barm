@@ -1,32 +1,32 @@
-error[N0102] imports/main.barm:1:16: `imports/lib.barm` has no export named `secret`
+error[N0102] imports/main.tov:1:16: `imports/lib.tov` has no export named `secret`
     1 | import { area, secret, voluem } from "./lib"
   note: `secret` is declared there but not exported; add `export` to its declaration
   exports: area, volume
 
-error[N0102] imports/main.barm:1:24: `imports/lib.barm` has no export named `voluem`
+error[N0102] imports/main.tov:1:24: `imports/lib.tov` has no export named `voluem`
     1 | import { area, secret, voluem } from "./lib"
   did you mean: volume
   exports: area, volume
   fix[maybe]: import `volume`
 
-error[N0101] imports/main.barm:2:23: can't find module "./libz"
+error[N0101] imports/main.tov:2:23: can't find module "./libz"
     2 | import { thing } from "./libz"
   did you mean: "./lib"
   fix[maybe]: use "./lib"
 
-error[N0105] imports/main.barm:3:23: imports name Barm modules without an extension, found "./lib.ts"
+error[N0105] imports/main.tov:3:23: imports name Tov modules without an extension, found "./lib.ts"
     3 | import { other } from "./lib.ts"
   fix[safe]: use "./lib"
 
-error[N0103] imports/main.barm:4:21: there is no standard module "std/sockets"
+error[N0103] imports/main.tov:4:21: there is no standard module "std/sockets"
     4 | import * as fs from "std/sockets"
   available: std/fs, std/path, std/http
 
-error[N0104] imports/main.barm:5:20: can't find the npm package "lodash"
+error[N0104] imports/main.tov:5:20: can't find the npm package "lodash"
     5 | import lodash from "lodash"
   instead: install it: `bun add lodash` (or npm, pnpm, yarn)
 
-error[X0011] imports/main.barm:6:8: default imports are only for npm packages
+error[X0011] imports/main.tov:6:8: default imports are only for npm packages
     6 | import lib from "./lib"
   instead: import named exports: `import { lib } from ...` or `import * as lib from ...`
 

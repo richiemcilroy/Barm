@@ -1,10 +1,10 @@
-//! fetch(): each tests/fetch/<name>.barm runs against a scripted HTTP/1.1 server (below) that covers
+//! fetch(): each tests/fetch/<name>.tov runs against a scripted HTTP/1.1 server (below) that covers
 //! the protocol's corners: chunked and close-delimited bodies, gzip/deflate, interim 1xx
 //! responses, redirects of every kind, keep-alive reuse, servers that drop connections, slow
 //! responses (aborts and timeouts), malformed responses. Its output must equal
 //! tests/fetch/<name>.stdout, which is the same program's output under Bun; when `bun` is
 //! installed the expectation is re-checked against it (except for native_* programs, which cover
-//! what Barm does differently or Bun can't run).
+//! what Tov does differently or Bun can't run).
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -362,9 +362,9 @@ fn main() {
     let base = format!("http://127.0.0.1:{port}");
     let alt = format!("http://localhost:{port}");
     let stop = Arc::new(AtomicBool::new(false));
-    // BARM_FETCH_SERVE=<alt origin>: only serve (for running the clients elsewhere, e.g. under
+    // TOV_FETCH_SERVE=<alt origin>: only serve (for running the clients elsewhere, e.g. under
     // sanitizers in a container); prints the port.
-    if let Ok(alt) = std::env::var("BARM_FETCH_SERVE") {
+    if let Ok(alt) = std::env::var("TOV_FETCH_SERVE") {
         let alt = alt.replace("PORT", &port.to_string());
         let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
         let proxy_auth = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -384,18 +384,18 @@ fn main() {
     let proxy_auth = TcpListener::bind("127.0.0.1:0").unwrap();
     let proxy_auth_port = proxy_auth.local_addr().unwrap().port();
     std::thread::spawn(move || serve_proxy(proxy_auth, true));
-    let unix_path = std::env::temp_dir().join(format!("barm-fetch-{}.sock", std::process::id()));
+    let unix_path = std::env::temp_dir().join(format!("tov-fetch-{}.sock", std::process::id()));
     {
         let listener = std::os::unix::net::UnixListener::bind(&unix_path).expect("bind a unix socket");
         let dir = dir.clone();
         std::thread::spawn(move || serve_unix(listener, dir));
     }
-    // Every tests/fetch/<name>.barm; the ones not named native_* are also checked against Bun.
-    let mut cases: Vec<PathBuf> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "barm")).collect();
+    // Every tests/fetch/<name>.tov; the ones not named native_* are also checked against Bun.
+    let mut cases: Vec<PathBuf> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "tov")).collect();
     cases.sort();
     let mut failed = Vec::new();
     let bun = Command::new("bun").arg("--version").output().is_ok_and(|o| o.status.success());
-    // HTTPS: tests/fetch/tls/server.py (tls.barm and proxy.barm need it; skipped without python3)
+    // HTTPS: tests/fetch/tls/server.py (tls.tov and proxy.tov need it; skipped without python3)
     let tls = TlsServer::start(&dir.join("tls/server.py"));
     let mut skipped = 0;
     for case in &cases {
@@ -420,14 +420,14 @@ fn main() {
         }
         let expected = std::fs::read_to_string(case.with_extension("stdout")).unwrap_or_default();
         if bun && !name.starts_with("native_") {
-            let out = Command::new("sh").arg(root.join("scripts/barm2js.sh")).arg(case).current_dir(&root).env("BARM2JS_RUNTIME", "bun").envs(env.iter().map(|(k, v)| (*k, v.as_str()))).output().expect("run bun");
+            let out = Command::new("sh").arg(root.join("scripts/tov2js.sh")).arg(case).current_dir(&root).env("TOV2JS_RUNTIME", "bun").envs(env.iter().map(|(k, v)| (*k, v.as_str()))).output().expect("run bun");
             let js = String::from_utf8_lossy(&out.stdout);
             if js != expected {
                 failed.push(format!("{name}: the expectation differs from Bun's output\n--- expected\n{expected}--- bun\n{js}{}", String::from_utf8_lossy(&out.stderr)));
             }
         }
-        let opts = barm::build::Options { mode: barm::codegen::Mode::Run, unchecked: false, opt: "-O1".into(), emit_c: None, symbols: false };
-        match barm::build::build(std::slice::from_ref(case), &root, &opts) {
+        let opts = tov::build::Options { mode: tov::codegen::Mode::Run, unchecked: false, opt: "-O1".into(), emit_c: None, symbols: false };
+        match tov::build::build(std::slice::from_ref(case), &root, &opts) {
             Ok(built) => {
                 if !built.tls {
                     failed.push(format!("{name}: fetches, but doesn't link TLS"));
@@ -443,15 +443,15 @@ fn main() {
                     failed.push(format!("{name}: output differs (exit {:?})\n--- expected\n{expected}--- actual\n{actual}{}", out.status.code(), String::from_utf8_lossy(&out.stderr)));
                 }
             }
-            Err(barm::build::BuildError::Diagnostics(sm, d)) => failed.push(format!("{name}: build failed\n{}", barm::diag::render_text(&d, &sm))),
-            Err(barm::build::BuildError::Message(m)) => failed.push(format!("{name}: {m}")),
+            Err(tov::build::BuildError::Diagnostics(sm, d)) => failed.push(format!("{name}: build failed\n{}", tov::diag::render_text(&d, &sm))),
+            Err(tov::build::BuildError::Message(m)) => failed.push(format!("{name}: {m}")),
         }
     }
     // Only programs that fetch link TLS.
-    let opts = barm::build::Options { mode: barm::codegen::Mode::Run, unchecked: false, opt: "-O1".into(), emit_c: None, symbols: false };
-    let hello = std::env::temp_dir().join(format!("barm-no-tls-{}.barm", std::process::id()));
+    let opts = tov::build::Options { mode: tov::codegen::Mode::Run, unchecked: false, opt: "-O1".into(), emit_c: None, symbols: false };
+    let hello = std::env::temp_dir().join(format!("tov-no-tls-{}.tov", std::process::id()));
     std::fs::write(&hello, "console.log(\"hi\")\n").unwrap();
-    match barm::build::build(std::slice::from_ref(&hello), &root, &opts) {
+    match tov::build::build(std::slice::from_ref(&hello), &root, &opts) {
         Ok(b) if b.tls => failed.push("a program that doesn't fetch links TLS".into()),
         Ok(_) => {}
         Err(_) => failed.push("hello-world didn't build".into()),

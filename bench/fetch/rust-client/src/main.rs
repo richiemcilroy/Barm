@@ -35,7 +35,7 @@ fn main() {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
     };
     rt.block_on(async move {
-        // NODE_EXTRA_CA_CERTS: a CA to trust (the TLS benchmark's), as Node, Bun and Barm read it
+        // NODE_EXTRA_CA_CERTS: a CA to trust (the TLS benchmark's), as Node, Bun and Tov read it
         let mut builder = reqwest::Client::builder();
         if let Ok(path) = std::env::var("NODE_EXTRA_CA_CERTS") {
             builder = builder.add_root_certificate(reqwest::Certificate::from_pem(&std::fs::read(path).unwrap()).unwrap());

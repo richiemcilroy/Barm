@@ -1,7 +1,7 @@
 'use strict';
 
 // internal/deps/undici/undici: in Node.js, the bundled undici (fetch, WebSocket, MessageEvent).
-// Barm's fetch is its own; this provides what the rest of lib/ takes from undici: MessageEvent.
+// Tov's fetch is its own; this provides what the rest of lib/ takes from undici: MessageEvent.
 
 const { Event } = require('internal/event_target');
 

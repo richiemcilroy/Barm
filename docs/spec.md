@@ -1,11 +1,11 @@
-# Barm language spec (draft 0)
+# Tov language spec (draft 0)
 
-Barm is TypeScript-shaped. **If code looks like TypeScript it behaves like TypeScript, or it is a compile error with a code and a fix.** This spec lists only what differs from, or is removed from, TypeScript; everything else means what it means in TS.
+Tov is TypeScript-shaped. **If code looks like TypeScript it behaves like TypeScript, or it is a compile error with a code and a fix.** This spec lists only what differs from, or is removed from, TypeScript; everything else means what it means in TS.
 
 Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 
 ## 1. Files, modules, entry point
-- Source files end in `.barm` (`.ts` works too). One file = one module.
+- Source files end in `.tov` (`.ts` works too). One file = one module.
 - `import { a, b } from "./other"` (relative, no extension) and `import * as fs from "std/fs"`. No default imports/exports, no `import x as y` renaming, no re-exports (`export { x } from`), no side-effect imports. **[M0]**
 - `export` goes on declarations: `export function`, `export type`, `export interface`, `export const`, `export class` [M2].
 - **Entry point.** The program's entry file is either a **script** — top-level statements run in source order, with its module `const`/`let` initialized where they're declared — or has `function main()` (optionally `main(): int` for an exit code). Imported modules hold only declarations, `const`/`let` bindings and `test(...)` calls: importing a module has no side effects.
@@ -85,7 +85,7 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
   function addOne(inout xs: int[]) { xs.push(1) }
   addOne(&items)
   ```
-- Copy-then-mutate where the original is read again (`const b = a; b.push(1); use(a)`, or `const b = a; addOne(&a); use(b)`) is an error [M1], because TS would share and Barm copies.
+- Copy-then-mutate where the original is read again (`const b = a; b.push(1); use(a)`, or `const b = a; addOne(&a); use(b)`) is an error [M1], because TS would share and Tov copies.
 - `class` instances are shared references (reference-counted): assignment shares the object, as in TS, and changes through one reference are seen through all. Their fields can be changed through any reference (`p.x = 1` works on a `const p` or a parameter). See §6a.
 - A value is freed as soon as nothing can use it again: a local's value is released after the last statement of its block that uses it (directly or through a local that may borrow from it), not at the end of the block.
 
@@ -157,7 +157,7 @@ Node's names, so existing habits work:
 - **Running.** An async function runs until its first `await` that has to wait. Awaiting a call to an async function costs no allocation (its state lives inside the caller's); a call that isn't awaited runs as a task of its own. The program exits when nothing is left to run: no timers, tasks waiting on them, or servers.
 
 ## 7c. Web servers (Bun's API)
-`Bun.serve`, `Request`, `Response`, `Headers`, `URL` and `URLSearchParams` are globals, as in Bun (also `import { serve, ... } from "std/http"`). A Bun server ports with Barm's usual edits only — `try` on calls that can throw, `.byteLength` for `.length` on strings; `tests/parity` runs a Bun server and its port side by side and compares every response.
+`Bun.serve`, `Request`, `Response`, `Headers`, `URL` and `URLSearchParams` are globals, as in Bun (also `import { serve, ... } from "std/http"`). A Bun server ports with Tov's usual edits only — `try` on calls that can throw, `.byteLength` for `.length` on strings; `tests/parity` runs a Bun server and its port side by side and compares every response.
 ```ts
 const server = Bun.serve({
   port: Number(process.env.PORT ?? 3000),
@@ -180,7 +180,7 @@ const server = Bun.serve({
 })
 console.log(`Listening on ${server.url}`)
 ```
-- **Serving.** `Bun.serve` binds right away (an unusable port prints the error and exits, as an uncaught error does in Bun) and returns a `Server` (`port`, `hostname`, `url`, `stop(closeActive?)`); requests are served once the script's top level (or `main`) has finished, until every server is stopped. `workers: n` (Barm only) forks `n` processes sharing the sockets, supervised: a worker that dies is replaced, and SIGTERM/SIGINT stop them all.
+- **Serving.** `Bun.serve` binds right away (an unusable port prints the error and exits, as an uncaught error does in Bun) and returns a `Server` (`port`, `hostname`, `url`, `stop(closeActive?)`); requests are served once the script's top level (or `main`) has finished, until every server is stopped. `workers: n` (Tov only) forks `n` processes sharing the sockets, supervised: a worker that dies is replaced, and SIGTERM/SIGINT stop them all.
 - **Routing** as in Bun: exact paths first, then `:param` and `/*` routes; a route is a `Response`, a handler, or an object of per-method handlers (`GET`, `POST`, ...; others fall through to `fetch`). `req.params` is typed from the route. Unmatched requests go to `fetch`, else `404`.
 - **Handlers** return a `Response`, or (`async`) a promise of one: their type is `(req, server) => Response | Promise<Response, Error> throws Error`. A synchronous response is written at once; an async one when its promise settles, and responses on a connection still go out in request order (pipelining works either way).
 - **Errors.** A handler that throws (or whose promise rejects) is logged to stderr and answered by `error(err)` if given, else `500 Something went wrong!`, like Bun in production.
@@ -218,6 +218,6 @@ test("adds", () => {
 `test` calls are top-level only. Matchers: `toBe`, `toEqual`, `toBeCloseTo`, `toBeUndefined`, `toBeDefined`.
 
 ## 9. Diagnostics
-Every diagnostic has a stable code, a location, the observed problem, **the valid alternatives**, and — where possible — a fix tagged `safe` (apply automatically), `maybe` (review), or `placeholder` (needs input). `barm explain <CODE>` prints details.
+Every diagnostic has a stable code, a location, the observed problem, **the valid alternatives**, and — where possible — a fix tagged `safe` (apply automatically), `maybe` (review), or `placeholder` (needs input). `tov explain <CODE>` prints details.
 
 Code prefixes: `L` lexing · `P` parsing · `N` names/imports · `T` types · `F` control flow · `V` values/mutation · `X` removed TypeScript feature.

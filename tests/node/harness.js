@@ -14,14 +14,14 @@ function requireShim(id) {
   return module.exports;
 }
 
-// The natives a Barm program gets from runtime/node.c, from what the jsc shell has (its own
+// The natives a Tov program gets from runtime/node.c, from what the jsc shell has (its own
 // setTimeout, before Node.js's replaces it)
 const jscSetTimeout = setTimeout;
 const start = preciseTime();
 const pending = { 1: "", 2: "" };
 let onTimer = null, onCheck = null, timerGeneration = 0;
-globalThis.__barm_native = {
-  info: () => ({ argv: ["barm", testFile], execArgv: [], execPath: "/usr/local/bin/barm", pid: 4242, ppid: 1, platform, arch: "arm64", env: {}, title: "barm" }),
+globalThis.__tov_native = {
+  info: () => ({ argv: ["tov", testFile], execArgv: [], execPath: "/usr/local/bin/tov", pid: 4242, ppid: 1, platform, arch: "arm64", env: {}, title: "tov" }),
   cwd: () => cwd,
   chdir() {},
   exit(code) { throw new Error(`exit(${code})`); },
@@ -51,13 +51,13 @@ globalThis.__barm_native = {
   requestCheck() { jscSetTimeout(() => onCheck(), 0); },
 };
 
-// what a Barm program has before its first module runs
+// what a Tov program has before its first module runs
 requireShim("internal/bootstrap/globals");
 // console.log formats as Node.js's does: with util.format (the shim's)
 globalThis.console = { log: (...a) => print(requireShim("util").format(...a)) };
 
 // the test runs as a script of its own (so stack traces name its file), with require() a global,
-// and its source is readable the way a Barm program's bundle will be (for assert's messages)
-globalThis.__barm_source = (file) => (file === testFile ? readFile(testFile) : undefined);
+// and its source is readable the way a Tov program's bundle will be (for assert's messages)
+globalThis.__tov_source = (file) => (file === testFile ? readFile(testFile) : undefined);
 globalThis.require = requireShim;
 load(testFile);

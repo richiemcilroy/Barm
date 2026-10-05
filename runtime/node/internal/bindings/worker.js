@@ -5,7 +5,7 @@
 
 class Worker {
   constructor() {
-    const e = new Error('worker_threads.Worker is not supported by Barm yet');
+    const e = new Error('worker_threads.Worker is not supported by Tov yet');
     e.code = 'ERR_METHOD_NOT_IMPLEMENTED';
     throw e;
   }

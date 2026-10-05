@@ -1,0 +1,50 @@
+// The fetch() benchmark client. The same code runs under Tov, Bun and Node:
+//   client <mode> <base> <requests> <concurrency>
+// mode: hello (GET /), json (GET /json, parsed), echo (POST a 75-byte JSON body), big (8 MiB),
+// gzip (8 MiB of text sent gzipped, decoded by fetch()), close (GET / with `Connection: close`:
+// a new connection, and TLS handshake, every time).
+// `concurrency` loops each fetch one request at a time; it prints requests and milliseconds.
+const args = process.argv.slice(2)
+const mode = args[0] ?? "hello"
+const base = args[1] ?? "http://127.0.0.1:3000"
+const total = parseInt(args[2] ?? "10000") ?? 10000
+const concurrency = parseInt(args[3] ?? "1") ?? 1
+const payload = '{"id":1,"name":"Ada Lovelace","email":"ada@example.com","tags":["a","b","c"]}'
+
+type User = { id: number, name: string, email: string }
+
+async function one(): Promise<number> throws Error {
+  if (mode === "json") {
+    const u: User = try await (try await fetch(base + "/json")).json()
+    return u.id
+  }
+  if (mode === "echo") {
+    const r = try await fetch(base + "/echo", { method: "POST", body: payload, headers: { "content-type": "application/json" } })
+    const t = try await r.text()
+    return t === "" ? 0 : 1
+  }
+  if (mode === "close") {
+    const r = try await fetch(base + "/", { headers: { connection: "close" } })
+    const t = try await r.text()
+    return t === "" ? 0 : 1
+  }
+  const t = try await (try await fetch(base + (mode === "big" ? "/big" : mode === "gzip" ? "/big.gz" : "/"))).text()
+  return t === "" ? 0 : 1
+}
+
+async function worker(count: number): Promise<number> throws Error {
+  let sum = 0
+  for (let i = 0; i < count; i++) {
+    sum += try await one()
+  }
+  return sum
+}
+
+const start = performance.now()
+const per = Math.floor(total / concurrency)
+const running: Promise<number, Error>[] = []
+for (let w = 0; w < concurrency; w++) {
+  running.push(worker(per))
+}
+try await Promise.all(running)
+console.log(`${mode} ${per * concurrency} ${(performance.now() - start).toFixed(1)}`)

@@ -3,10 +3,10 @@
  * deflate and inflate in their gzip, raw and auto-detecting forms, brotli and zstd, each way.
  * They answer and fail as Node.js's do: the same modes, flush values, multi-member gzip, preset
  * dictionaries, and error messages and codes. Compiled into the same archive as tls.c;
- * bm_zlib_install() points the runtime's bm_zs at them, so only programs that need them link them.
+ * tv_zlib_install() points the runtime's tv_zs at them, so only programs that need them link them.
  * Plain C: no JavaScriptCore here. */
 
-#include "barm.h"
+#include "tov.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,7 +23,7 @@
 enum { ZS_NONE, ZS_DEFLATE, ZS_INFLATE, ZS_GZIP, ZS_GUNZIP, ZS_DEFLATERAW, ZS_INFLATERAW, ZS_UNZIP, ZS_BROTLI_DECODE, ZS_BROTLI_ENCODE,
        ZS_ZSTD_COMPRESS, ZS_ZSTD_DECOMPRESS };
 
-struct bm_zstream {
+struct tv_zstream {
     int mode;
     int flush;
     /* zlib */
@@ -54,12 +54,12 @@ struct bm_zstream {
     ZSTD_ErrorCode zstd_error;
 };
 
-static bool zs_zlib(const bm_zstream *z) { return z->mode >= ZS_DEFLATE && z->mode <= ZS_UNZIP; }
-static bool zs_brotli(const bm_zstream *z) { return z->mode == ZS_BROTLI_DECODE || z->mode == ZS_BROTLI_ENCODE; }
+static bool zs_zlib(const tv_zstream *z) { return z->mode >= ZS_DEFLATE && z->mode <= ZS_UNZIP; }
+static bool zs_brotli(const tv_zstream *z) { return z->mode == ZS_BROTLI_DECODE || z->mode == ZS_BROTLI_ENCODE; }
 
-static bm_zs_error zs_none(void) { return (bm_zs_error){ NULL, NULL, 0 }; }
+static tv_zs_error zs_none(void) { return (tv_zs_error){ NULL, NULL, 0 }; }
 
-static bm_zs_error zs_err(const char *message, const char *code, int err) { return (bm_zs_error){ message, code, err }; }
+static tv_zs_error zs_err(const char *message, const char *code, int err) { return (tv_zs_error){ message, code, err }; }
 
 static const char *zs_zlib_strerror(int err) {
     switch (err) {
@@ -91,19 +91,19 @@ static const char *zs_zstd_strerror(ZSTD_ErrorCode e) {
     }
 }
 
-static bm_zstream *zs_open(int mode) {
-    bm_zstream *z = calloc(1, sizeof *z);
+static tv_zstream *zs_open(int mode) {
+    tv_zstream *z = calloc(1, sizeof *z);
     if (z) z->mode = mode;
     return z;
 }
 
 /* ---------------------------------------------------------------- zlib (ZlibContext) */
 
-static bm_zs_error zs_zlib_message(const bm_zstream *z, const char *message) {
+static tv_zs_error zs_zlib_message(const tv_zstream *z, const char *message) {
     return zs_err(z->strm.msg ? z->strm.msg : message, zs_zlib_strerror(z->err), z->err);
 }
 
-static bm_zs_error zs_set_dictionary(bm_zstream *z) {
+static tv_zs_error zs_set_dictionary(tv_zstream *z) {
     if (!z->dict_len) return zs_none();
     z->err = Z_OK;
     if (z->mode == ZS_DEFLATE || z->mode == ZS_DEFLATERAW) z->err = deflateSetDictionary(&z->strm, z->dict, (uInt)z->dict_len);
@@ -112,7 +112,7 @@ static bm_zs_error zs_set_dictionary(bm_zstream *z) {
 }
 
 /* true on the first call (which may have failed: z->err) */
-static bool zs_init_zlib_now(bm_zstream *z) {
+static bool zs_init_zlib_now(tv_zstream *z) {
     if (z->zlib_init_done) return false;
     switch (z->mode) {
     case ZS_DEFLATE: case ZS_GZIP: case ZS_DEFLATERAW:
@@ -134,7 +134,7 @@ static bool zs_init_zlib_now(bm_zstream *z) {
     return true;
 }
 
-static void zs_init_zlib(bm_zstream *z, int window_bits, int level, int mem_level, int strategy, const uint8_t *dict, size_t n) {
+static void zs_init_zlib(tv_zstream *z, int window_bits, int level, int mem_level, int strategy, const uint8_t *dict, size_t n) {
     z->level = level;
     z->window_bits = window_bits;
     z->mem_level = mem_level;
@@ -151,7 +151,7 @@ static void zs_init_zlib(bm_zstream *z, int window_bits, int level, int mem_leve
     }
 }
 
-static bm_zs_error zs_reset_zlib(bm_zstream *z) {
+static tv_zs_error zs_reset_zlib(tv_zstream *z) {
     if (zs_init_zlib_now(z) && z->err != Z_OK) return zs_zlib_message(z, "Failed to init stream before reset");
     z->err = Z_OK;
     switch (z->mode) {
@@ -163,7 +163,7 @@ static bm_zs_error zs_reset_zlib(bm_zstream *z) {
     return zs_set_dictionary(z);
 }
 
-static void zs_work_zlib(bm_zstream *z) {
+static void zs_work_zlib(tv_zstream *z) {
     if (zs_init_zlib_now(z) && z->err != Z_OK) return;
     const Bytef *next = NULL;
     switch (z->mode) {
@@ -208,7 +208,7 @@ inflate:
     }
 }
 
-static bm_zs_error zs_check_zlib(const bm_zstream *z) {
+static tv_zs_error zs_check_zlib(const tv_zstream *z) {
     switch (z->err) {
     case Z_OK:
     case Z_BUF_ERROR:
@@ -223,7 +223,7 @@ static bm_zs_error zs_check_zlib(const bm_zstream *z) {
     }
 }
 
-static bm_zs_error zs_params_zlib(bm_zstream *z, int level, int strategy) {
+static tv_zs_error zs_params_zlib(tv_zstream *z, int level, int strategy) {
     if (zs_init_zlib_now(z) && z->err != Z_OK) return zs_zlib_message(z, "Failed to init stream before set parameters");
     z->err = Z_OK;
     if (z->mode == ZS_DEFLATE || z->mode == ZS_DEFLATERAW) z->err = deflateParams(&z->strm, level, strategy);
@@ -231,7 +231,7 @@ static bm_zs_error zs_params_zlib(bm_zstream *z, int level, int strategy) {
     return zs_none();
 }
 
-static void zs_close_zlib(bm_zstream *z) {
+static void zs_close_zlib(tv_zstream *z) {
     if (z->zlib_init_done) {
         if (z->mode == ZS_DEFLATE || z->mode == ZS_GZIP || z->mode == ZS_DEFLATERAW) deflateEnd(&z->strm);
         else if (z->mode != ZS_NONE) inflateEnd(&z->strm);
@@ -244,7 +244,7 @@ static void zs_close_zlib(bm_zstream *z) {
 
 /* ---------------------------------------------------------------- brotli */
 
-static void zs_close_brotli(bm_zstream *z) {
+static void zs_close_brotli(tv_zstream *z) {
     if (z->br_enc) BrotliEncoderDestroyInstance(z->br_enc);
     if (z->br_dict) BrotliEncoderDestroyPreparedDictionary(z->br_dict);
     if (z->br_dec) BrotliDecoderDestroyInstance(z->br_dec);
@@ -253,7 +253,7 @@ static void zs_close_brotli(bm_zstream *z) {
     z->br_dec = NULL;
 }
 
-static bm_zs_error zs_init_brotli_state(bm_zstream *z) {
+static tv_zs_error zs_init_brotli_state(tv_zstream *z) {
     zs_close_brotli(z);
     z->br_ok = true;
     z->br_result = BROTLI_DECODER_RESULT_SUCCESS;
@@ -276,7 +276,7 @@ static bm_zs_error zs_init_brotli_state(bm_zstream *z) {
     return zs_none();
 }
 
-static bm_zs_error zs_init_brotli(bm_zstream *z, const uint32_t *params, size_t n, const uint8_t *dict, size_t dict_len) {
+static tv_zs_error zs_init_brotli(tv_zstream *z, const uint32_t *params, size_t n, const uint8_t *dict, size_t dict_len) {
     free(z->dict);
     z->dict = NULL;
     z->dict_len = 0;
@@ -285,7 +285,7 @@ static bm_zs_error zs_init_brotli(bm_zstream *z, const uint32_t *params, size_t 
         memcpy(z->dict, dict, dict_len);
         z->dict_len = dict_len;
     }
-    bm_zs_error e = zs_init_brotli_state(z);
+    tv_zs_error e = zs_init_brotli_state(z);
     if (e.message) return e;
     for (size_t i = 0; i < n; i++) {
         if (params[i] == UINT32_MAX) continue;
@@ -296,7 +296,7 @@ static bm_zs_error zs_init_brotli(bm_zstream *z, const uint32_t *params, size_t 
     return zs_none();
 }
 
-static void zs_work_brotli(bm_zstream *z) {
+static void zs_work_brotli(tv_zstream *z) {
     const uint8_t *next_in = z->next_in;
     if (z->mode == ZS_BROTLI_ENCODE) {
         z->br_ok = BrotliEncoderCompressStream(z->br_enc, (BrotliEncoderOperation)z->flush, &z->avail_in, &next_in, &z->avail_out, &z->next_out, NULL);
@@ -310,7 +310,7 @@ static void zs_work_brotli(bm_zstream *z) {
     z->next_in = next_in;
 }
 
-static bm_zs_error zs_check_brotli(const bm_zstream *z) {
+static tv_zs_error zs_check_brotli(const tv_zstream *z) {
     if (z->mode == ZS_BROTLI_ENCODE) return z->br_ok ? zs_none() : zs_err("Compression failed", "ERR_BROTLI_COMPRESSION_FAILED", -1);
     if (z->br_error != BROTLI_DECODER_NO_ERROR) return zs_err("Decompression failed", z->br_error_code, (int)z->br_error);
     if (z->flush == BROTLI_OPERATION_FINISH && z->br_result == BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT)
@@ -320,14 +320,14 @@ static bm_zs_error zs_check_brotli(const bm_zstream *z) {
 
 /* ---------------------------------------------------------------- zstd */
 
-static void zs_close_zstd(bm_zstream *z) {
+static void zs_close_zstd(tv_zstream *z) {
     ZSTD_freeCCtx(z->cctx);
     ZSTD_freeDCtx(z->dctx);
     z->cctx = NULL;
     z->dctx = NULL;
 }
 
-static bm_zs_error zs_init_zstd_state(bm_zstream *z) {
+static tv_zs_error zs_init_zstd_state(tv_zstream *z) {
     zs_close_zstd(z);
     z->zstd_error = ZSTD_error_no_error;
     if (z->mode == ZS_ZSTD_COMPRESS) {
@@ -346,7 +346,7 @@ static bm_zs_error zs_init_zstd_state(bm_zstream *z) {
     return zs_none();
 }
 
-static bm_zs_error zs_init_zstd(bm_zstream *z, const uint32_t *params, size_t n, uint64_t pledged, const uint8_t *dict, size_t dict_len) {
+static tv_zs_error zs_init_zstd(tv_zstream *z, const uint32_t *params, size_t n, uint64_t pledged, const uint8_t *dict, size_t dict_len) {
     z->pledged = pledged;
     free(z->dict);
     z->dict = NULL;
@@ -356,7 +356,7 @@ static bm_zs_error zs_init_zstd(bm_zstream *z, const uint32_t *params, size_t n,
         memcpy(z->dict, dict, dict_len);
         z->dict_len = dict_len;
     }
-    bm_zs_error e = zs_init_zstd_state(z);
+    tv_zs_error e = zs_init_zstd_state(z);
     if (e.message) return e;
     for (size_t i = 0; i < n; i++) {
         if (params[i] == UINT32_MAX) continue;
@@ -367,20 +367,20 @@ static bm_zs_error zs_init_zstd(bm_zstream *z, const uint32_t *params, size_t n,
     return zs_none();
 }
 
-static void zs_work_zstd(bm_zstream *z) {
+static void zs_work_zstd(tv_zstream *z) {
     size_t r = z->mode == ZS_ZSTD_COMPRESS ? ZSTD_compressStream2(z->cctx, &z->zout, &z->zin, (ZSTD_EndDirective)z->flush)
                                             : ZSTD_decompressStream(z->dctx, &z->zout, &z->zin);
     if (ZSTD_isError(r)) z->zstd_error = ZSTD_getErrorCode(r);
 }
 
-static bm_zs_error zs_check_zstd(const bm_zstream *z) {
+static tv_zs_error zs_check_zstd(const tv_zstream *z) {
     if (z->zstd_error == ZSTD_error_no_error) return zs_none();
     return zs_err(ZSTD_getErrorString(z->zstd_error), zs_zstd_strerror(z->zstd_error), (int)z->zstd_error);
 }
 
 /* ---------------------------------------------------------------- the stream */
 
-static void zs_write(bm_zstream *z, int flush, const uint8_t *in, uint32_t in_len, uint8_t *out, uint32_t out_len, uint32_t *avail_in,
+static void zs_write(tv_zstream *z, int flush, const uint8_t *in, uint32_t in_len, uint8_t *out, uint32_t out_len, uint32_t *avail_in,
                      uint32_t *avail_out) {
     z->flush = flush;
     if (zs_zlib(z) || z->mode == ZS_NONE) {
@@ -408,18 +408,18 @@ static void zs_write(bm_zstream *z, int flush, const uint8_t *in, uint32_t in_le
     }
 }
 
-static bm_zs_error zs_check(bm_zstream *z) {
+static tv_zs_error zs_check(tv_zstream *z) {
     if (zs_zlib(z)) return zs_check_zlib(z);
     if (zs_brotli(z)) return zs_check_brotli(z);
     if (z->mode == ZS_NONE) return zs_zlib_message(z, "Zlib error");
     return zs_check_zstd(z);
 }
 
-static bm_zs_error zs_params(bm_zstream *z, int level, int strategy) {
+static tv_zs_error zs_params(tv_zstream *z, int level, int strategy) {
     return zs_zlib(z) ? zs_params_zlib(z, level, strategy) : zs_none();
 }
 
-static bm_zs_error zs_reset(bm_zstream *z) {
+static tv_zs_error zs_reset(tv_zstream *z) {
     if (zs_zlib(z)) return zs_reset_zlib(z);
     if (zs_brotli(z)) return zs_init_brotli_state(z);
     if (z->mode == ZS_ZSTD_COMPRESS || z->mode == ZS_ZSTD_DECOMPRESS) {
@@ -429,7 +429,7 @@ static bm_zs_error zs_reset(bm_zstream *z) {
     return zs_none();
 }
 
-static void zs_close(bm_zstream *z) {
+static void zs_close(tv_zstream *z) {
     if (!z) return;
     zs_close_zlib(z);
     zs_close_brotli(z);
@@ -447,8 +447,8 @@ static uint32_t zs_crc32(uint32_t crc, const uint8_t *p, size_t n) {
     return (uint32_t)crc32(crc, p, (uInt)n);
 }
 
-static const bm_zs_ops bm_zs_table = {
+static const tv_zs_ops tv_zs_table = {
     zs_open, zs_init_zlib, zs_init_brotli, zs_init_zstd, zs_write, zs_check, zs_params, zs_reset, zs_close, zs_crc32,
 };
 
-void bm_zlib_install(void) { bm_zs = &bm_zs_table; }
+void tv_zlib_install(void) { tv_zs = &tv_zs_table; }

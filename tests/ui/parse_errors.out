@@ -1,10 +1,10 @@
-error[P0001] parse_errors.barm:1:24: expected `)` to close the parameter list, found `{`
+error[P0001] parse_errors.tov:1:24: expected `)` to close the parameter list, found `{`
     1 | function broken(x: int {
 
-error[P0004] parse_errors.barm:3:1: expected an expression, found `}`
+error[P0004] parse_errors.tov:3:1: expected an expression, found `}`
     3 | }
 
-error[P0002] parse_errors.barm:9:13: expected `;` or a line break after the statement, found `2`
+error[P0002] parse_errors.tov:9:13: expected `;` or a line break after the statement, found `2`
     9 | const x = 1 2
 
 3 error(s)

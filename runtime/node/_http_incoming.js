@@ -31,7 +31,7 @@ const {
 
 const { Readable, finished } = require('stream');
 
-// (Barm: loaded when a request's signal is first asked for)
+// (Tov: loaded when a request's signal is first asked for)
 let AbortController;
 
 const kHeaders = Symbol('kHeaders');

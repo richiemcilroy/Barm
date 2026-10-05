@@ -4,7 +4,7 @@
 // the built-ins' original functions, copied before user code can change them. The shims
 // taken from Node.js's lib/ use them as Node does.
 //
-// (Barm: Node.js builds thousands of these into its startup snapshot; built at startup they'd
+// (Tov: Node.js builds thousands of these into its startup snapshot; built at startup they'd
 // cost megabytes. Here the built-ins' originals are recorded at startup, but each method's
 // primordial (ArrayPrototypePush, MathMax, MapPrototypeGetSize, ...) is made the first time a
 // module asks for it: `primordials` is a proxy that works the name back to its built-in.)
@@ -14,7 +14,7 @@ const table = { __proto__: null };   // made so far, and the plain values
 // (uncurried: the receiver is the first argument)
 const sources = new globalThis.Map();
 
-// (Barm: Symbol.dispose and Symbol.asyncDispose, where the engine lacks them, as Node.js defined
+// (Tov: Symbol.dispose and Symbol.asyncDispose, where the engine lacks them, as Node.js defined
 // them before V8 had them)
 for (const [name, key] of [['dispose', 'nodejs.dispose'], ['asyncDispose', 'nodejs.asyncDispose']]) {
   if (typeof Symbol[name] !== 'symbol') {
@@ -763,6 +763,6 @@ primordials.SafeArrayPrototypePushApply = (arr, items) => {
   return ArrayPrototypePushApply(arr, items);
 };
 
-// (Barm: not frozen, so primordials can be made as they're asked for)
+// (Tov: not frozen, so primordials can be made as they're asked for)
 
 module.exports = primordials;

@@ -40,7 +40,7 @@ Object.defineProperty(g, 'global', { __proto__: null, value: g, writable: true, 
 // (as Bun has it: the global object under its web name)
 Object.defineProperty(g, 'self', { __proto__: null, value: g, writable: true, enumerable: false, configurable: true });
 
-// V8's Error.prepareStackTrace and CallSites (internal/barm/callsite), for packages that read
+// V8's Error.prepareStackTrace and CallSites (internal/tov/callsite), for packages that read
 // their callers: while it's a function, Error.captureStackTrace and `new Error()` (the global
 // Error is then a wrapper around the engine's) give it the error and its frames.
 {
@@ -51,7 +51,7 @@ Object.defineProperty(g, 'self', { __proto__: null, value: g, writable: true, en
   const PreparingError = function Error(...args) {
     const e = Reflect.construct(NativeError, args, new.target ?? PreparingError);
     if (typeof prepareStackTrace === 'function') {
-      const stack = require('internal/barm/callsite').prepare(e, e.stack, /^Error@/.test(e.stack) ? 1 : 0);
+      const stack = require('internal/tov/callsite').prepare(e, e.stack, /^Error@/.test(e.stack) ? 1 : 0);
       Object.defineProperty(e, 'stack', { __proto__: null, value: stack, writable: true, configurable: true });
     }
     return e;
@@ -85,7 +85,7 @@ Object.defineProperty(g, 'self', { __proto__: null, value: g, writable: true, en
     const captureStackTrace = function captureStackTrace(obj, fn) {
       nativeCapture(obj, fn ?? captureStackTrace);
       if (typeof prepareStackTrace === 'function') {
-        const stack = require('internal/barm/callsite').prepare(obj, obj.stack, 0);
+        const stack = require('internal/tov/callsite').prepare(obj, obj.stack, 0);
         Object.defineProperty(obj, 'stack', { __proto__: null, value: stack, writable: true, configurable: true });
       }
     };
@@ -106,7 +106,7 @@ lazy('console', () => {
 // the global `crypto` (Web Crypto): random values without the rest of crypto; `subtle` brings
 // crypto in when the program's bundle has it
 lazy('crypto', () => {
-  const { getRandomValues, randomUUID } = require('internal/barm/random');
+  const { getRandomValues, randomUUID } = require('internal/tov/random');
   const webcrypto = { getRandomValues, randomUUID };
   Object.defineProperty(webcrypto, 'subtle', {
     __proto__: null,
@@ -176,10 +176,10 @@ function compression() {
 lazy('CompressionStream', () => pick(compression(), 'CompressionStream'));
 lazy('DecompressionStream', () => pick(compression(), 'DecompressionStream'));
 lazy('Blob', () => require('internal/blob').Blob);
-// fetch() and its classes (internal/barm/fetch, over Barm's HTTP client): in the bundle only
+// fetch() and its classes (internal/tov/fetch, over Tov's HTTP client): in the bundle only
 // when the program's code names them, so the TLS client isn't linked into every program
 function fetchModule() {
-  const id = 'internal/barm/fetch';
+  const id = 'internal/tov/fetch';
   return bundled(id);
 }
 lazy('fetch', () => pick(fetchModule(), 'fetch'));
@@ -201,7 +201,7 @@ lazy('PerformanceObserverEntryList', () => require('perf_hooks').PerformanceObse
 lazy('PerformanceResourceTiming', () => require('perf_hooks').PerformanceResourceTiming);
 lazy('File', () => require('internal/file').File);
 
-// timers: Barm's event loop drives them (the natives); internal/bindings/timers wires them up
+// timers: Tov's event loop drives them (the natives); internal/bindings/timers wires them up
 // on the first one
 function timers() {
   return require('timers');

@@ -23,10 +23,10 @@ bytes blob: 7 60,0,255,1,13,10,62 0,255
 bytes form: raw.bin "application/octet-stream" 0,255,1,13,10 | blob p
 typed files: t.html text/html <p> | i.png image/png png
 blob stream: 60,0,255,1,13,10,62
-streamed brotli: 136863 bytes, chunks <= 4 MiB: true, same as fixture: true
-streamed zstd: 136863 bytes, chunks <= 4 MiB: true, same as fixture: true
-streamed deflate: 136863 bytes, chunks <= 4 MiB: true, same as fixture: true
-streamed gzip: 136863 bytes, chunks <= 4 MiB: true, same as fixture: true
+streamed brotli: 135172 bytes, chunks <= 4 MiB: true, same as fixture: true
+streamed zstd: 135172 bytes, chunks <= 4 MiB: true, same as fixture: true
+streamed deflate: 135172 bytes, chunks <= 4 MiB: true, same as fixture: true
+streamed gzip: 135172 bytes, chunks <= 4 MiB: true, same as fixture: true
 streamed zeros: 25165824 bytes, chunks <= 4 MiB: true
 lying gzip size: TypeError ZlibError: ZlibError fetching "BASE/gzip?f=fixture-lying.gz". For more information, pass `verbose: true` in the second argument to fetch()
 zeros read whole later: 25165824

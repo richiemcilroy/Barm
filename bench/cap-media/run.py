@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Cap's media server (Cap/apps/media-server) on Bun, as Cap runs it, and on Barm, unchanged.
+"""Cap's media server (Cap/apps/media-server) on Bun, as Cap runs it, and on Tov, unchanged.
 
-    bench/cap-media/run.py --cap ~/github/Cap [--reps 3] [--secs 10] [--only bun,barm]
+    bench/cap-media/run.py --cap ~/github/Cap [--reps 3] [--secs 10] [--only bun,tov]
 
 Copies the media server's package.json, bun.lock and src into out/ms, installs its packages
-with `bun install --production`, and builds the Barm binary from out/ms/main.barm (which serves
+with `bun install --production`, and builds the Tov binary from out/ms/main.tov (which serves
 the server's default export, as Bun does with an entry point's). Serves a generated 10 s 720p
 H.264/AAC test video from a local origin (origin.mjs, under Node, with ranges), then for each runtime in turn (interleaved over --reps):
 startup to the first /health answer, idle memory, /health under load, /video/probe (node-av,
@@ -23,7 +23,7 @@ MEDIA_PORT = 37490
 SECRET = "bench-secret"
 VIDEO = f"http://127.0.0.1:{MEDIA_PORT}/test.mp4"
 
-MAIN_BARM = """import server from "cap-media-server"
+MAIN_TOV = """import server from "cap-media-server"
 import { serve } from "bun"
 
 function main() {
@@ -52,12 +52,12 @@ def setup(cap):
         f.write('{"name":"cap-media-server","type":"module","main":"index.js"}\n')
     with open(os.path.join(pkg, "index.js"), "w") as f:
         f.write('export { default } from "../../src/index.ts";\n')
-    with open(os.path.join(MS, "main.barm"), "w") as f:
-        f.write(MAIN_BARM)
+    with open(os.path.join(MS, "main.tov"), "w") as f:
+        f.write(MAIN_TOV)
     sh(["cc", "-O2", "-o", os.path.join(OUT, "load"), os.path.join(ROOT, "bench/http/load.c"), "-lpthread"])
     sh(["cargo", "build", "--release", "-q", "--manifest-path", os.path.join(ROOT, "Cargo.toml")])
     t = time.time()
-    sh([os.path.join(ROOT, "target/release/barm"), "build", "main.barm", "-o", "ms-barm"], cwd=MS, stdout=subprocess.DEVNULL)
+    sh([os.path.join(ROOT, "target/release/tov"), "build", "main.tov", "-o", "ms-tov"], cwd=MS, stdout=subprocess.DEVNULL)
     build_s = time.time() - t
     video = os.path.join(OUT, "test.mp4")
     if not os.path.exists(video):
@@ -78,7 +78,7 @@ def serve_media():
 
 RUNTIMES = {
     "bun": lambda: ["bun", "src/index.ts"],
-    "barm": lambda: ["./ms-barm"],
+    "tov": lambda: ["./ms-tov"],
 }
 
 
@@ -182,7 +182,7 @@ def main():
     ap.add_argument("--cap", default=os.environ.get("CAP_DIR", os.path.expanduser("~/Documents/github/Cap")))
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--secs", type=int, default=10)
-    ap.add_argument("--only", default="bun,barm")
+    ap.add_argument("--only", default="bun,tov")
     args = ap.parse_args()
     names = args.only.split(",")
     build_s = setup(args.cap)
@@ -197,7 +197,7 @@ def main():
                     break
             except Exception:
                 time.sleep(0.01)
-        # (idle a moment, as a deployment's first start does: Barm writes its bytecode cache and
+        # (idle a moment, as a deployment's first start does: Tov writes its bytecode cache and
         # Bun its transpiler cache then)
         time.sleep(2)
         p.send_signal(signal.SIGTERM)
@@ -213,11 +213,11 @@ def main():
     print(f"{'':16}" + "".join(f"{n:>12}" for n in names))
     for k in med[names[0]]:
         print(f"{k:16}" + "".join(f"{med[n][k]:>12.1f}" if med[n][k] is not None else f"{'-':>12}" for n in names))
-    print(f"\nbarm build: {build_s:.1f} s, binary {os.path.getsize(os.path.join(MS, 'ms-barm')) / 1e6:.1f} MB")
+    print(f"\ntov build: {build_s:.1f} s, binary {os.path.getsize(os.path.join(MS, 'ms-tov')) / 1e6:.1f} MB")
     os.makedirs(os.path.join(ROOT, "bench/results"), exist_ok=True)
     path = os.path.join(ROOT, "bench/results", time.strftime("cap-media-%Y%m%d-%H%M%S.json"))
     with open(path, "w") as f:
-        json.dump({"runs": runs, "median": med, "barm_build_s": build_s,
+        json.dump({"runs": runs, "median": med, "tov_build_s": build_s,
                    "bun": subprocess.run(["bun", "--version"], capture_output=True, text=True).stdout.strip()}, f, indent=1)
     print(f"wrote {path}")
     origin.terminate()

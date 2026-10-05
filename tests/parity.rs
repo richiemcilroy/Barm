@@ -1,5 +1,5 @@
-//! Bun parity: serves tests/parity/server.ts with `bun` (NODE_ENV=production) and its Barm
-//! port tests/parity/server.barm.ts natively, sends both the same requests in the same order,
+//! Bun parity: serves tests/parity/server.ts with `bun` (NODE_ENV=production) and its Tov
+//! port tests/parity/server.tov.ts natively, sends both the same requests in the same order,
 //! and compares status, body and the headers a client would act on. Skipped without `bun`.
 
 use std::io::{Read, Write};
@@ -75,14 +75,14 @@ fn main() {
     }
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
     let dir = root.join("tests/parity");
-    let opts = barm::build::Options { mode: barm::codegen::Mode::Run, unchecked: false, opt: "-O2".into(), emit_c: None, symbols: false };
-    let built = match barm::build::build(&[dir.join("server.barm.ts")], &root, &opts) {
+    let opts = tov::build::Options { mode: tov::codegen::Mode::Run, unchecked: false, opt: "-O2".into(), emit_c: None, symbols: false };
+    let built = match tov::build::build(&[dir.join("server.tov.ts")], &root, &opts) {
         Ok(b) => b,
-        Err(barm::build::BuildError::Diagnostics(sm, d)) => panic!("build failed\n{}", barm::diag::render_text(&d, &sm)),
-        Err(barm::build::BuildError::Message(m)) => panic!("{m}"),
+        Err(tov::build::BuildError::Diagnostics(sm, d)) => panic!("build failed\n{}", tov::diag::render_text(&d, &sm)),
+        Err(tov::build::BuildError::Message(m)) => panic!("{m}"),
     };
     let (bp, np) = (free_port(), free_port());
-    let barm = start(Command::new(&built.binary), bp);
+    let tov = start(Command::new(&built.binary), bp);
     let mut bun_cmd = Command::new("bun");
     bun_cmd.arg(dir.join("server.ts"));
     let bun = start(bun_cmd, np);
@@ -117,10 +117,10 @@ fn main() {
     ];
     let mut failed = 0;
     for r in &requests {
-        let (a, b) = (send(barm.1, r), send(bun.1, r));
+        let (a, b) = (send(tov.1, r), send(bun.1, r));
         if a != b {
             failed += 1;
-            eprintln!("FAIL {}\n  barm: {a:?}\n  bun:  {b:?}", r.lines().next().unwrap());
+            eprintln!("FAIL {}\n  tov: {a:?}\n  bun:  {b:?}", r.lines().next().unwrap());
         }
     }
     println!("parity: {} requests, {failed} differ", requests.len());

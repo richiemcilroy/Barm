@@ -3,7 +3,7 @@
 // internalBinding('task_queue'): microtasks, and the hook that runs process.nextTick's queue.
 //
 // In Node.js, C++ calls the tick callback (processTicksAndRejections) when a callback into JS
-// returns, so ticks run before that turn's promise jobs. Here every callback from Barm's loop
+// returns, so ticks run before that turn's promise jobs. Here every callback from Tov's loop
 // goes through callFromHost(), which runs the tick queue when the callback returns, in the same
 // call. A tick scheduled outside one (in a promise job, say) queues one run of the queue as a
 // promise job instead. internal/process/task_queues tells this binding when a tick is scheduled
@@ -29,7 +29,7 @@ function drain() {
     tickCallback();
   } catch (e) {
     // (in a promise job, a throw would be lost: it's an uncaught exception, as in Node.js)
-    const fatal = globalThis.__barm_native?.fatal;
+    const fatal = globalThis.__tov_native?.fatal;
     if (!fatal) throw e;
     fatal(e);
   }
@@ -46,7 +46,7 @@ function setTickScheduled() {
 // what runs when the host's callback returns (once each)
 let onReturn = null;
 
-// a callback from the host (Barm's loop): fn(...args), then the tick queue
+// a callback from the host (Tov's loop): fn(...args), then the tick queue
 function callFromHost(fn, a, b, c, d, e, f) {
   hostDepth++;
   try {

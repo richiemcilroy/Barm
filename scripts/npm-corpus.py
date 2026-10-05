@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""npm compatibility corpus: loads every top-level package in a project's node_modules with Barm
+"""npm compatibility corpus: loads every top-level package in a project's node_modules with Tov
 (its bundler, on its runtime: JavaScriptCore with runtime/js.c and node.c) and with Bun, and
 compares what each exports (typeof, and the sorted keys).
 
@@ -12,10 +12,10 @@ import argparse, collections, concurrent.futures as cf, json, os, re, subprocess
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "target", "npm-corpus")
-BARM = os.path.join(ROOT, "target", "release", "barm")
+TOV = os.path.join(ROOT, "target", "release", "tov")
 RUNNER = os.path.join(OUT, "runner")
 # (the runner reads its blob from a file, so it has no bytecode cache to write)
-os.environ["BARM_JS_CACHE"] = "0"
+os.environ["TOV_JS_CACHE"] = "0"
 
 PROBE = """
 var __log = typeof __out === "function" ? __out : function (s) { console.log(s); };
@@ -36,7 +36,7 @@ def build():
     os.makedirs(OUT, exist_ok=True)
     sh(["cargo", "build", "-q", "--release"], cwd=ROOT)
     rt = os.path.join(ROOT, "runtime")
-    srcs = [os.path.join(ROOT, "scripts", "npm-corpus-runner.c")] + [os.path.join(rt, f) for f in ("js.c", "node.c", "napi.c", "barm.c")]
+    srcs = [os.path.join(ROOT, "scripts", "npm-corpus-runner.c")] + [os.path.join(rt, f) for f in ("js.c", "node.c", "napi.c", "tov.c")]
     sh(["cc", "-O1", "-std=gnu11", "-w", "-I", rt, *srcs, "-framework", "JavaScriptCore", "-framework", "CoreFoundation", "-lobjc", "-o", RUNNER])
     plist = os.path.join(OUT, "jit.plist")
     with open(plist, "w") as f:
@@ -93,11 +93,11 @@ def check(project, pkg):
     _, bout, berr = run(["bun", "--no-install", base + ".bun.js"])
     if "THROW" in bout or "TYPE" not in bout:
         return pkg, "bun-throws", (bout or berr).strip()[:300]
-    code, _, err = run([BARM, "__bundle", project, pkg, "--blob", "-o", base + ".blob"])
+    code, _, err = run([TOV, "__bundle", project, pkg, "--blob", "-o", base + ".blob"])
     if code != 0:
         return pkg, "bundle-error", (err.strip().splitlines() or ["?"])[-1][:300]
     with open(base + ".probe.js", "w") as f:
-        f.write(PROBE % ("__barm_npm", json.dumps(pkg)))
+        f.write(PROBE % ("__tov_npm", json.dumps(pkg)))
     code, out, err = run([RUNNER, base + ".blob", base + ".probe.js"])
     if code != 0 and not out:
         return pkg, "crash", ((err or out).strip().splitlines() or ["?"])[-1][:300]
@@ -105,7 +105,7 @@ def check(project, pkg):
         return pkg, "ok", ""
     if "THROW" in out:
         return pkg, "throws", [l for l in out.splitlines() if l.startswith("THROW")][0][:300]
-    return pkg, "differs", f"barm: {out.strip()[:200]} | bun: {bout.strip()[:200]}"
+    return pkg, "differs", f"tov: {out.strip()[:200]} | bun: {bout.strip()[:200]}"
 
 
 def main():

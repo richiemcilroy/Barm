@@ -3,7 +3,7 @@ héllo, Ada
 { who: 'Bob', reversed: [ 'c', 'b', 'a' ] }
 RangeError: too big for C
 42 function
-BARM
+TOV
 5050
 tick 1
 tick 2

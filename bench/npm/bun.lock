@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "barm-npm-bench",
+      "name": "tov-npm-bench",
       "dependencies": {
         "zod": "3.25.76",
       },

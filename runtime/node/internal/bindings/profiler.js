@@ -1,6 +1,6 @@
 'use strict';
 
-// internalBinding('profiler'): V8's coverage collection (NODE_V8_COVERAGE). Barm collects none.
+// internalBinding('profiler'): V8's coverage collection (NODE_V8_COVERAGE). Tov collects none.
 
 module.exports = {
   setCoverageDirectory() {},

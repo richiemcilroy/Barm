@@ -1,5 +1,5 @@
 {
-  "name": "barm-npm-bench",
+  "name": "tov-npm-bench",
   "private": true,
   "dependencies": { "zod": "3.25.76" }
 }

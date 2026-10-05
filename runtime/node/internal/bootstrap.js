@@ -2,7 +2,7 @@
 
 // What Node.js gives its own lib/ modules, for the shims taken from there: `primordials` (the
 // built-ins as they were before user code ran) and `internalBinding(name)`, which in Node.js
-// reaches its C++ and here loads internal/bindings/<name>.js (JS, over Barm's natives).
+// reaches its C++ and here loads internal/bindings/<name>.js (JS, over Tov's natives).
 
 const primordials = require('internal/primordials');
 

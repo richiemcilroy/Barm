@@ -1,7 +1,7 @@
 'use strict';
 
 // internalBinding('async_wrap'): the shared fields async_hooks reads and writes (as Node.js lays
-// them out in src/async_wrap.h), and the slow paths for its async id stack. Barm's own handles
+// them out in src/async_wrap.h), and the slow paths for its async id stack. Tov's own handles
 // (timers, sockets) don't report async hook events yet; JS-created resources do.
 
 const constants = {

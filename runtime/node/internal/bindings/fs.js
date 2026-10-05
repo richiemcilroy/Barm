@@ -1,14 +1,14 @@
 'use strict';
 
-// internalBinding('fs'): Node.js's src/node_file.cc over Barm's natives
-// (globalThis.__barm_native.fs, in runtime/node.c), which are synchronous and throw Node.js's
+// internalBinding('fs'): Node.js's src/node_file.cc over Tov's natives
+// (globalThis.__tov_native.fs, in runtime/node.c), which are synchronous and throw Node.js's
 // errors. Each binding function is called three ways, by its last argument:
 //   undefined          synchronous: return the result or throw
 //   an FSReqCallback   call req.oncomplete(err, result) on a later loop turn
 //   kUsePromises       return a promise, settled on a later loop turn
 // (Callbacks and promises complete on the next turn; the work itself runs synchronously for now.)
 
-const native = globalThis.__barm_native?.fs;
+const native = globalThis.__tov_native?.fs;
 
 const kUsePromises = Symbol('fs_use_promises_symbol');
 const kFsStatsFieldsNumber = 18;
@@ -22,7 +22,7 @@ class FSReqCallback {
 }
 
 function unavailable() {
-  const e = new Error('The file system is not available outside Barm\'s runtime');
+  const e = new Error('The file system is not available outside Tov\'s runtime');
   e.code = 'ERR_METHOD_NOT_IMPLEMENTED';
   throw e;
 }

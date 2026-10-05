@@ -1,9 +1,9 @@
 'use strict';
 
-// internal/errors/error_source (Barm's own; Node.js's uses V8's source positions and acorn):
+// internal/errors/error_source (Tov's own; Node.js's uses V8's source positions and acorn):
 // the source expression an error points at, for assert's "The expression evaluated to a falsy
 // value" message. The call site comes from the error's stack; the line from the program's
-// source, which the host provides as globalThis.__barm_source(file) (the bundle in a Barm
+// source, which the host provides as globalThis.__tov_source(file) (the bundle in a Tov
 // program, the file in tests).
 
 // "fn@file:line:col" (JavaScriptCore: col is the call's "(", 1-based) or "at fn (file:line:col)"
@@ -11,7 +11,7 @@ const frameRe = /^(?:.*?@|\s*at (?:.*\()?)(.*):(\d+):(\d+)\)?$/;
 
 function getErrorSourceLocation(error) {
   const stack = typeof error?.stack === 'string' ? error.stack : '';
-  const source = globalThis.__barm_source;
+  const source = globalThis.__tov_source;
   if (typeof source !== 'function') return undefined;
   for (const frame of stack.split('\n')) {
     const m = frameRe.exec(frame);

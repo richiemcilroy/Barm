@@ -1,7 +1,7 @@
 'use strict';
 
-// The natives that runtime/node.c gives a Barm program (globalThis.__barm_native), made from
-// what any JavaScript host has: for a bundle run outside Barm's runtime (a bare engine, tests).
+// The natives that runtime/node.c gives a Tov program (globalThis.__tov_native), made from
+// what any JavaScript host has: for a bundle run outside Tov's runtime (a bare engine, tests).
 // Output goes to print() or console.log a line at a time; timers use the host's setTimeout if it
 // has one (captured before Node.js's replaces it), else promise jobs.
 
@@ -19,15 +19,15 @@ const later = (fn, ms) => (hostSetTimeout ? hostSetTimeout(fn, ms) : Promise.res
 
 module.exports = {
   info: () => ({
-    argv: ['barm'],
+    argv: ['tov'],
     execArgv: [],
-    execPath: '/usr/local/bin/barm',
+    execPath: '/usr/local/bin/tov',
     pid: 1,
     ppid: 0,
     platform: 'darwin',
     arch: 'arm64',
     env: {},
-    title: 'barm',
+    title: 'tov',
   }),
   cwd: () => '/',
   chdir() {},
@@ -77,7 +77,7 @@ module.exports = {
     getLoadAvg: () => [0, 0, 0],
     getCPUs: () => [],
     getInterfaceAddresses: () => [],
-    getUserInfo: () => ({ uid: 0, gid: 0, username: 'barm', homedir: '/', shell: null }),
+    getUserInfo: () => ({ uid: 0, gid: 0, username: 'tov', homedir: '/', shell: null }),
     getPriority: () => 0,
     setPriority: () => 0,
     getAvailableParallelism: () => 1,

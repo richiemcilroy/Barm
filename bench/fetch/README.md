@@ -1,11 +1,11 @@
 # fetch() client benchmark
 
-The same client program calls one server from Barm, Bun, Node and Rust, and each client's throughput, CPU time and memory is measured.
+The same client program calls one server from Tov, Bun, Node and Rust, and each client's throughput, CPU time and memory is measured.
 
-- `client.barm` is the client. Barm compiles it natively, and Bun and Node run it as TypeScript (the runner strips Barm's `try` markers and `throws` clauses).
+- `client.tov` is the client. Tov compiles it natively, and Bun and Node run it as TypeScript (the runner strips Tov's `try` markers and `throws` clauses).
 - `rust-client/` is the Rust client: reqwest 0.12 on hyper. `rust` runs it on a current-thread tokio runtime, one core like the others. `rust-mt` uses tokio's multi-thread runtime.
 - `server/` is the server: axum on a 4-thread tokio runtime, fast enough that it never limits a client.
-- `run.py` is the runner: `python3 bench/fetch/run.py [--only barm,bun] [--scenarios hello-1] [--reps 3]`.
+- `run.py` is the runner: `python3 bench/fetch/run.py [--only tov,bun] [--scenarios hello-1] [--reps 3]`.
 
 | scenario | work |
 |---|---|
@@ -25,7 +25,7 @@ The same client program calls one server from Barm, Bun, Node and Rust, and each
 
 Apple M4 Max, macOS, loopback. Each number is the median of 3 runs with clients interleaved. `cpu/request` is the client's user + system CPU time divided by requests; `peak RSS` is the client's maximum resident set.
 
-| scenario | **Barm** | Bun 1.4 | Node 26 (undici) | Rust (reqwest) | Rust, multi-thread |
+| scenario | **Tov** | Bun 1.4 | Node 26 (undici) | Rust (reqwest) | Rust, multi-thread |
 |---|---:|---:|---:|---:|---:|
 | hello-1 | **45.7k req/s** | 24.9k | 15.2k | 34.8k | 34.6k |
 | cpu/request | **10.2 µs** | 37.5 µs | 80.9 µs | 14.8 µs | 15.0 µs |
@@ -49,9 +49,9 @@ Apple M4 Max, macOS, loopback. Each number is the median of 3 runs with clients 
 | cpu/request | **11,532 µs** | 18,340 µs | 30,096 µs | 29,308 µs | 30,170 µs |
 | peak RSS | **15.0 MB** | 198 MB | 209 MB | 32.9 MB | 32.8 MB |
 
-HTTPS: the server is the same axum app behind rustls, using a certificate from `tests/fetch/tls` that every client trusts through `NODE_EXTRA_CA_CERTS`. Barm uses BoringSSL, as Bun does.
+HTTPS: the server is the same axum app behind rustls, using a certificate from `tests/fetch/tls` that every client trusts through `NODE_EXTRA_CA_CERTS`. Tov uses BoringSSL, as Bun does.
 
-| scenario | **Barm** | Bun 1.4 | Node 26 | Rust (reqwest + rustls) | Rust, multi-thread |
+| scenario | **Tov** | Bun 1.4 | Node 26 | Rust (reqwest + rustls) | Rust, multi-thread |
 |---|---:|---:|---:|---:|---:|
 | tls-hello-1 | **39.4k req/s** | 24.2k | 15.5k | 35.3k | 34.8k |
 | cpu/request | **11.7 µs** | 38.6 µs | 80.8 µs | 14.7 µs | 15.1 µs |
@@ -66,11 +66,11 @@ HTTPS: the server is the same axum app behind rustls, using a certificate from `
 | cpu/request | **2,402 µs** | 3,644 µs | 10,084 µs | 4,946 µs | 5,603 µs |
 | peak RSS | **12.7 MB** | 123 MB | 217 MB | 42.8 MB | 42.9 MB |
 
-In `tls-new-1`, Barm offers the post-quantum X25519+ML-KEM-768 key exchange, as Chrome, Firefox and Node do; Bun offers plain X25519. The post-quantum share costs the client about 40 µs per new connection (pooled connections don't pay it), and Barm still leads: it builds the ClientHello, key shares included, while the TCP handshake is in flight, and it compiles BoringSSL as a release build (`-O3 -DNDEBUG`).
+In `tls-new-1`, Tov offers the post-quantum X25519+ML-KEM-768 key exchange, as Chrome, Firefox and Node do; Bun offers plain X25519. The post-quantum share costs the client about 40 µs per new connection (pooled connections don't pay it), and Tov still leads: it builds the ClientHello, key shares included, while the TCP handshake is in flight, and it compiles BoringSSL as a release build (`-O3 -DNDEBUG`).
 
-Binary size: a Barm program that calls `fetch()` is 1.9 MB, TLS included (hello-world is 35 KB: programs that don't fetch don't link TLS). The Rust client with reqwest and rustls is 2.4 MB, and Bun is 64 MB.
+Binary size: a Tov program that calls `fetch()` is 1.9 MB, TLS included (hello-world is 35 KB: programs that don't fetch don't link TLS). The Rust client with reqwest and rustls is 2.4 MB, and Bun is 64 MB.
 
-In `big-8`, Barm is 9% ahead of Bun on half the CPU and about a third of the memory. Bun spreads work over several threads (its CPU time exceeds its wall time).
+In `big-8`, Tov is 9% ahead of Bun on half the CPU and about a third of the memory. Bun spreads work over several threads (its CPU time exceeds its wall time).
 
 ## What makes it fast
 

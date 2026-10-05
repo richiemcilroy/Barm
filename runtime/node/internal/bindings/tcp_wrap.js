@@ -1,12 +1,12 @@
 'use strict';
 
 // internalBinding('tcp_wrap'): TCP sockets (Node.js's src/tcp_wrap.cc) as libuv streams over
-// Barm's native socket handles (runtime/node.c): bind, listen (onconnection(err, client)),
+// Tov's native socket handles (runtime/node.c): bind, listen (onconnection(err, client)),
 // connect (req.oncomplete(status, handle, req, readable, writable)), names and options.
 
 const { SocketWrap } = require('internal/bindings/stream_wrap');
 
-const native = globalThis.__barm_native?.stream;
+const native = globalThis.__tov_native?.stream;
 
 const constants = { SOCKET: 0, SERVER: 1, UV_TCP_IPV6ONLY: 1, UV_TCP_REUSEPORT: 2 };
 
@@ -17,23 +17,23 @@ class TCP extends SocketWrap {
   }
 
   open(fd) {
-    return this._barmOpen(fd);
+    return this._tovOpen(fd);
   }
 
   bind(address, port) {
-    return this._barmBind(address, port, 4, false);
+    return this._tovBind(address, port, 4, false);
   }
 
   bind6(address, port, flags) {
-    return this._barmBind(address, port, 6, !!(flags & constants.UV_TCP_IPV6ONLY));
+    return this._tovBind(address, port, 6, !!(flags & constants.UV_TCP_IPV6ONLY));
   }
 
   connect(req, address, port) {
-    return this._barmConnect(req, address, port, 4);
+    return this._tovConnect(req, address, port, 4);
   }
 
   connect6(req, address, port) {
-    return this._barmConnect(req, address, port, 6);
+    return this._tovConnect(req, address, port, 6);
   }
 
   setNoDelay(enable) {

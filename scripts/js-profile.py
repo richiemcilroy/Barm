@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarizes a JavaScript profile from an npm program run with BARM_JS_PROFILE=<file>
+"""Summarizes a JavaScript profile from an npm program run with TOV_JS_PROFILE=<file>
 (JavaScriptCore's sampling profiler, one stack trace a millisecond).
 
     scripts/js-profile.py <file> [--top 40]

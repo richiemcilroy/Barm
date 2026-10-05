@@ -4,14 +4,14 @@
 // host for one timer: arm it for `ms`, and when it fires call processTimers(now), which runs what's
 // due and returns the next expiry (negative when only unref'd timers remain, 0 for none).
 // Immediates run in the loop's check phase: processImmediate. The natives
-// (globalThis.__barm_native) behind it:
+// (globalThis.__tov_native) behind it:
 //   now()                      milliseconds since the loop started
 //   timerSetup(onTimer, onCheck)
 //   timerSchedule(ms)          (re)arm the timer
 //   timerRef(bool)             whether a pending timer keeps the program running
 //   requestCheck(ref)          run onCheck in the next loop turn; ref: keep the program running
 
-const native = globalThis.__barm_native ?? require('internal/bootstrap/host_fallback');
+const native = globalThis.__tov_native ?? require('internal/bootstrap/host_fallback');
 
 const kCount = 0;
 const kRefCount = 1;

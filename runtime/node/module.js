@@ -1,8 +1,8 @@
 'use strict';
 
-// module (Barm's own; Node.js's is its whole CommonJS and ES module loader): a Barm program's
+// module (Tov's own; Node.js's is its whole CommonJS and ES module loader): a Tov program's
 // modules are bundled when it's built, so `require` finds them in the bundle
-// (globalThis.__barm_modules). createRequire(from) gives a require that resolves as the bundler
+// (globalThis.__tov_modules). createRequire(from) gives a require that resolves as the bundler
 // did: built-ins, then paths relative to `from`, then packages any bundled module required.
 
 const path = require('path');
@@ -27,7 +27,7 @@ function isBuiltin(id) {
   return typeof id === 'string' && (builtinSet.has(id) || (id.startsWith('node:') && builtinSet.has(id.slice(5))));
 }
 
-const registry = () => globalThis.__barm_modules;
+const registry = () => globalThis.__tov_modules;
 
 let byName;
 function idOf(name) {
@@ -175,7 +175,7 @@ Module.runMain = () => {};
 Module.syncBuiltinESMExports = () => {};
 Module.register = () => {};
 Module.registerHooks = () => ({ deregister() {} });
-Module.enableCompileCache = () => ({ status: 3, message: 'Barm compiles ahead of time' });
+Module.enableCompileCache = () => ({ status: 3, message: 'Tov compiles ahead of time' });
 Module.getCompileCacheDir = () => undefined;
 Module.flushCompileCache = () => {};
 Module.constants = { compileCacheStatus: { __proto__: null, FAILED: 0, ENABLED: 1, ALREADY_ENABLED: 2, DISABLED: 3 } };

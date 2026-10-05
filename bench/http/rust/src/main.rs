@@ -1,4 +1,4 @@
-// axum on tokio — same routes as server.barm.ts. WORKERS=1 is a current-thread runtime,
+// axum on tokio — same routes as server.tov.ts. WORKERS=1 is a current-thread runtime,
 // WORKERS>1 a multi-thread runtime with that many workers (or thread-per-core with MODE=tpc).
 use axum::{http::StatusCode, response::IntoResponse, routing::{get, post}, Json, Router};
 use serde::Serialize;
@@ -31,7 +31,7 @@ fn app() -> Router {
 }
 
 /// Serves the app. NODELAY=1 sets TCP_NODELAY on each connection, so responses are sent at once
-/// (as Barm sends them); by default axum leaves Nagle's algorithm on, which holds a response
+/// (as Tov sends them); by default axum leaves Nagle's algorithm on, which holds a response
 /// while earlier data is unacknowledged.
 async fn serve(listener: tokio::net::TcpListener) {
     if std::env::var("NODELAY").is_ok_and(|v| v == "1") {

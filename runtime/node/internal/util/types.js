@@ -96,7 +96,7 @@ ObjectDefineProperties(module.exports, {
         return false;
       }
 
-      // (Barm: its crypto has no KeyObject or CryptoKey yet; loading internal/crypto/keys
+      // (Tov: its crypto has no KeyObject or CryptoKey yet; loading internal/crypto/keys
       // would pull Node.js's whole crypto into every bundle)
       return false;
     },
@@ -110,7 +110,7 @@ ObjectDefineProperties(module.exports, {
         return false;
       }
 
-      // (Barm: its crypto has no KeyObject or CryptoKey yet; loading internal/crypto/keys
+      // (Tov: its crypto has no KeyObject or CryptoKey yet; loading internal/crypto/keys
       // would pull Node.js's whole crypto into every bundle)
       return false;
     },

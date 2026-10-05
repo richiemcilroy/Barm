@@ -114,8 +114,8 @@ class HTTPParser {
   #paused = false;
   #list = null;
   // (for ConnectionsList: in a message since when, and whether its headers are in)
-  _barmStart = 0;
-  _barmHeadersDone = false;
+  _tovStart = 0;
+  _tovHeadersDone = false;
 
   #reset(type) {
     this.#type = type;
@@ -125,7 +125,7 @@ class HTTPParser {
 
   initialize(type, resource, maxHeaderSize, lenient, connections) {
     this.#reset(type);
-    this._barmStart = 0;
+    this._tovStart = 0;
     if (connections instanceof ConnectionsList) {
       this.#list = connections;
       connections.push(this);
@@ -362,8 +362,8 @@ class HTTPParser {
   #startLine(b, s, e, at) {
     this.#headers = [];
     this.#upgrade = false;
-    this._barmStart = Date.now();
-    this._barmHeadersDone = false;
+    this._tovStart = Date.now();
+    this._tovHeadersDone = false;
     this[kOnMessageBegin]?.();
     const line = latin1(b, s, e);
     if (this.#type === REQUEST) {
@@ -479,7 +479,7 @@ class HTTPParser {
       this.#type === REQUEST ? this.#url : undefined, this.#type === RESPONSE ? this.#status : undefined,
       this.#type === RESPONSE ? this.#statusMessage : undefined, upgrade, keepAlive);
     this.#headerBytes = 0;
-    this._barmHeadersDone = true;
+    this._tovHeadersDone = true;
     if (ret === 2 || (upgrade && ret !== 1 && (this.#type === RESPONSE || this.#method === 'CONNECT' || noBody))) {
       // the rest of the connection isn't HTTP
       this.#upgrade = true;
@@ -503,7 +503,7 @@ class HTTPParser {
   }
 
   #complete() {
-    this._barmStart = 0;
+    this._tovStart = 0;
     this.#state = this.#upgrade ? DONE : START;
     this.#headerBytes = 0;
     this[kOnMessageComplete]?.();
@@ -528,11 +528,11 @@ class ConnectionsList {
 
   // between messages
   idle() {
-    return [...this.#all].filter((p) => p._barmStart === 0);
+    return [...this.#all].filter((p) => p._tovStart === 0);
   }
 
   active() {
-    return [...this.#all].filter((p) => p._barmStart !== 0);
+    return [...this.#all].filter((p) => p._tovStart !== 0);
   }
 
   // in a message too long: its headers past headersTimeout, or all of it past requestTimeout
@@ -540,9 +540,9 @@ class ConnectionsList {
     const now = Date.now();
     const out = [];
     for (const p of this.#all) {
-      if (p._barmStart === 0) continue;
-      const age = now - p._barmStart;
-      if ((!p._barmHeadersDone && headersTimeout > 0 && age > headersTimeout) || (requestTimeout > 0 && age > requestTimeout)) {
+      if (p._tovStart === 0) continue;
+      const age = now - p._tovStart;
+      if ((!p._tovHeadersDone && headersTimeout > 0 && age > headersTimeout) || (requestTimeout > 0 && age > requestTimeout)) {
         out.push(p);
         this.#all.delete(p);
       }

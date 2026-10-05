@@ -4,7 +4,7 @@
 // JavaScriptCore: the heap's live size and capacity come from it (native heapStats); V8's
 // spaces, code statistics, flags and profilers have no counterpart, so they read as empty.
 
-const native = globalThis.__barm_native;
+const native = globalThis.__tov_native;
 
 const kHeapSpaces = ['read_only_space', 'new_space', 'old_space', 'code_space', 'shared_space', 'trusted_space', 'shared_trusted_space',
   'new_large_object_space', 'large_object_space', 'code_large_object_space', 'shared_large_object_space',
