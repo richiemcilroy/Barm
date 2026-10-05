@@ -3529,7 +3529,8 @@ static void bm_fire_timers(void) {
     while (bm_ntimers && bm_timers[0].when <= now) {
         bm_timer t = bm_timer_pop();
         if (!t.cb.fn) continue;
-        bm_loop_work(now);
+        /* (an unref'd timer firing, like AbortSignal.timeout's, isn't the program at work) */
+        if (!t.weak) bm_loop_work(now);
         void (*fn)(bm_env *) = (void (*)(bm_env *))t.cb.fn;
         if (t.every) {
             bm_env_retain(t.cb.env);   /* the call's own reference: clearInterval may run inside it */
@@ -3567,6 +3568,9 @@ static uint64_t bm_loop_host_at, bm_loop_host_asked;
 
 void (*bm_loop_idle)(bool deep);
 static bool bm_loop_idled;   /* the loop has been idle since the program started */
+/* Set by a bm_io handler whose event was housekeeping, not the program at work (an idle pooled
+ * connection closing): it doesn't put off bm_loop_idle. */
+bool bm_io_quiet;
 #define BM_LOOP_IDLE_MS 1000
 #define BM_LOOP_DEEP_IDLE_MS 10000
 
@@ -4632,16 +4636,18 @@ static void bm_http_loop(void) {
             bool readable = events[i].events & (EPOLLIN | EPOLLRDHUP), broken = events[i].events & (EPOLLHUP | EPOLLERR);
 #endif
             if (tag == &bm_http_timer_tag) continue;
-            worked = true;
             if ((uintptr_t)tag & 1) {
                 bm_io *h = (bm_io *)((uintptr_t)tag - 1);
+                bm_io_quiet = false;
 #ifdef BM_KQUEUE
                 h->ready(h, events[i].filter == EVFILT_READ, events[i].filter == EVFILT_WRITE, broken);
 #else
                 h->ready(h, (events[i].events & (EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR)) != 0, (events[i].events & (EPOLLOUT | EPOLLERR)) != 0, false);
 #endif
+                if (!bm_io_quiet) worked = true;
                 continue;
             }
+            worked = true;
             if (bm_http_is_server(tag)) {
                 bm_http_accept(tag);
                 continue;
@@ -6674,6 +6680,7 @@ static void bm_fc_ready(bm_io *h, bool readable, bool writable, bool broken) {
     if (c->dead) return;
     bm_fr *r = c->r;
     if (!r) {
+        bm_io_quiet = true;
         /* idle: the server closed it (or sent something unasked for) */
         if (readable || broken) {
             if (c->tls && !broken) {
