@@ -44,11 +44,15 @@ build="$cache/build-$os-$arch"
 flags="-ffunction-sections -fdata-sections"
 [ "$os" = darwin ] && flags="$flags -I$here/include"
 out="$cache/$os-$arch"
+# (ThinLTO on macOS, whose packaging below merges the bitcode into machine code; Linux's doesn't
+# yet, so its objects stay machine code)
+lto="-DLTO_MODE="
+[ "$os" = darwin ] && lto="-DLTO_MODE=thin"
 # (ThinLTO: the objects are bitcode, optimized across each other when they're merged below, so
 # a program's own link stays an ordinary one)
 cmake -S "$src" -B "$build" -G Ninja -DPORT=JSCOnly -DCMAKE_BUILD_TYPE=Release -DENABLE_STATIC_JSC=ON \
     -DUSE_THIN_ARCHIVES=OFF -DENABLE_FTL_JIT=ON -DDEVELOPER_MODE=OFF -DENABLE_API_TESTS=OFF -DENABLE_TOOLS=OFF \
-    -DUSE_CXX_STDLIB_ASSERTIONS=OFF -DLTO_MODE=thin -DUSE_LD_LLD=OFF \
+    -DUSE_CXX_STDLIB_ASSERTIONS=OFF $lto -DUSE_LD_LLD=OFF \
     -DCMAKE_C_FLAGS="$flags" \
     -DCMAKE_CXX_FLAGS="$flags -DTOV_JSC_CACHE_VERSION=${version}u" > "$cache/configure-$os-$arch.log"
 nice -n 10 cmake --build "$build" --target JavaScriptCore JavaScriptCoreJIT > "$cache/build-$os-$arch.log"
