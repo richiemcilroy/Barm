@@ -11,6 +11,9 @@
 #include "Completion.h"
 #include "InitializeThreading.h"
 #include "JSCInlines.h"
+#include "JSGenericTypedArrayViewInlines.h"
+#include "JSTypedArrays.h"
+#include "TopExceptionScope.h"
 #include "Options.h"
 #include "SourceProvider.h"
 #include <unistd.h>
@@ -117,6 +120,32 @@ void BMRunLoopSetWakeUp(void (*wake)(void))
     RunLoop::setWakeUpCallback([wake] {
         wake();
     });
+}
+
+JSObjectRef BMMakeUint8Array(JSContextRef ctx, size_t len, void** bytes)
+{
+    JSGlobalObject* globalObject = toJS(ctx);
+    VM& vm = globalObject->vm();
+    JSLockHolder locker(vm);
+    auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
+    Structure* structure = globalObject->typedArrayStructure(TypeUint8, false);
+    JSUint8Array* array;
+    if (len <= JSArrayBufferView::fastSizeLimit)
+        array = JSUint8Array::createUninitialized(globalObject, structure, len);
+    else {
+        // (a big one with its ArrayBuffer from the start: asked for later, as a DataView over it
+        // asks, the engine would make one then and count the bytes towards collections again)
+        RefPtr<ArrayBuffer> buffer = ArrayBuffer::tryCreateUninitialized(len, 1);
+        if (!buffer)
+            return nullptr;
+        array = JSUint8Array::create(globalObject, structure, WTF::move(buffer), 0, len);
+    }
+    if (scope.exception() || !array) {
+        scope.clearException();
+        return nullptr;
+    }
+    *bytes = array->vector();
+    return toRef(array);
 }
 
 bool BMSetOptions(const char* options)
