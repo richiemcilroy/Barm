@@ -44,9 +44,11 @@ build="$cache/build-$os-$arch"
 flags="-ffunction-sections -fdata-sections"
 [ "$os" = darwin ] && flags="$flags -I$here/include"
 out="$cache/$os-$arch"
+# (ThinLTO: the objects are bitcode, optimized across each other when they're merged below, so
+# a program's own link stays an ordinary one)
 cmake -S "$src" -B "$build" -G Ninja -DPORT=JSCOnly -DCMAKE_BUILD_TYPE=Release -DENABLE_STATIC_JSC=ON \
     -DUSE_THIN_ARCHIVES=OFF -DENABLE_FTL_JIT=ON -DDEVELOPER_MODE=OFF -DENABLE_API_TESTS=OFF -DENABLE_TOOLS=OFF \
-    -DUSE_CXX_STDLIB_ASSERTIONS=OFF \
+    -DUSE_CXX_STDLIB_ASSERTIONS=OFF -DLTO_MODE=thin -DUSE_LD_LLD=OFF \
     -DCMAKE_C_FLAGS="$flags" \
     -DCMAKE_CXX_FLAGS="$flags -DBARM_JSC_CACHE_VERSION=${version}u" > "$cache/configure-$os-$arch.log"
 nice -n 10 cmake --build "$build" --target JavaScriptCore JavaScriptCoreJIT > "$cache/build-$os-$arch.log"
@@ -58,9 +60,10 @@ jit=$(find "$build/Source/JavaScriptCore/CMakeFiles/JavaScriptCoreJIT.dir" -name
 if [ "$os" = darwin ]; then
     # The interpreters (LLInt, IPInt) are assembly whose handlers are found at offsets from each
     # other: a program linked with -dead_strip mustn't drop those no symbol names, as the object
-    # (MH_SUBSECTIONS_VIA_SYMBOLS) would let it. Without the flag the section is kept whole.
-    llint="$out.tmp/LowLevelInterpreter.cpp.o"
-    cp "$build/Source/JavaScriptCore/CMakeFiles/LowLevelInterpreterLib.dir/llint/LowLevelInterpreter.cpp.o" "$llint"
+    # (MH_SUBSECTIONS_VIA_SYMBOLS) would let it. Without the flag the section is kept whole. It's
+    # compiled to machine code on its own, outside the link-time optimization.
+    llint="$out.tmp/LowLevelInterpreter.o"
+    clang -c -O3 -x ir "$build/Source/JavaScriptCore/CMakeFiles/LowLevelInterpreterLib.dir/llint/LowLevelInterpreter.cpp.o" -o "$llint"
     python3 -c 'import struct, sys
 b = bytearray(open(sys.argv[1], "rb").read())
 assert struct.unpack_from("<I", b, 0)[0] == 0xfeedfacf
@@ -68,8 +71,15 @@ struct.pack_into("<I", b, 24, struct.unpack_from("<I", b, 24)[0] & ~0x2000)
 open(sys.argv[1], "wb").write(b)' "$llint"
     cp "$build/lib/libJavaScriptCore.a" "$out.tmp/libJavaScriptCore.a"
     ar -d "$out.tmp/libJavaScriptCore.a" LowLevelInterpreter.cpp.o
-    libtool -static -o "$out.tmp/lib/libbarmjsc.a" "$out.tmp/libJavaScriptCore.a" "$build/lib/libWTF.a" "$build/lib/libbmalloc.a" "$llint" $jit 2> /dev/null
-    rm "$llint" "$out.tmp/libJavaScriptCore.a"
+    # the rest, optimized as one program (ThinLTO) into one object of machine code, which a
+    # program's link takes in atom by atom as from any object: all of the engine, and what it
+    # uses of WTF and bmalloc (which hold alternatives for other platforms), keeping what the
+    # interpreters, outside it, call (else they're the engine's own, and unused, to the optimizer)
+    nm -u "$llint" | sed 's/^/-Wl,-u,/' > "$out.tmp/llint-uses"
+    clang -r -nostdlib -flto=thin -O3 -Wl,-keep_private_externs @"$out.tmp/llint-uses" -Wl,-force_load,"$out.tmp/libJavaScriptCore.a" $jit "$build/lib/libWTF.a" "$build/lib/libbmalloc.a" \
+        -Wl,-cache_path_lto,"$cache/lto-cache-$os-$arch" -o "$out.tmp/engine.o"
+    libtool -static -o "$out.tmp/lib/libbarmjsc.a" "$out.tmp/engine.o" "$llint" 2> /dev/null
+    rm "$llint" "$out.tmp/llint-uses" "$out.tmp/libJavaScriptCore.a" "$out.tmp/engine.o"
     headers="$build/JavaScriptCore.framework/Headers"
 else
     {
