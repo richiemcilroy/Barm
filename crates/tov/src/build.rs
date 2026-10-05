@@ -14,6 +14,8 @@ use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
 /// runtime/tls.c and the vendored BoringSSL, embedded by the Cargo build script (../build.rs).
+use crate::tls_flags;
+
 mod tls_files {
     include!(concat!(env!("OUT_DIR"), "/tls_files.rs"));
 }
@@ -330,30 +332,61 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     for d in [&bin_dir, &c_dir] {
         std::fs::create_dir_all(d).map_err(|e| BuildError::Message(format!("can't create {}: {e}", d.display())))?;
     }
-    // The runtime is compiled once per compiler and flags; programs link against the object.
+    // The runtime is compiled once per compiler and flags; programs link against the object. It,
+    // the JavaScript bridge and the TLS archives (each cached apart) compile on threads of their
+    // own while the program's own code compiles here.
     let rt_obj = c_dir.join(format!("rt-{rt_key}.o"));
-    if !cached(&rt_obj) {
+    let message = |e: BuildError| match e {
+        BuildError::Message(m) => m,
+        BuildError::Diagnostics(..) => "internal error: diagnostics from compiling C".into(),
+    };
+    let rt_job = || -> Result<(), String> {
+        if cached(&rt_obj) {
+            return Ok(());
+        }
         let rt_c = c_dir.join(format!("rt-{rt_key}.c"));
-        std::fs::write(&rt_c, codegen::runtime_source()).map_err(|e| BuildError::Message(format!("can't write {}: {e}", rt_c.display())))?;
+        std::fs::write(&rt_c, codegen::runtime_source()).map_err(|e| format!("can't write {}: {e}", rt_c.display()))?;
         let tmp = c_dir.join(format!("rt-{rt_key}.tmp{}.o", std::process::id()));
         let mut cmd = Command::new(&cc);
         cmd.args(&flags).args(["-ffunction-sections", "-fdata-sections", "-c", "-o"]).arg(&tmp).arg(&rt_c);
-        run_cc(cmd, &cc, &rt_c)?;
-        std::fs::rename(&tmp, &rt_obj).map_err(|e| BuildError::Message(format!("can't move the runtime into the cache: {e}")))?;
-    }
-    // Every program starts with the same runtime interface and prelude: precompile it once (per
-    // compiler and flags) and compile only the program's own code against it.
-    let prefix = codegen::fixed_prefix();
-    let pch = match c_src.strip_prefix(prefix.as_str()) {
-        Some(_) => precompiled_header(&cc, &flags, &c_dir, &prefix, &rt_key),
-        None => None,
+        run_cc(cmd, &cc, &rt_c).map_err(message)?;
+        std::fs::rename(&tmp, &rt_obj).map_err(|e| format!("can't move the runtime into the cache: {e}"))
     };
-    let c_path = c_dir.join(format!("{key}.c"));
-    let c_text: &str = match &pch {
-        Some(_) => &c_src[prefix.len()..],
-        None => &c_src,
+    let js_flags: Option<Vec<String>> = jsc.as_ref().map(|j| flags.iter().map(|f| f.to_string()).chain(j.cflags.iter().cloned()).collect());
+    let js_job = || -> Result<Option<Vec<PathBuf>>, String> {
+        match &js_flags {
+            Some(f) => js_objects(&cc, f, &c_dir, &js_key).map(Some).map_err(message),
+            None => Ok(None),
+        }
     };
-    std::fs::write(&c_path, c_text).map_err(|e| BuildError::Message(format!("can't write {}: {e}", c_path.display())))?;
+    let tls_job = || -> Result<Option<[PathBuf; 2]>, String> { tls.as_ref().map(|t| t.build(&cc, &c_dir)).transpose().map_err(message) };
+    let parallel = std::thread::scope(|s| {
+        let rt_thread = s.spawn(rt_job);
+        let js_thread = s.spawn(js_job);
+        let tls_thread = s.spawn(tls_job);
+        // Every program starts with the same runtime interface and prelude: precompile it once
+        // (per compiler and flags) and compile only the program's own code against it.
+        let prefix = codegen::fixed_prefix();
+        let pch = match c_src.strip_prefix(prefix.as_str()) {
+            Some(_) => precompiled_header(&cc, &flags, &c_dir, &prefix, &rt_key),
+            None => None,
+        };
+        let c_path = c_dir.join(format!("{key}.c"));
+        let c_text: &str = match &pch {
+            Some(_) => &c_src[prefix.len()..],
+            None => &c_src,
+        };
+        let written = std::fs::write(&c_path, c_text).map_err(|e| format!("can't write {}: {e}", c_path.display()));
+        let rt = rt_thread.join().unwrap_or_else(|_| Err("internal error: compiling the runtime panicked".into()));
+        let js = js_thread.join().unwrap_or_else(|_| Err("internal error: compiling the JavaScript bridge panicked".into()));
+        let tls = tls_thread.join().unwrap_or_else(|_| Err("internal error: compiling the TLS library panicked".into()));
+        (pch, c_path, written, rt, js, tls)
+    });
+    let (pch, c_path, written, rt_done, js_objs, tls_archives) = parallel;
+    written.map_err(BuildError::Message)?;
+    rt_done.map_err(BuildError::Message)?;
+    let js_objs = js_objs.map_err(BuildError::Message)?;
+    let tls_archives = tls_archives.map_err(BuildError::Message)?;
     let mut flags = flags.clone();
     let include;
     if let Some(h) = &pch {
@@ -375,10 +408,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         cmd.args(extra.split_whitespace()).arg("-o").arg(&tmp).arg(&obj);
     }
     cmd.arg(&rt_obj);
-    if let Some(jsc) = &jsc {
-        let mut js_flags = flags_base(&flags, &pch);
-        js_flags.extend(jsc.cflags.iter().cloned());
-        let objs = js_objects(&cc, &js_flags, &c_dir, &js_key)?;
+    if let (Some(jsc), Some(objs)) = (&jsc, &js_objs) {
         cmd.arg(&objs[0]).arg(&objs[1]);
         if native {
             // native addons find Node-API in the program (they're linked against no library)
@@ -391,8 +421,8 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         }
         cmd.args(&jsc.libs);
     }
-    if let Some(t) = &tls {
-        cmd.arg(t.build(&cc, &c_dir)?);
+    if let Some(archives) = &tls_archives {
+        cmd.args(archives);
         // BoringSSL is C++ (no exceptions or RTTI): a few libc++/libstdc++ helpers
         cmd.arg(if cfg!(target_vendor = "apple") { "-lc++" } else { "-lstdc++" });
     }
@@ -434,16 +464,6 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
 }
 
 /// The compiler flags without the precompiled header's `-include` (for other C files).
-fn flags_base(flags: &[&str], pch: &Option<PathBuf>) -> Vec<String> {
-    let mut out: Vec<String> = flags.iter().map(|s| s.to_string()).collect();
-    if pch.is_some()
-        && let Some(i) = out.iter().position(|f| f == "-include")
-    {
-        out.drain(i..i + 2);
-    }
-    out
-}
-
 /// runtime/js.c and runtime/node.c compiled once per compiler and flags: (js.o, node.o).
 fn js_objects(cc: &str, flags: &[String], c_dir: &Path, key: &str) -> Result<Vec<PathBuf>, BuildError> {
     let objs = vec![c_dir.join(format!("js-{key}.o")), c_dir.join(format!("node-{key}.o")), c_dir.join(format!("napi-{key}.o"))];
@@ -456,12 +476,26 @@ fn js_objects(cc: &str, flags: &[String], c_dir: &Path, key: &str) -> Result<Vec
     for (name, text) in [("tov.h", codegen::RUNTIME_H), ("js.h", codegen::JS_H), ("js.c", JS_C), ("node.c", NODE_C), ("napi.c", NAPI_C)] {
         std::fs::write(dir.join(name), text).map_err(|e| fail(e.to_string()))?;
     }
-    for (src, obj) in ["js.c", "node.c", "napi.c"].iter().zip(&objs) {
-        let tmp = obj.with_extension(format!("tmp{}.o", std::process::id()));
-        let mut cmd = Command::new(cc);
-        cmd.args(flags).args(["-ffunction-sections", "-fdata-sections", "-c", "-o"]).arg(&tmp).arg(dir.join(src));
-        run_cc(cmd, cc, &dir.join(src))?;
-        std::fs::rename(&tmp, obj).map_err(|e| fail(e.to_string()))?;
+    // (the three at once)
+    let results: Vec<Result<(), BuildError>> = std::thread::scope(|s| {
+        let jobs: Vec<_> = ["js.c", "node.c", "napi.c"]
+            .iter()
+            .zip(&objs)
+            .map(|(src, obj)| {
+                let dir = &dir;
+                s.spawn(move || {
+                    let tmp = obj.with_extension(format!("tmp{}.o", std::process::id()));
+                    let mut cmd = Command::new(cc);
+                    cmd.args(flags).args(["-ffunction-sections", "-fdata-sections", "-c", "-o"]).arg(&tmp).arg(dir.join(src));
+                    run_cc(cmd, cc, &dir.join(src))?;
+                    std::fs::rename(&tmp, obj).map_err(|e| BuildError::Message(format!("can't build the JavaScript bridge: {e}")))
+                })
+            })
+            .collect();
+        jobs.into_iter().map(|j| j.join().unwrap_or_else(|_| Err(BuildError::Message("internal error: compiling the JavaScript bridge panicked".into())))).collect()
+    });
+    for r in results {
+        r?;
     }
     for name in ["tov.h", "js.h", "js.c", "node.c", "napi.c"] {
         let _ = std::fs::remove_file(dir.join(name));
@@ -639,29 +673,32 @@ fn run_cc(mut cmd: Command, cc: &str, c_path: &Path) -> Result<(), BuildError> {
     Ok(())
 }
 
-/// The TLS archive: runtime/tls.c and BoringSSL (vendor/boringssl), compiled once per compiler,
-/// SDK and sanitizer flags. Its flags are fixed (-O2 whatever the program's -O, and no
-/// --unchecked), so other builds share it; only fetch() programs link it.
+/// The TLS archives: the vendored libraries (BoringSSL, brotli, libdeflate, zlib, zstd), and the
+/// runtime's files that use them (runtime/tls.c, codecs.c, crypto.c, compress.c). Their flags are
+/// fixed (tls_flags: -O3 whatever the program's -O, and no --unchecked), so every build shares
+/// them; only fetch() programs link them. The vendored archive is keyed by its sources and flags
+/// alone, and the compiler carries it precompiled (see build.rs), so it's compiled here only for
+/// sanitizer builds or when the compiler was built without it; the runtime's, a few files, is
+/// compiled once per runtime, compiler and SDK.
 struct TlsArchive {
     key: String,
+    vendor_key: String,
     /// flags for C, assembly and C++ alike
     flags: Vec<String>,
 }
 
 impl TlsArchive {
     fn new(cc: &str, sysroot: Option<&str>, extra: &str) -> TlsArchive {
-        let mut flags: Vec<String> = ["-O3", "-DNDEBUG", "-w", "-fno-stack-protector", "-U_FORTIFY_SOURCE", "-D_FORTIFY_SOURCE=0", "-ffunction-sections", "-fdata-sections", "-fno-strict-aliasing", "-fvisibility=hidden"]
-            .map(String::from)
-            .to_vec();
+        let sanitizers: Vec<&str> = if extra.contains("-fsanitize") { extra.split_whitespace().collect() } else { Vec::new() };
+        let mut flags: Vec<String> = tls_flags::FLAGS.iter().map(|f| f.to_string()).collect();
         if let Some(sdk) = sysroot {
             flags.push("-isysroot".into());
             flags.push(sdk.into());
         }
-        if extra.contains("-fsanitize") {
-            flags.extend(extra.split_whitespace().map(String::from));
-        }
-        let key = hash_hex(&[tls_files::TLS_KEY.as_bytes(), codegen::RUNTIME_H.as_bytes(), cc.as_bytes(), flags.join(" ").as_bytes()]);
-        TlsArchive { key, flags }
+        flags.extend(sanitizers.iter().map(|f| f.to_string()));
+        let vendor_key = tls_flags::vendor_key(tls_files::VENDOR_KEY, &sanitizers);
+        let key = hash_hex(&[tls_files::RUNTIME_KEY.as_bytes(), vendor_key.as_bytes(), codegen::RUNTIME_H.as_bytes(), cc.as_bytes(), flags.join(" ").as_bytes()]);
+        TlsArchive { key, vendor_key, flags }
     }
 
     /// The C++ compiler that goes with `cc` (CXX overrides it).
@@ -684,40 +721,51 @@ impl TlsArchive {
         "c++".into()
     }
 
-    /// The archive, compiling it first if it isn't cached.
-    fn build(&self, cc: &str, c_dir: &Path) -> Result<PathBuf, BuildError> {
-        let archive = c_dir.join(format!("tls-{}.a", self.key));
-        if cached(&archive) {
-            return Ok(archive);
-        }
-        eprintln!("tov: compiling the TLS library (BoringSSL, brotli, libdeflate, zlib, zstd); this happens once");
+    /// The archives to link (the runtime's, then the vendored libraries it uses), compiling them
+    /// first if they aren't cached.
+    fn build(&self, cc: &str, c_dir: &Path) -> Result<[PathBuf; 2], BuildError> {
         let fail = |what: String| BuildError::Message(format!("can't build the TLS library: {what}"));
-        let dir = c_dir.join(format!("tls-{}.tmp{}", self.key, std::process::id()));
+        let vendor = c_dir.join(format!("vendor-{}.a", self.vendor_key));
+        if !cached(&vendor) {
+            if self.vendor_key == tls_files::VENDOR_ARCHIVE_KEY && !tls_files::VENDOR_ARCHIVE.is_empty() {
+                let tmp = c_dir.join(format!("vendor-{}.tmp{}.a", self.vendor_key, std::process::id()));
+                std::fs::write(&tmp, tls_files::VENDOR_ARCHIVE).map_err(|e| fail(format!("{e}")))?;
+                std::fs::rename(&tmp, &vendor).map_err(|e| fail(format!("can't move it into the cache: {e}")))?;
+            } else {
+                eprintln!("tov: compiling the TLS library (BoringSSL, brotli, libdeflate, zlib, zstd); this happens once");
+                self.compile(cc, c_dir, &vendor, |p| p.starts_with("vendor/"))?;
+            }
+        }
+        let runtime = c_dir.join(format!("tls-{}.a", self.key));
+        if !cached(&runtime) {
+            self.compile(cc, c_dir, &runtime, |p| p.starts_with("runtime/"))?;
+        }
+        Ok([runtime, vendor])
+    }
+
+    /// Compiles the TLS files `pick` chooses into `archive`, in parallel.
+    fn compile(&self, cc: &str, c_dir: &Path, archive: &Path, pick: impl Fn(&str) -> bool) -> Result<(), BuildError> {
+        let fail = |what: String| BuildError::Message(format!("can't build the TLS library: {what}"));
+        let name = archive.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let dir = c_dir.join(format!("{name}.tmp{}", std::process::id()));
         for (rel, bytes) in tls_files::TLS_FILES.iter().copied().chain([("runtime/tov.h", codegen::RUNTIME_H.as_bytes())]) {
             let path = dir.join(rel);
             std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| fail(format!("{e}")))?;
             std::fs::write(&path, bytes).map_err(|e| fail(format!("{e}")))?;
         }
-        let sources: Vec<&str> = tls_files::TLS_FILES.iter().map(|f| f.0).filter(|p| p.ends_with(".cc") || p.ends_with(".S") || p.ends_with(".c")).collect();
+        let sources: Vec<(&str, &[&str])> = tls_files::TLS_FILES.iter().filter(|f| pick(f.0)).filter_map(|f| tls_flags::lang(f.0).map(|l| (f.0, l))).collect();
         let cxx = Self::cxx(cc);
-        let include = ["vendor/boringssl/include", "vendor/brotli/c/include", "vendor/libdeflate", "vendor/zlib", "vendor/zstd/lib", "runtime"].map(|p| format!("-I{}", dir.join(p).display()));
-        // compile in parallel: ~400 files, once
-        let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(sources.len());
+        let include: Vec<String> = tls_flags::INCLUDES.iter().map(|p| format!("-I{}", dir.join(p).display())).collect();
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(sources.len().max(1));
         let next = std::sync::atomic::AtomicUsize::new(0);
         let errors = std::sync::Mutex::new(Vec::new());
         std::thread::scope(|s| {
             for _ in 0..threads {
                 s.spawn(|| loop {
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let Some(src) = sources.get(i) else { break };
-                    let (compiler, lang): (&str, &[&str]) = if src.ends_with(".cc") {
-                        (&cxx, &["-std=c++17", "-fno-exceptions", "-fno-rtti"])
-                    } else if src.ends_with(".c") {
-                        (cc, &["-std=gnu11"])
-                    } else {
-                        (cc, &[])
-                    };
-                    let out = Command::new(compiler).args(&self.flags).args(lang).args(&include).arg("-c").arg(dir.join(src)).arg("-o").arg(dir.join(format!("{i}.o"))).output();
+                    let Some((src, lang)) = sources.get(i) else { break };
+                    let compiler: &str = if src.ends_with(".cc") { &cxx } else { cc };
+                    let out = Command::new(compiler).args(&self.flags).args(*lang).args(&include).arg("-c").arg(dir.join(src)).arg("-o").arg(dir.join(format!("{i}.o"))).output();
                     match out {
                         Ok(o) if o.status.success() => {}
                         Ok(o) => errors.lock().unwrap().push(format!("{src}: {}", String::from_utf8_lossy(&o.stderr).lines().take(5).collect::<Vec<_>>().join("\n"))),
@@ -732,7 +780,7 @@ impl TlsArchive {
         }
         // the toolchain's own archiver (next to the compiler we picked), else the one on PATH
         let ar = Path::new(cc).parent().map(|d| d.join("ar")).filter(|p| p.is_file()).map_or("ar".to_string(), |p| p.to_string_lossy().into_owned());
-        let tmp = c_dir.join(format!("tls-{}.tmp{}.a", self.key, std::process::id()));
+        let tmp = c_dir.join(format!("{name}.tmp{}.a", std::process::id()));
         let objs: Vec<PathBuf> = (0..sources.len()).map(|i| dir.join(format!("{i}.o"))).collect();
         let out = Command::new(&ar).arg("rcs").arg(&tmp).args(&objs).output().map_err(|e| fail(format!("can't run `{ar}`: {e}")))?;
         let _ = std::fs::remove_dir_all(&dir);
@@ -740,24 +788,15 @@ impl TlsArchive {
             let _ = std::fs::remove_file(&tmp);
             return Err(fail(format!("`{ar}` failed: {}", String::from_utf8_lossy(&out.stderr))));
         }
-        std::fs::rename(&tmp, &archive).map_err(|e| {
+        std::fs::rename(&tmp, archive).map_err(|e| {
             let _ = std::fs::remove_file(&tmp);
             fail(format!("can't move it into the cache: {e}"))
         })?;
-        Ok(archive)
+        Ok(())
     }
 }
 
 /// A 128-bit content hash (two independent 64-bit lanes), hex-encoded. For cache keys, not security.
 fn hash_hex(parts: &[&[u8]]) -> String {
-    let (mut a, mut b): (u64, u64) = (0xcbf29ce484222325, 0x84222325cbf29ce4);
-    for part in parts {
-        for &byte in part.iter() {
-            a = (a ^ byte as u64).wrapping_mul(0x100000001b3);
-            b = (b.rotate_left(5) ^ byte as u64).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
-        }
-        a = (a ^ 0xff).wrapping_mul(0x100000001b3);
-        b = (b.rotate_left(5) ^ part.len() as u64).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
-    }
-    format!("{a:016x}{b:016x}")
+    tls_flags::hash_hex(parts)
 }
