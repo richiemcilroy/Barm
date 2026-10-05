@@ -45,7 +45,7 @@ cmake -S "$src" -B "$build" -G Ninja -DPORT=JSCOnly -DCMAKE_BUILD_TYPE=Release -
     -DUSE_THIN_ARCHIVES=OFF -DENABLE_FTL_JIT=ON -DDEVELOPER_MODE=OFF -DENABLE_API_TESTS=OFF -DENABLE_TOOLS=OFF \
     -DCMAKE_C_FLAGS="-ffunction-sections -fdata-sections" \
     -DCMAKE_CXX_FLAGS="-ffunction-sections -fdata-sections -DBARM_JSC_CACHE_VERSION=${version}u" > "$cache/configure-$os-$arch.log"
-nice -n 10 cmake --build "$build" --target JavaScriptCore > "$cache/build-$os-$arch.log"
+nice -n 10 cmake --build "$build" --target JavaScriptCore JavaScriptCoreJIT > "$cache/build-$os-$arch.log"
 
 # one archive: JavaScriptCore, its JIT's objects (an object library), WTF and bmalloc
 rm -rf "$out.tmp"
