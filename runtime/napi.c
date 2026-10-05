@@ -14,7 +14,7 @@
 
 #include "js.h"
 
-#ifdef __APPLE__
+#if defined(__APPLE__) && !defined(BM_JSC_OWN)
 #include <JavaScriptCore/JavaScriptCore.h>
 #else
 #include <JavaScriptCore/JavaScript.h>

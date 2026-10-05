@@ -4,10 +4,16 @@
 
 #include "js.h"
 
-#ifdef __APPLE__
+/* The engine: Barm's own JavaScriptCore (BM_JSC_OWN: scripts/jsc, linked into the program), or
+ * the system's (BM_JSC_SYSTEM: macOS's framework), or WebKitGTK's elsewhere. */
+#if defined(__APPLE__) && !defined(BM_JSC_OWN)
+#define BM_JSC_SYSTEM 1
 #include <JavaScriptCore/JavaScriptCore.h>
 #else
 #include <JavaScriptCore/JavaScript.h>
+#endif
+#ifdef BM_JSC_OWN
+#include <JavaScriptCore/BarmAPI.h>
 #endif
 #ifdef __APPLE__
 #include <CoreFoundation/CoreFoundation.h>
@@ -95,38 +101,44 @@ static JSStringRef bm_js_module_text(uint32_t i) {
     return bm_js_string_ref(src, len, false);
 }
 
-#ifdef __APPLE__
+#if defined(BM_JSC_OWN) || defined(__APPLE__)
 /* The bytecode cache. A module's bytecode (its functions' too, all of them) is written to a file
  * the first time the program runs, and the next run reads it back instead of parsing: the media
  * server Cap runs (654 modules, 5 MB) spends ~35 ms parsing modules at start, and more compiling
- * the functions it calls. JavaScriptCore does this through JSScript (its Objective-C API), whose
- * cache it only reads from a "data vault" directory (one only Apple's own software can make); so
- * the cache's file is set on the JSScript directly (its m_cachePath, checked to be what's
- * expected: if JavaScriptCore changes, nothing is cached). The engine checks a cache before it
- * uses one (its source, the engine's version, this boot: one that doesn't match is emptied and
- * written again). The files are written by a process of their own (the program, run again to
- * write them: BARM_JS_CACHE_WRITE), started when the program first idles or exits, at a low
- * priority, each to a temporary file renamed into place: a file is whole or isn't there. They're
- * in the user's temporary directory (which the system empties of what isn't used), named for the
- * module's text, so programs share them; or in BARM_JS_CACHE_DIR. BARM_JS_CACHE=0 turns it off. */
+ * the functions it calls. With Barm's own JavaScriptCore (BM_JSC_OWN, scripts/jsc) it's
+ * BarmAPI.h's BMEvaluateScript and BMWriteBytecode, the text read where it is in the program;
+ * with the system's on macOS, JSScript (the Objective-C API), whose cache the engine only reads
+ * from a "data vault" directory (one only Apple's own software can make), so the cache's file is
+ * set on the JSScript directly (its m_cachePath, checked to be what's expected: if
+ * JavaScriptCore changes, nothing is cached). The engine checks a cache before it uses one (its
+ * text, the engine's build; the system's, this boot too): one that doesn't match is written
+ * again. The files are written by a process of their own (the program, run again to write them:
+ * BARM_JS_CACHE_WRITE), started when the program first idles or exits, at a low priority, each
+ * to a temporary file renamed into place: a file is whole or isn't there. They're in the user's
+ * temporary directory on macOS (which the system empties of what isn't used), ~/.cache/barm-js
+ * elsewhere, named for the module's text, so programs share them; or in BARM_JS_CACHE_DIR.
+ * BARM_JS_CACHE=0 turns it off. */
 #include <fcntl.h>
-#include <mach-o/dyld.h>
-#include <objc/message.h>
-#include <objc/runtime.h>
 #include <signal.h>
 #include <spawn.h>
-#include <sys/qos.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
-
-extern char **environ;
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#include <sys/qos.h>
 /* (<spawn.h>'s, hidden under strict standards) */
 extern int posix_spawnattr_set_qos_class_np(posix_spawnattr_t *attr, qos_class_t qos);
-
+#endif
+#ifdef BM_JSC_SYSTEM
+#include <objc/message.h>
+#include <objc/runtime.h>
 /* (the Objective-C runtime's, not in its headers) */
 extern void *objc_autoreleasePoolPush(void);
 extern void objc_autoreleasePoolPop(void *pool);
+#endif
+
+extern char **environ;
 
 /* (smaller modules parse faster than a cache is read: a program of only small modules, such as
  * the 7 KB the runtime's own bootstrap is, starts ~1 ms sooner without one) */
@@ -134,22 +146,43 @@ extern void objc_autoreleasePoolPop(void *pool);
 
 static struct {
     int state;              /* 0 not yet looked, 1 on, -1 off */
+#ifdef BM_JSC_SYSTEM
     Class script;           /* JSScript */
     ptrdiff_t cache_path;   /* its m_cachePath */
     id context;             /* a JSContext over bm_js_ctx */
     id vm;                  /* its JSVirtualMachine */
+#endif
     char dir[1024];
     uint32_t *queue;        /* modules to write */
     size_t nqueue, capqueue;
 } bm_jsc;
 
+/* This program's executable, to start again (the cache's writer). */
+static bool bm_jsc_exe(char *out, size_t cap) {
+#ifdef __APPLE__
+    uint32_t size = (uint32_t)cap;
+    return _NSGetExecutablePath(out, &size) == 0;
+#else
+    ssize_t n = readlink("/proc/self/exe", out, cap - 1);
+    if (n <= 0) return false;
+    out[n] = 0;
+    return true;
+#endif
+}
+
+static void bm_jsc_low_priority(posix_spawnattr_t *attr) {
+#ifdef __APPLE__
+    posix_spawnattr_set_qos_class_np(attr, QOS_CLASS_UTILITY);
+#else
+    (void)attr; /* (the writer lowers its own: bm_jsc_writer) */
+#endif
+}
+
+#ifdef BM_JSC_SYSTEM
 static id bm_jsc_send(id self, const char *sel) { return ((id (*)(id, SEL))objc_msgSend)(self, sel_registerName(sel)); }
 
-static bool bm_jsc_on(void) {
-    if (bm_jsc.state) return bm_jsc.state > 0;
-    bm_jsc.state = -1;
-    const char *off = getenv("BARM_JS_CACHE");
-    if (off && strcmp(off, "0") == 0) return false;
+/* JSScript as expected, and a JSContext over the program's context. */
+static bool bm_jsc_system(void) {
     Class script = objc_getClass("JSScript"), context = objc_getClass("JSContext");
     if (!script || !context) return false;
     Ivar path = class_getInstanceVariable(script, "m_cachePath");
@@ -162,16 +195,6 @@ static bool bm_jsc_on(void) {
         || !class_getClassMethod(context, sel_registerName("contextWithJSGlobalContextRef:"))
         || !class_getInstanceMethod(context, sel_registerName("evaluateJSScript:")))
         return false;
-    const char *dir = getenv("BARM_JS_CACHE_DIR");
-    if (dir && *dir) {
-        if (strlen(dir) >= sizeof bm_jsc.dir - 32) return false;
-        strcpy(bm_jsc.dir, dir);
-    } else {
-        size_t n = confstr(_CS_DARWIN_USER_TEMP_DIR, bm_jsc.dir, sizeof bm_jsc.dir);
-        if (n == 0 || n > sizeof bm_jsc.dir - 32) return false;
-        strcat(bm_jsc.dir, "barm-js");
-    }
-    if (mkdir(bm_jsc.dir, 0700) != 0 && errno != EEXIST) return false;
     if (bm_js_ctx) {
         id ctx = ((id (*)(Class, SEL, JSGlobalContextRef))objc_msgSend)(context, sel_registerName("contextWithJSGlobalContextRef:"), bm_js_ctx);
         if (!ctx) return false;
@@ -180,13 +203,57 @@ static bool bm_jsc_on(void) {
     }
     bm_jsc.script = script;
     bm_jsc.cache_path = ivar_getOffset(path);
+    return true;
+}
+#endif
+
+static bool bm_jsc_on(void) {
+    if (bm_jsc.state) return bm_jsc.state > 0;
+    bm_jsc.state = -1;
+    const char *off = getenv("BARM_JS_CACHE");
+    if (off && strcmp(off, "0") == 0) return false;
+#ifdef BM_JSC_SYSTEM
+    if (!bm_jsc_system()) return false;
+#endif
+    const char *dir = getenv("BARM_JS_CACHE_DIR");
+    if (dir && *dir) {
+        if (strlen(dir) >= sizeof bm_jsc.dir - 32) return false;
+        strcpy(bm_jsc.dir, dir);
+    } else {
+#ifdef __APPLE__
+        size_t n = confstr(_CS_DARWIN_USER_TEMP_DIR, bm_jsc.dir, sizeof bm_jsc.dir);
+        if (n == 0 || n > sizeof bm_jsc.dir - 32) return false;
+        strcat(bm_jsc.dir, "barm-js");
+#else
+        const char *xdg = getenv("XDG_CACHE_HOME"), *home = getenv("HOME");
+        int n = xdg && *xdg ? snprintf(bm_jsc.dir, sizeof bm_jsc.dir, "%s/barm-js", xdg)
+              : home && *home ? snprintf(bm_jsc.dir, sizeof bm_jsc.dir, "%s/.cache/barm-js", home)
+              : snprintf(bm_jsc.dir, sizeof bm_jsc.dir, "/tmp/barm-js-%d", (int)getuid());
+        if (n < 0 || (size_t)n > sizeof bm_jsc.dir - 32) return false;
+        if (!(xdg && *xdg) && home && *home) {
+            /* (~/.cache, as it may not be there yet) */
+            char parent[1024];
+            snprintf(parent, sizeof parent, "%s/.cache", home);
+            mkdir(parent, 0700);
+        }
+#endif
+    }
+    if (mkdir(bm_jsc.dir, 0700) != 0 && errno != EEXIST) return false;
+#ifdef BM_JSC_CACHE_FORMAT
+    /* (Barm's own engine's caches, in a directory for its build's format: the system's engine
+     * names its files the same) */
+    size_t at = strlen(bm_jsc.dir);
+    snprintf(bm_jsc.dir + at, sizeof bm_jsc.dir - at, "/%s", BM_JSC_CACHE_FORMAT);
+    if (mkdir(bm_jsc.dir, 0700) != 0 && errno != EEXIST) return false;
+#endif
     bm_jsc.state = 1;
     return true;
 }
 
-/* The cache's files for module i, named for its name and text: `out` + ".jsc" (the bytecode)
- * and + ".js" (the text, when it's ASCII: read from the file, mapped, it's memory the system can
- * drop and read again, where a copy of it would be the program's own, ~5 MB for that server). */
+/* The cache's files for module i, named for its name and text: `out` + ".jsc" (the bytecode),
+ * and with the system's engine + ".js" (the text, when it's ASCII: read from the file, mapped,
+ * it's memory the system can drop and read again, where a copy of it would be the program's own,
+ * ~5 MB for that server; Barm's own engine reads the text where it is in the program). */
 static void bm_jsc_file(uint32_t i, char *out, size_t cap) {
     size_t len;
     const unsigned char *s = (const unsigned char *)bm_js_module_src(i, &len);
@@ -204,6 +271,25 @@ static void bm_jsc_file(uint32_t i, char *out, size_t cap) {
     snprintf(out, cap, "%s/%016llx", bm_jsc.dir, (unsigned long long)h);
 }
 
+static void bm_jsc_at_exit(void);
+
+static void bm_jsc_queue(uint32_t i) {
+    static bool registered;
+    if (!registered) {
+        registered = true;
+        atexit(bm_jsc_at_exit);
+    }
+    if (bm_jsc.nqueue == bm_jsc.capqueue) {
+        size_t cap = bm_jsc.capqueue ? bm_jsc.capqueue * 2 : 64;
+        uint32_t *q = realloc(bm_jsc.queue, cap * sizeof *q);
+        if (!q) return;
+        bm_jsc.queue = q;
+        bm_jsc.capqueue = cap;
+    }
+    bm_jsc.queue[bm_jsc.nqueue++] = i;
+}
+
+#ifdef BM_JSC_SYSTEM
 /* Module i's name as a URL (owned), or NULL if it isn't one as it is: stack traces name a
  * module as its JSScript's URL reads (and those modules aren't cached). */
 static CFURLRef bm_jsc_url(uint32_t i) {
@@ -251,24 +337,6 @@ static void bm_jsc_set_file(id script, const char *file) {
     CFURLRef *slot = (CFURLRef *)((char *)script + bm_jsc.cache_path);
     if (*slot) CFRelease(*slot);
     *slot = url;
-}
-
-static void bm_jsc_at_exit(void);
-
-static void bm_jsc_queue(uint32_t i) {
-    static bool registered;
-    if (!registered) {
-        registered = true;
-        atexit(bm_jsc_at_exit);
-    }
-    if (bm_jsc.nqueue == bm_jsc.capqueue) {
-        size_t cap = bm_jsc.capqueue ? bm_jsc.capqueue * 2 : 64;
-        uint32_t *q = realloc(bm_jsc.queue, cap * sizeof *q);
-        if (!q) return;
-        bm_jsc.queue = q;
-        bm_jsc.capqueue = cap;
-    }
-    bm_jsc.queue[bm_jsc.nqueue++] = i;
 }
 
 /* Module i's function from its cache, if it has one; if it hasn't, it's queued to be written. */
@@ -361,16 +429,55 @@ static void bm_jsc_write(const uint32_t *modules, size_t n) {
     objc_autoreleasePoolPop(pool);
 }
 
+#else
+/* Module i's function: from its cache if it has one (if it hasn't, or it's out of date, it's
+ * queued to be written); either way the text read where it is in the program. */
+static JSValueRef bm_jsc_eval(JSContextRef ctx, uint32_t i, bool *cached, JSValueRef *exc) {
+    size_t len;
+    const char *src = bm_js_module_src(i, &len);
+    int fd = -1;
+    char base[1100], file[1110];
+    if (len >= BM_JSC_MIN_BYTES && bm_jsc_on()) {
+        bm_jsc_file(i, base, sizeof base);
+        snprintf(file, sizeof file, "%s.jsc", base);
+        fd = open(file, O_RDONLY | O_CLOEXEC);
+    }
+    JSValueRef r = BMEvaluateScript(ctx, src, len, bm_js_module_name(i), fd, cached, exc);
+    if (fd >= 0) close(fd);
+    if (len >= BM_JSC_MIN_BYTES && bm_jsc.state > 0 && !*cached) bm_jsc_queue(i);
+    return r;
+}
+
+/* Writes modules' caches (in the writing process, in an engine of its own). */
+static void bm_jsc_write(const uint32_t *modules, size_t n) {
+    JSContextGroupRef group = JSContextGroupCreate();
+    for (size_t k = 0; k < n; k++) {
+        uint32_t i = modules[k];
+        char base[1100], file[1110], tmp[1200];
+        bm_jsc_file(i, base, sizeof base);
+        snprintf(file, sizeof file, "%s.jsc", base);
+        snprintf(tmp, sizeof tmp, "%s.%d.tmp", base, (int)getpid());
+        int fd = open(tmp, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        if (fd < 0) continue;
+        size_t len;
+        const char *src = bm_js_module_src(i, &len);
+        bool ok = BMWriteBytecode(group, src, len, bm_js_module_name(i), fd);
+        if (close(fd) == 0 && ok) rename(tmp, file);
+        else unlink(tmp);
+    }
+    JSContextGroupRelease(group);
+}
+#endif
+
 /* Starts the program again to write the queued modules' caches (BARM_JS_CACHE_WRITE=modules),
  * detached: by way of a process that starts it and exits at once (so it's never this program's
  * child to wait for), with nothing of this one's open (its sockets, its terminal). */
 static void bm_jsc_flush(void) {
     if (bm_jsc.nqueue == 0) return;
     char exe[1024];
-    uint32_t size = sizeof exe;
     size_t cap = 32 + bm_jsc.nqueue * 11;
     char *var = malloc(cap);
-    if (!var || _NSGetExecutablePath(exe, &size) != 0) {
+    if (!var || !bm_jsc_exe(exe, sizeof exe)) {
         free(var);
         return;
     }
@@ -394,13 +501,18 @@ static void bm_jsc_flush(void) {
     for (int fd = 0; fd < 3; fd++) posix_spawn_file_actions_addopen(&files, fd, "/dev/null", fd ? O_WRONLY : O_RDONLY, 0);
     posix_spawnattr_t attr;
     posix_spawnattr_init(&attr);
+#ifdef __APPLE__
     posix_spawnattr_setflags(&attr, POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSID | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
+#else
+    posix_spawn_file_actions_addclosefrom_np(&files, 3);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSID | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
+#endif
     sigset_t none, all;
     sigemptyset(&none);
     sigfillset(&all);
     posix_spawnattr_setsigmask(&attr, &none);
     posix_spawnattr_setsigdefault(&attr, &all);
-    posix_spawnattr_set_qos_class_np(&attr, QOS_CLASS_UTILITY);
+    bm_jsc_low_priority(&attr);
     char *argv[] = {exe, NULL};
     pid_t pid;
     if (posix_spawn(&pid, exe, &files, &attr, argv, env) == 0)
@@ -426,16 +538,19 @@ __attribute__((constructor)) static void bm_jsc_writer(void) {
         for (char **e = environ; *e; e++)
             if (strncmp(*e, "BARM_JS_CACHE_WRITE=", 20) == 0) *e = var;
         char exe[1024];
-        uint32_t size = sizeof exe;
         posix_spawnattr_t attr;
         posix_spawnattr_init(&attr);
-        posix_spawnattr_set_qos_class_np(&attr, QOS_CLASS_UTILITY);
+        bm_jsc_low_priority(&attr);
         char *argv[] = {exe, NULL};
         pid_t pid;
-        if (_NSGetExecutablePath(exe, &size) == 0) posix_spawn(&pid, exe, NULL, &attr, argv, environ);
+        if (bm_jsc_exe(exe, sizeof exe)) posix_spawn(&pid, exe, NULL, &attr, argv, environ);
         _exit(0);
     }
     if (strncmp(what, "write,", 6) != 0 || !bm_jsc_on()) _exit(0);
+#ifndef __APPLE__
+    /* (the cache is written in the background: at the lowest priority) */
+    nice(19);
+#endif
     size_t n = 0, cap = 0;
     uint32_t *modules = NULL;
     for (const char *p = what + 6; *p;) {
@@ -471,7 +586,10 @@ static JSValueRef bm_js_compile_fn(JSContextRef ctx, JSObjectRef f, JSObjectRef 
     double t0 = trace ? bm_performance_now() : 0;
     JSValueRef r;
     bool cached = false;
-#ifdef __APPLE__
+#ifdef BM_JSC_OWN
+    r = bm_jsc_eval(ctx, i, &cached, exc);
+#else
+#ifdef BM_JSC_SYSTEM
     cached = bm_jsc_load(ctx, i, &r, exc);
 #endif
     if (!cached) {
@@ -481,6 +599,7 @@ static JSValueRef bm_js_compile_fn(JSContextRef ctx, JSObjectRef f, JSObjectRef 
         JSStringRelease(src);
         JSStringRelease(url);
     }
+#endif
     if (trace) {
         char line[512];
         size_t len;
@@ -584,7 +703,22 @@ static void bm_js_trace_phase(const char *what, double since) {
     bm_write_fd(2, line, (size_t)k);
 }
 
-#ifdef __APPLE__
+#if defined(BM_JSC_OWN)
+/* JavaScriptCore's timers (the incremental sweeper, the next full collection, FinalizationRegistry
+ * callbacks) and what its threads hand back (WebAssembly compiled off the thread) are on this
+ * thread's run loop (WTF's own, BarmAPI.h), which runs only when the event loop runs it. */
+static uint64_t bm_js_host_due(uint64_t now_ms) {
+    double wait = BMRunLoopSecondsUntilWork();
+    if (wait < 0) return 0;
+    if (wait == 0) return now_ms ? now_ms : 1;
+    /* (+1: rounding down would wake it a little early) */
+    return now_ms + (uint64_t)(wait < 3600 ? wait * 1000 : 3600000) + 1;
+}
+
+static void bm_js_host_run(void) {
+    BMRunLoopCycle();
+}
+#elif defined(__APPLE__)
 /* JavaScriptCore's timers (the incremental sweeper, the next full collection, FinalizationRegistry
  * callbacks) are on this thread's CFRunLoop, which runs only when the event loop runs it: without
  * them, garbage swept and collected only as memory runs out stays held. */
@@ -636,6 +770,21 @@ static void bm_js_host_run(void) {
 /* (JavaScriptCore's, exported though not in its headers) */
 extern void JSSynchronousGarbageCollectForDebugging(JSContextRef ctx) __attribute__((weak_import));
 
+/* The engine's own functions by name: with Barm's own engine linked in, referred to directly (a
+ * program exports no symbols to look up); otherwise looked up in the engine's library. */
+#ifdef BM_JSC_OWN
+#ifdef __APPLE__
+#define BM_JSC_CXX(name) "_" name
+#else
+#define BM_JSC_CXX(name) name
+#endif
+extern void bm_jsc_delete_all_code(void *vm, int effort) __asm__(BM_JSC_CXX("_ZN3JSC2VM13deleteAllCodeENS_19DeleteAllCodeEffortE"));
+extern void bm_jsc_release_free_memory(void) __asm__(BM_JSC_CXX("_ZN3WTF27releaseFastMallocFreeMemoryEv"));
+#define bm_js_engine_fn(name, own) ((void *)(own))
+#else
+#define bm_js_engine_fn(name, own) dlsym(RTLD_DEFAULT, name)
+#endif
+
 /* VM::deleteAllCode(DeleteAllCodeIfNotCollecting), JavaScriptCore's (exported, not in its headers;
  * the context group is the VM). Called from a native function, as it needs the engine's lock and
  * runs once JavaScript returns. */
@@ -645,7 +794,7 @@ static JSValueRef bm_js_drop_code_fn(JSContextRef ctx, JSObjectRef f, JSObjectRe
     static bool looked;
     if (!looked) {
         looked = true;
-        drop = (void (*)(void *, int))dlsym(RTLD_DEFAULT, "_ZN3JSC2VM13deleteAllCodeENS_19DeleteAllCodeEffortE");
+        drop = (void (*)(void *, int))bm_js_engine_fn("_ZN3JSC2VM13deleteAllCodeENS_19DeleteAllCodeEffortE", bm_jsc_delete_all_code);
     }
     if (drop) drop((void *)JSContextGetGroup(ctx), 1);
     return JSValueMakeUndefined(ctx);
@@ -659,7 +808,7 @@ static void bm_js_idle(bool deep) {
     static void (*release)(void);
     static JSObjectRef drop_code;
     if (!drop_code) {
-        release = (void (*)(void))dlsym(RTLD_DEFAULT, "_ZN3WTF27releaseFastMallocFreeMemoryEv");
+        release = (void (*)(void))bm_js_engine_fn("_ZN3WTF27releaseFastMallocFreeMemoryEv", bm_jsc_release_free_memory);
         drop_code = JSObjectMakeFunctionWithCallback(bm_js_ctx, NULL, bm_js_drop_code_fn);
         JSValueProtect(bm_js_ctx, drop_code);
     }
@@ -672,7 +821,7 @@ static void bm_js_idle(bool deep) {
 #elif defined(__GLIBC__)
     malloc_trim(0);
 #endif
-#ifdef __APPLE__
+#if defined(BM_JSC_OWN) || defined(__APPLE__)
     bm_jsc_flush();
 #endif
 }
@@ -723,7 +872,7 @@ JSContextRef bm_js(void) {
         set[i] = !getenv(options[i][0]);
         if (set[i]) setenv(options[i][0], options[i][1], 0);
     }
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(BM_JSC_OWN)
     bm_js_glib = g_main_context_new();
     g_main_context_push_thread_default(bm_js_glib);
 #endif

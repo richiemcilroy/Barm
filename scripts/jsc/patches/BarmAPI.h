@@ -1,0 +1,47 @@
+/* BarmAPI.h: what Barm's runtime (runtime/js.c) needs from JavaScriptCore beyond its C API, in
+ * Barm's own build of it (scripts/jsc). */
+
+#ifndef BarmAPI_h
+#define BarmAPI_h
+
+#include <JavaScriptCore/JSBase.h>
+
+#ifndef __cplusplus
+#include <stdbool.h>
+#endif
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Evaluates `len` bytes of UTF-8 at `source` as a script named `url` (NUL-terminated UTF-8).
+ * ASCII text isn't copied: the caller keeps it alive and unchanged for as long as the engine
+ * may read it (the program's lifetime, for text in its binary). With `cache_fd` >= 0, the
+ * bytecode BMWriteBytecode wrote to that file for the same text is used if it's valid for this
+ * text and this build of the engine (*used_cache says whether it was); the engine maps the
+ * file, so the caller may close the descriptor once this returns. */
+JS_EXPORT JSValueRef BMEvaluateScript(JSContextRef ctx, const char *source, size_t len, const char *url, int cache_fd, bool *used_cache, JSValueRef *exception);
+
+/* Writes the bytecode of a script as BMEvaluateScript takes it, its functions' included, to
+ * `fd` (from its start); false if it can't (the script doesn't parse, or the write failed). */
+JS_EXPORT bool BMWriteBytecode(JSContextGroupRef group, const char *source, size_t len, const char *url, int fd);
+
+/* The calling thread's run loop, where the engine runs its timers (collections, finalizers) and
+ * what its threads hand back (WebAssembly compiled off the thread), for an event loop of the
+ * embedder's own to run: seconds until it has work (0: it has now; < 0: none scheduled); run
+ * what's due; and a function called (from any thread, with a lock held: it should only wake
+ * the event loop) when work is scheduled. */
+JS_EXPORT double BMRunLoopSecondsUntilWork(void);
+JS_EXPORT void BMRunLoopCycle(void);
+JS_EXPORT void BMRunLoopSetWakeUp(void (*wake)(void));
+
+/* Sets the engine's options ("name=value name=value ...", as JSC_name=value in the
+ * environment), before the first context is made; false if one isn't an option. */
+JS_EXPORT bool BMSetOptions(const char *options);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* BarmAPI_h */
