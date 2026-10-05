@@ -1,5 +1,5 @@
 diff --git a/Source/JavaScriptCore/CMakeLists.txt b/Source/JavaScriptCore/CMakeLists.txt
-index 0cd2c748..b781101b 100644
+index 0cd2c748..ef1a9b3c 100644
 --- a/Source/JavaScriptCore/CMakeLists.txt
 +++ b/Source/JavaScriptCore/CMakeLists.txt
 @@ -533,6 +533,7 @@ foreach (_file ${JavaScriptCore_OBJECT_LUT_SOURCES})
@@ -11,7 +11,7 @@ index 0cd2c748..b781101b 100644
      API/JSContextRef.h
      API/JSObjectRef.h
 diff --git a/Source/JavaScriptCore/Sources.txt b/Source/JavaScriptCore/Sources.txt
-index b1734e68..139840c1 100644
+index b1734e68..9864a879 100644
 --- a/Source/JavaScriptCore/Sources.txt
 +++ b/Source/JavaScriptCore/Sources.txt
 @@ -24,6 +24,7 @@
@@ -23,7 +23,7 @@ index b1734e68..139840c1 100644
  API/JSCTestRunnerUtils.cpp
  API/JSCallbackConstructor.cpp
 diff --git a/Source/JavaScriptCore/runtime/CachedTypes.cpp b/Source/JavaScriptCore/runtime/CachedTypes.cpp
-index a961fd18..a4a532be 100644
+index a961fd18..6a69d8c9 100644
 --- a/Source/JavaScriptCore/runtime/CachedTypes.cpp
 +++ b/Source/JavaScriptCore/runtime/CachedTypes.cpp
 @@ -2548,8 +2548,10 @@ protected:
@@ -38,7 +38,7 @@ index a961fd18..a4a532be 100644
      }
  
 diff --git a/Source/JavaScriptCore/runtime/JSCBytecodeCacheVersion.cpp b/Source/JavaScriptCore/runtime/JSCBytecodeCacheVersion.cpp
-index 26e825ac..97f049d7 100644
+index 26e825ac..db9b9aa3 100644
 --- a/Source/JavaScriptCore/runtime/JSCBytecodeCacheVersion.cpp
 +++ b/Source/JavaScriptCore/runtime/JSCBytecodeCacheVersion.cpp
 @@ -53,6 +53,11 @@ static constexpr bool verbose = false;
@@ -53,8 +53,149 @@ index 26e825ac..97f049d7 100644
      static LazyNeverDestroyed<uint32_t> cacheVersion;
      static std::once_flag onceFlag;
      std::call_once(onceFlag, [] {
+diff --git a/Source/JavaScriptCore/runtime/JSLock.cpp b/Source/JavaScriptCore/runtime/JSLock.cpp
+index 0fa9323d..09084cae 100644
+--- a/Source/JavaScriptCore/runtime/JSLock.cpp
++++ b/Source/JavaScriptCore/runtime/JSLock.cpp
+@@ -287,8 +287,15 @@ void JSLock::unlock(intptr_t unlockCount) WTF_IGNORES_THREAD_SAFETY_ANALYSIS
+ 
+     // Maintain m_lockCount while calling willReleaseLock() so that its callees know that
+     // they still have the lock.
+-    if (unlockCount == m_lockCount)
++    if (unlockCount == m_lockCount) {
++        if (m_sticky && !m_lockDropDepth) {
++            // (kept: see setSticky)
++            willReleaseLockVisibly();
++            m_lockCount -= unlockCount;
++            return;
++        }
+         willReleaseLock();
++    }
+ 
+     m_lockCount -= unlockCount;
+ 
+@@ -299,6 +306,21 @@ void JSLock::unlock(intptr_t unlockCount) WTF_IGNORES_THREAD_SAFETY_ANALYSIS
+ }
+ 
+ void JSLock::willReleaseLock()
++{
++    willReleaseLockVisibly();
++    finishReleasingLock();
++}
++
++void JSLock::releaseStickyLock()
++{
++    if (m_lockCount || !currentThreadIsHoldingLock())
++        return;
++    finishReleasingLock();
++    m_hasOwnerThread.store(false, std::memory_order_release);
++    m_lock.unlock();
++}
++
++void JSLock::willReleaseLockVisibly()
+ {
+     {
+         RefPtr protectedVM { m_vm };
+@@ -318,6 +340,15 @@ void JSLock::willReleaseLock()
+                 protectedVM->clearLastException();
+ 
+             protectedVM->heap.releaseDelayedReleasedObjects();
++        }
++    }
++}
++
++void JSLock::finishReleasingLock()
++{
++    {
++        RefPtr protectedVM { m_vm };
++        if (protectedVM) {
+             protectedVM->setStackPointerAtVMEntry(nullptr);
+ 
+             if (m_shouldReleaseHeapAccess)
+@@ -347,6 +378,12 @@ unsigned JSLock::dropAllLocks(DropAllLocks* dropper)
+     if (!currentThreadIsHoldingLock())
+         return 0;
+ 
++    // (a sticky lock no one holds: let go of it, and there's nothing to take back)
++    if (!m_lockCount) {
++        releaseStickyLock();
++        return 0;
++    }
++
+     ++m_lockDropDepth;
+ 
+     dropper->setDropDepth(m_lockDropDepth);
+diff --git a/Source/JavaScriptCore/runtime/JSLock.h b/Source/JavaScriptCore/runtime/JSLock.h
+index d4da3311..b5e126b5 100644
+--- a/Source/JavaScriptCore/runtime/JSLock.h
++++ b/Source/JavaScriptCore/runtime/JSLock.h
+@@ -106,6 +106,14 @@ public:
+ 
+     void NODELETE willDestroyVM(VM*);
+ 
++    // Tov: a sticky lock. Once the last holder lets go, what the release does that a program can
++    // see (microtasks run, the last exception is cleared) happens as ever, but the lock stays
++    // this thread's, with the VM's stack and heap access as they were, so the next holder takes
++    // it for nothing. The embedder lets it go for real with releaseStickyLock(), before it
++    // blocks (so a collection needn't wait for it, and another thread can take the lock).
++    void setSticky(bool sticky) { m_sticky = sticky; }
++    JS_EXPORT_PRIVATE void releaseStickyLock();
++
+     class DropAllLocks {
+         WTF_MAKE_NONCOPYABLE(DropAllLocks);
+     public:
+@@ -136,6 +144,8 @@ private:
+ 
+     void didAcquireLock();
+     void willReleaseLock();
++    void willReleaseLockVisibly();
++    void finishReleasingLock();
+ 
+     unsigned dropAllLocks(DropAllLocks*);
+     void grabAllLocks(DropAllLocks*, unsigned lockCount);
+@@ -156,6 +166,7 @@ private:
+     RefPtr<Thread> m_ownerThread;
+     intptr_t m_lockCount;
+     unsigned m_lockDropDepth;
++    bool m_sticky { false };
+     uint32_t m_lastOwnerThread { 0 };
+     VM* m_vm;
+     AtomStringTable* m_entryAtomStringTable; 
+diff --git a/Source/JavaScriptCore/runtime/VM.cpp b/Source/JavaScriptCore/runtime/VM.cpp
+index 808600c4..45e6637f 100644
+--- a/Source/JavaScriptCore/runtime/VM.cpp
++++ b/Source/JavaScriptCore/runtime/VM.cpp
+@@ -1466,6 +1466,12 @@ void VM::drainMicrotasks()
+     if (m_drainMicrotaskDelayScopeCount) [[unlikely]]
+         return;
+ 
++    // (Tov: nothing to run, the common case after a call: only the end of synchronous execution)
++    if (m_defaultMicrotaskQueue->isEmpty() && m_aboutToBeNotifiedRejectedPromises.isEmpty() && !executionForbidden()) [[likely]] {
++        finalizeSynchronousJSExecution();
++        return;
++    }
++
+     if (executionForbidden()) [[unlikely]]
+         m_defaultMicrotaskQueue->clear();
+     else {
+diff --git a/Source/WTF/wtf/PlatformUse.h b/Source/WTF/wtf/PlatformUse.h
+index 0c16afbd..128cd7e4 100644
+--- a/Source/WTF/wtf/PlatformUse.h
++++ b/Source/WTF/wtf/PlatformUse.h
+@@ -70,7 +70,10 @@
+ #define USE_GLIB 1
+ #endif
+ 
+-#if PLATFORM(COCOA) || USE(GLIB)
++// (Tov: JSCOnly too; without it every entry into the VM clears the date and Intl caches, as
++// if the time zone had changed. On Darwin the system's notification says when it does; elsewhere
++// the embedder does, with timeZoneDidChange: Tov when process.env.TZ is set.)
++#if PLATFORM(COCOA) || USE(GLIB) || defined(BUILDING_JSCONLY__)
+ #define USE_TIME_ZONE_CHANGE_NOTIFICATIONS 1
+ #endif
+ 
 diff --git a/Source/WTF/wtf/RunLoop.h b/Source/WTF/wtf/RunLoop.h
-index e29c37ed..72447f9f 100644
+index e29c37ed..e29ac99f 100644
 --- a/Source/WTF/wtf/RunLoop.h
 +++ b/Source/WTF/wtf/RunLoop.h
 @@ -145,6 +145,11 @@ public:
@@ -69,6 +210,19 @@ index e29c37ed..72447f9f 100644
  
  #if USE(WINDOWS_EVENT_LOOP)
      using WindowsMessageHandler = Function<bool(MSG&)>;
+diff --git a/Source/WTF/wtf/TimeZone.cpp b/Source/WTF/wtf/TimeZone.cpp
+index 1b92b5db..0b7d2178 100644
+--- a/Source/WTF/wtf/TimeZone.cpp
++++ b/Source/WTF/wtf/TimeZone.cpp
+@@ -44,7 +44,7 @@ void timeZoneDidChange()
+     g_lastTimeZoneID.fetch_add(1, std::memory_order_relaxed);
+ }
+ 
+-#if !USE(TIME_ZONE_CHANGE_NOTIFICATIONS)
++#if !USE(TIME_ZONE_CHANGE_NOTIFICATIONS) || (defined(BUILDING_JSCONLY__) && !OS(DARWIN) && !USE(GLIB))
+ void listenForTimeZoneChangeNotifications() { }
+ #endif
+ 
 diff --git a/Source/WTF/wtf/generic/RunLoopGeneric.cpp b/Source/WTF/wtf/generic/RunLoopGeneric.cpp
 index 7ac74579..d9cdc825 100644
 --- a/Source/WTF/wtf/generic/RunLoopGeneric.cpp

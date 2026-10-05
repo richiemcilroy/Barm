@@ -419,6 +419,9 @@ extern void (*tv_loop_host_run)(void);
  * and again (deep) after ten: the engine collects its garbage then and gives the memory back,
  * and deep, drops its compiled code too. The first idle after starting is deep. */
 extern void (*tv_loop_idle)(bool deep);
+/* Called just before the thread blocks (the loop waits, or sleeps): the engine gives back the
+ * lock it keeps between calls (runtime/js.c). */
+extern void (*tv_loop_will_block)(void);
 void tv_clear_timer(tv_int id);
 /* Runs the event loop until nothing is left: microtasks, timers and servers. */
 void tv_async_run(void);
