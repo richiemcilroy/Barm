@@ -1,46 +1,55 @@
-// The barm landing page, served by Barm. Files are read from public/ on each request, so an
-// edit shows on the next reload; `barm dev` restarts the server when this file changes.
+// Barm's landing page, served by Barm. The page is rendered by page.barm on every request (with
+// this server's own numbers in its footer); the logo and the font are read from public/ once.
 //
-//   cd site && barm dev        (PORT defaults to 4747)
+//   cd site && barm dev        (PORT defaults to 4747; `barm dev` restarts on every edit)
 
 import { readFileSync } from "node:fs"
+import { renderPage, renderMsMark } from "./page"
 
-function contentType(name: string): string {
-  if (name.endsWith(".html")) {
-    return "text/html;charset=utf-8"
-  }
-  if (name.endsWith(".svg")) {
-    return "image/svg+xml"
-  }
-  if (name.endsWith(".css")) {
-    return "text/css;charset=utf-8"
-  }
-  if (name.endsWith(".png")) {
-    return "image/png"
-  }
-  return "application/octet-stream"
+type Asset = { body: string, contentType: string }
+
+function asset(name: string, contentType: string): Asset {
+  return { body: try readFileSync(`public/${name}`), contentType: contentType }
+}
+
+const assets: Map<string, Asset> = new Map()
+assets.set("/logo.svg", try asset("logo.svg", "image/svg+xml"))
+assets.set("/fonts/schibsted-grotesk.woff2", try asset("fonts/schibsted-grotesk.woff2", "font/woff2"))
+
+// (this program's own size, for the footer)
+let binaryBytes = 0
+try {
+  binaryBytes = (try readFileSync(process.argv[0]!)).byteLength
+} catch (e) {
+  binaryBytes = 0
+}
+
+let pagesServed = 0
+
+function page(): Response {
+  pagesServed += 1
+  const t0 = performance.now()
+  const html = renderPage({ binaryBytes: binaryBytes, pagesServed: pagesServed })
+  const took = (performance.now() - t0).toFixed(2)
+  return new Response(html.split(renderMsMark).join(took), {
+    headers: { "content-type": "text/html;charset=utf-8", "cache-control": "no-cache" },
+  })
 }
 
 const server = Bun.serve({
   port: process.env.PORT ?? 4747,
   fetch(req) {
     const path = (try new URL(req.url)).pathname
-    const name = path === "/" ? "index.html" : path.slice(1)
-    if (name.includes("..")) {
+    if (path === "/" || path === "/index.html") {
+      return page()
+    }
+    const a = assets.get(path)
+    if (a === undefined) {
       return new Response("Not Found", { status: 404 })
     }
-    try {
-      const body = readFileSync(`public/${name}`)
-      const page = name.endsWith(".html")
-      return new Response(body, {
-        headers: {
-          "content-type": contentType(name),
-          "cache-control": page ? "public, max-age=300" : "public, max-age=86400",
-        },
-      })
-    } catch (e) {
-      return new Response("Not Found", { status: 404 })
-    }
+    return new Response(a.body, {
+      headers: { "content-type": a.contentType, "cache-control": "public, max-age=86400" },
+    })
   },
 })
 console.log(`Listening on ${server.url}`)
