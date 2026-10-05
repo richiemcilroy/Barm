@@ -256,8 +256,21 @@ impl Resolver {
     }
 }
 
+/// The file's real path (symbolic links followed, as Node does: a package linked into
+/// node_modules is the one module wherever it's reached from). Its directory's is remembered (a
+/// bundle resolves ~1000 files in ~200 directories; realpath on each was a third of a rebuild's
+/// time), so a file that isn't a link itself costs one lstat.
 fn canonical(p: &Path) -> Option<PathBuf> {
-    std::fs::canonicalize(p).ok()
+    thread_local! {
+        static DIRS: std::cell::RefCell<crate::hash::FxMap<PathBuf, Option<PathBuf>>> = Default::default();
+    }
+    let meta = std::fs::symlink_metadata(p).ok()?;
+    let (Some(dir), Some(name)) = (p.parent(), p.file_name()) else { return std::fs::canonicalize(p).ok() };
+    if meta.file_type().is_symlink() {
+        return std::fs::canonicalize(p).ok();
+    }
+    let real = DIRS.with(|d| d.borrow_mut().entry(dir.to_path_buf()).or_insert_with(|| std::fs::canonicalize(dir).ok()).clone())?;
+    Some(real.join(name))
 }
 
 /// Node's PACKAGE_EXPORTS_RESOLVE for `subpath` (`"."` or `"./x"`): `None` if nothing

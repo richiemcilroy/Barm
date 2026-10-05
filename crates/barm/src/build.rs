@@ -235,6 +235,8 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     drop(checker);
     let codegen::Program { c: mut c_src, mut uses_tls, npm } = program;
     let mut native = false;
+    // The blob, when it's appended to the binary rather than assembled into it (see with_blob)
+    let mut appended_blob: Option<PathBuf> = None;
     // npm packages: bundled into a blob the program embeds (see runtime/js.c)
     if !npm.is_empty() {
         let b = crate::npm::bundle(&npm_root, &npm).map_err(|e| BuildError::Message(format!("can't bundle the npm packages: {e}")))?;
@@ -262,7 +264,12 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         }
         native = b.native;
         let p = path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
-        if cfg!(target_vendor = "apple") {
+        if own_jsc_dir().is_some() {
+            // (with Barm's own engine, appended to the binary: a build whose JavaScript changed
+            // doesn't link the program again)
+            c_src.push_str("const unsigned char bm_js_blob[8] = \"BARMAPP\";\n");
+            appended_blob = Some(path.clone());
+        } else if cfg!(target_vendor = "apple") {
             c_src.push_str(&format!("__asm__(\".section __TEXT,__const\\n.globl _bm_js_blob\\n.p2align 3\\n_bm_js_blob:\\n.incbin \\\"{p}\\\"\\n.byte 0\\n.text\\n\");\n"));
         } else {
             c_src.push_str(&format!("__asm__(\".section .rodata.bm_js_blob,\\\"a\\\"\\n.globl bm_js_blob\\n.p2align 3\\nbm_js_blob:\\n.incbin \\\"{p}\\\"\\n.byte 0\\n.text\\n\");\n"));
@@ -313,6 +320,10 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     let bin_dir = dir.join("bin");
     let binary = bin_dir.join(&key);
     if cached(&binary) {
+        let binary = match &appended_blob {
+            Some(blob) => with_blob(&binary, blob)?,
+            None => binary,
+        };
         return Ok(Built { binary, tls: uses_tls, cached: true, sources, timings: (t1 - t0, t2 - t1, Duration::ZERO) });
     }
     let c_dir = dir.join("c");
@@ -410,10 +421,14 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     let linked = run_cc(cmd, &ld, &c_path);
     let _ = std::fs::remove_file(&obj);
     linked?;
-    if jsc.is_some() && cfg!(target_vendor = "apple") {
+    if jsc.as_ref().is_some_and(|j| !j.own) && cfg!(target_vendor = "apple") {
         sign_for_jit(&tmp, &c_dir)?;
     }
     std::fs::rename(&tmp, &binary).map_err(|e| BuildError::Message(format!("can't move the binary into the cache: {e}")))?;
+    let binary = match &appended_blob {
+        Some(blob) => with_blob(&binary, blob)?,
+        None => binary,
+    };
     let t3 = Instant::now();
     Ok(Built { binary, tls: uses_tls, cached: false, sources, timings: (t1 - t0, t2 - t1, t3 - t2) })
 }
@@ -462,6 +477,10 @@ fn js_objects(cc: &str, flags: &[String], c_dir: &Path, key: &str) -> Result<Vec
 struct JscFlags {
     cflags: Vec<String>,
     libs: Vec<String>,
+    /// Barm's own engine: on macOS it compiles JavaScript to machine code without the JIT
+    /// entitlement (the linker's ad-hoc signature is enough), so the binary isn't re-signed
+    /// (codesign hashes the whole binary again: 155 ms of a 34 MB one's build)
+    own: bool,
 }
 
 fn own_jsc_dir() -> Option<PathBuf> {
@@ -498,10 +517,10 @@ fn jsc_flags() -> Result<JscFlags, BuildError> {
         } else {
             libs.extend(["-licui18n", "-licuuc", "-licudata", "-lstdc++", "-ldl", "-latomic"].map(String::from));
         }
-        return Ok(JscFlags { cflags, libs });
+        return Ok(JscFlags { cflags, libs, own: true });
     }
     if cfg!(target_vendor = "apple") {
-        return Ok(JscFlags { cflags: Vec::new(), libs: ["-framework", "JavaScriptCore", "-framework", "CoreFoundation", "-lobjc"].map(String::from).to_vec() });
+        return Ok(JscFlags { cflags: Vec::new(), libs: ["-framework", "JavaScriptCore", "-framework", "CoreFoundation", "-lobjc"].map(String::from).to_vec(), own: false });
     }
     let pkg = |package: &str, what: &str| -> Option<Vec<String>> {
         let out = Command::new("pkg-config").arg(what).arg(package).output().ok()?;
@@ -510,10 +529,53 @@ fn jsc_flags() -> Result<JscFlags, BuildError> {
     for package in ["javascriptcoregtk-4.1", "javascriptcoregtk-6.0"] {
         if let (Some(cflags), Some(mut libs)) = (pkg(package, "--cflags"), pkg(package, "--libs")) {
             libs.push("-ldl".into());
-            return Ok(JscFlags { cflags, libs });
+            return Ok(JscFlags { cflags, libs, own: false });
         }
     }
     Err(BuildError::Message("npm packages need JavaScriptCore: install WebKitGTK's (on Debian and Ubuntu, libjavascriptcoregtk-4.1-dev; pkg-config finds it)".into()))
+}
+
+/// The program: its binary as linked (`base`, which holds no JavaScript) with the blob appended
+/// (runtime/js.c maps it from there): `base` + "-" + the blob's name, made once per blob (on
+/// APFS the copy shares the base's blocks). The binary is page-aligned, then the blob, a NUL,
+/// the blob's offset and length (u64s, little-endian) and "BARMBLOB". Older programs made from
+/// the same base are removed (each would otherwise keep a copy of the engine).
+fn with_blob(base: &Path, blob: &Path) -> Result<PathBuf, BuildError> {
+    let fail = |e: std::io::Error| BuildError::Message(format!("can't append the program's JavaScript: {e}"));
+    let name = base.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let blob_name = blob.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let out = base.with_file_name(format!("{name}-{blob_name}"));
+    if !cached(&out) {
+        use std::io::Write;
+        let tmp = out.with_file_name(format!("{name}-{blob_name}.tmp{}", std::process::id()));
+        std::fs::copy(base, &tmp).map_err(fail)?;
+        let js = std::fs::read(blob).map_err(fail)?;
+        let mut f = std::fs::OpenOptions::new().append(true).open(&tmp).map_err(fail)?;
+        let len = f.metadata().map_err(fail)?.len();
+        const PAGE: u64 = 16384;
+        let at = len.div_ceil(PAGE) * PAGE;
+        f.write_all(&vec![0u8; (at - len) as usize]).map_err(fail)?;
+        f.write_all(&js).map_err(fail)?;
+        f.write_all(&[0]).map_err(fail)?;
+        f.write_all(&at.to_le_bytes()).map_err(fail)?;
+        f.write_all(&(js.len() as u64 + 1).to_le_bytes()).map_err(fail)?;
+        f.write_all(b"BARMBLOB").map_err(fail)?;
+        drop(f);
+        std::fs::rename(&tmp, &out).map_err(fail)?;
+        // (the same program's earlier ones)
+        if let Some(dir) = base.parent()
+            && let Ok(entries) = std::fs::read_dir(dir)
+        {
+            let prefix = format!("{name}-");
+            for e in entries.flatten() {
+                let n = e.file_name().to_string_lossy().into_owned();
+                if n.starts_with(&prefix) && !n.contains(".tmp") && e.path() != out {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Ad-hoc signs a binary with the JIT entitlement (see JIT_ENTITLEMENTS).
