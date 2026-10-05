@@ -1678,10 +1678,9 @@ JSValueRef tv_js_function(tv_fn fn, tv_js_tramp tramp) {
  * them; the counts on the heap. Past 3/4 full, new cells go to JSValueProtect instead (a release
  * not found here is the protect's). Tombstones are swept out when they pile up. */
 
-#define TV_JS_TOMB ((JSValueRef)(uintptr_t)8)   /* not a cell pointer (cells are 16-byte aligned) */
 static JSValueRef *tv_js_keys;
 static uint32_t *tv_js_counts;
-static uint32_t tv_js_cap, tv_js_used, tv_js_live;
+static uint32_t tv_js_cap, tv_js_live;
 
 void tv_js_roots_init(JSValueRef *keys, uint32_t cap) {
     memset(keys, 0, (size_t)cap * sizeof *keys);
@@ -1697,53 +1696,22 @@ static uint32_t tv_js_slot_of(JSValueRef v) {
     return (uint32_t)(h >> 32) & (tv_js_cap - 1);
 }
 
-static void tv_js_sweep(void) {
-    /* rebuild without tombstones (rare: only once they've piled up) */
-    uint32_t n = tv_js_live, k = 0;
-    JSValueRef *vs = malloc((size_t)(n ? n : 1) * sizeof *vs);
-    uint32_t *cs = malloc((size_t)(n ? n : 1) * sizeof *cs);
-    if (!vs || !cs) abort();
-    for (uint32_t i = 0; i < tv_js_cap; i++) {
-        if (tv_js_keys[i] && tv_js_keys[i] != TV_JS_TOMB) { vs[k] = tv_js_keys[i]; cs[k++] = tv_js_counts[i]; }
-    }
-    memset(tv_js_keys, 0, (size_t)tv_js_cap * sizeof *tv_js_keys);
-    for (uint32_t j = 0; j < k; j++) {
-        uint32_t i = tv_js_slot_of(vs[j]);
-        while (tv_js_keys[i]) i = (i + 1) & (tv_js_cap - 1);
-        tv_js_keys[i] = vs[j];
-        tv_js_counts[i] = cs[j];
-    }
-    tv_js_used = k;
-    free(vs);
-    free(cs);
-}
-
+/* Open addressing with linear probing; a removal shifts the entries after it back (no
+ * tombstones: a value retained and released a million times in a loop left the table full of
+ * them, and every insertion walking past them was a sixth of the loop's time). */
 void tv_js_root_add(JSValueRef v) {
     if (tv_js_cap) {
-        uint32_t i = tv_js_slot_of(v), tomb = UINT32_MAX;
-        for (;;) {
-            JSValueRef k = tv_js_keys[i];
-            if (k == v) { tv_js_counts[i]++; return; }
-            if (!k) break;
-            if (k == TV_JS_TOMB && tomb == UINT32_MAX) tomb = i;
-            i = (i + 1) & (tv_js_cap - 1);
+        uint32_t i = tv_js_slot_of(v);
+        for (JSValueRef k; (k = tv_js_keys[i]); i = (i + 1) & (tv_js_cap - 1)) {
+            if (k == v) {
+                tv_js_counts[i]++;
+                return;
+            }
         }
-        if (tomb != UINT32_MAX) {
-            tv_js_keys[tomb] = v;
-            tv_js_counts[tomb] = 1;
-            tv_js_live++;
-            return;
-        }
-        if (tv_js_used + 1 <= tv_js_cap / 4 * 3) {
-            tv_js_keys[i] = v;
+        if (tv_js_live + 1 <= tv_js_cap / 4 * 3) {
             tv_js_counts[i] = 1;
-            tv_js_used++;
+            tv_js_keys[i] = v;
             tv_js_live++;
-            return;
-        }
-        if (tv_js_live < tv_js_cap / 2) {
-            tv_js_sweep();
-            tv_js_root_add(v);
             return;
         }
     }
@@ -1752,15 +1720,28 @@ void tv_js_root_add(JSValueRef v) {
 
 void tv_js_root_remove(JSValueRef v) {
     if (tv_js_cap) {
-        uint32_t i = tv_js_slot_of(v);
-        for (JSValueRef k; (k = tv_js_keys[i]); i = (i + 1) & (tv_js_cap - 1)) {
-            if (k == v) {
-                if (--tv_js_counts[i] == 0) {
-                    tv_js_keys[i] = TV_JS_TOMB;
-                    tv_js_live--;
-                }
-                return;
+        uint32_t mask = tv_js_cap - 1, i = tv_js_slot_of(v);
+        for (JSValueRef k; (k = tv_js_keys[i]); i = (i + 1) & mask) {
+            if (k != v) continue;
+            if (--tv_js_counts[i]) return;
+            /* the gap at i: an entry after it whose home is at or before the gap moves into it
+             * (its copy is made before it's cleared: a scan of the table never misses it) */
+            uint32_t j = i;
+            for (;;) {
+                j = (j + 1) & mask;
+                JSValueRef kj = tv_js_keys[j];
+                if (!kj) break;
+                uint32_t home = tv_js_slot_of(kj);
+                /* (does home lie cyclically in (i, j]? then it stays) */
+                bool stays = i <= j ? (i < home && home <= j) : (i < home || home <= j);
+                if (stays) continue;
+                tv_js_keys[i] = kj;
+                tv_js_counts[i] = tv_js_counts[j];
+                i = j;
             }
+            tv_js_keys[i] = NULL;
+            tv_js_live--;
+            return;
         }
     }
     if (tv_js_ctx) JSValueUnprotect(tv_js_ctx, v);
@@ -1813,6 +1794,14 @@ static JSObjectRef tv_js_make_fn(const char *params_prefix, uint32_t n, tv_sb *b
 
 JSValueRef tv_js_name_get(JSValueRef obj, tv_js_name *k, JSValueRef *exc) {
     JSContextRef ctx = tv_js();
+#ifdef TV_JSC_OWN
+    /* read where it is, without a call into the engine (null and undefined throw as `o.name`
+     * words it, by way of the compiled reader below) */
+    if (!JSValueIsUndefined(ctx, obj) && !JSValueIsNull(ctx, obj)) {
+        if (!k->id) k->id = TVPropertyName(ctx, k->text);
+        return TVGetProperty(ctx, obj, k->id, exc);
+    }
+#endif
     if (!k->get) {
         tv_sb b = {0};
         tv_sb_push_cstr(&b, "return o");
