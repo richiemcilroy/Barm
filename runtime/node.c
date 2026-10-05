@@ -8,7 +8,11 @@
 
 #include "js.h"
 
+#ifdef __APPLE__
 #include <JavaScriptCore/JavaScriptCore.h>
+#else
+#include <JavaScriptCore/JavaScript.h>
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <ifaddrs.h>

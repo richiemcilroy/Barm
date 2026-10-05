@@ -1,24 +1,25 @@
 //! npm packages: each tests/npm/<name>.barm imports packages from tests/npm/node_modules (small
 //! CommonJS, ES module and TypeScript packages) and runs; stdout must equal <name>.stdout.
-//! macOS only for now (Barm runs JavaScript on the system's JavaScriptCore).
+//! Barm runs JavaScript on JavaScriptCore: the system's on macOS, WebKitGTK's elsewhere
+//! (scripts/linux.sh runs these in Linux).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
-    if !cfg!(target_vendor = "apple") {
-        println!("npm: skipped (macOS only)");
-        return;
-    }
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
     let dir = root.join("tests/npm");
     // the Node-API fixture: a C addon, compiled here (binaries aren't checked in)
     let addon = dir.join("node_modules/napi-addon");
     let built = addon.join("build/addon.node");
-    let stale = std::fs::metadata(&built).and_then(|b| Ok(b.modified()? < std::fs::metadata(addon.join("addon.c"))?.modified()?)).unwrap_or(true);
+    // (built for this system: a Mach-O or an ELF file, as the checkout may be shared with Linux)
+    let elf = std::fs::read(&built).map(|b| b.starts_with(b"\x7fELF")).unwrap_or(false);
+    let other = elf == cfg!(target_vendor = "apple");
+    let stale = other || std::fs::metadata(&built).and_then(|b| Ok(b.modified()? < std::fs::metadata(addon.join("addon.c"))?.modified()?)).unwrap_or(true);
     if stale {
         std::fs::create_dir_all(addon.join("build")).unwrap();
-        let ok = Command::new("cc").args(["-O1", "-bundle", "-undefined", "dynamic_lookup", "-o"]).arg(&built).arg(addon.join("addon.c")).status().map(|s| s.success()).unwrap_or(false);
+        let link: &[&str] = if cfg!(target_vendor = "apple") { &["-bundle", "-undefined", "dynamic_lookup"] } else { &["-shared", "-fPIC"] };
+        let ok = Command::new("cc").arg("-O1").args(link).arg("-o").arg(&built).arg(addon.join("addon.c")).status().map(|s| s.success()).unwrap_or(false);
         assert!(ok, "can't compile tests/npm/node_modules/napi-addon/addon.c");
     }
     let mut cases: Vec<PathBuf> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "barm")).collect();
@@ -38,10 +39,12 @@ fn main() {
                 continue;
             }
         };
-        let expected = std::fs::read_to_string(case.with_extension("stdout")).unwrap_or_default();
+        // (<name>.linux.stdout, when a program's output differs there: process.platform, say)
+        let os_expected = case.with_extension(format!("{}.stdout", std::env::consts::OS));
+        let expected = std::fs::read_to_string(&os_expected).or_else(|_| std::fs::read_to_string(case.with_extension("stdout"))).unwrap_or_default();
         // `cache`: runs twice, with a cache of its own: compiled (writing the bytecode cache as it
-        // exits), then from the cache
-        let cache = (name == "cache").then(|| std::env::temp_dir().join(format!("barm-npm-cache-{}", std::process::id())));
+        // exits), then from the cache (macOS: JavaScriptCore's own, JSScript's)
+        let cache = (name == "cache" && cfg!(target_vendor = "apple")).then(|| std::env::temp_dir().join(format!("barm-npm-cache-{}", std::process::id())));
         let runs = if cache.is_some() { 2 } else { 1 };
         for run in 0..runs {
             let mut cmd = Command::new(&built.binary);

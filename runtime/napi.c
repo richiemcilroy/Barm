@@ -14,7 +14,11 @@
 
 #include "js.h"
 
+#ifdef __APPLE__
 #include <JavaScriptCore/JavaScriptCore.h>
+#else
+#include <JavaScriptCore/JavaScript.h>
+#endif
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
