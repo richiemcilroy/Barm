@@ -8,7 +8,7 @@
 
 #include "js.h"
 
-#ifdef __APPLE__
+#if defined(__APPLE__) && !defined(BM_JSC_OWN)
 #include <JavaScriptCore/JavaScriptCore.h>
 #else
 #include <JavaScriptCore/JavaScript.h>
@@ -2100,7 +2100,13 @@ NATIVE(n_heap_stats) {
     static bool looked;
     if (!looked) {
         looked = true;
+#ifdef BM_JSC_OWN
+        /* (Barm's own engine is linked in: a program exports no symbols to look up) */
+        extern JSObjectRef JSGetMemoryUsageStatistics(JSContextRef);
+        stats = JSGetMemoryUsageStatistics;
+#else
         stats = (JSObjectRef (*)(JSContextRef))dlsym(RTLD_DEFAULT, "JSGetMemoryUsageStatistics");
+#endif
     }
     double v[3] = {0, 0, 0};
     if (stats) {

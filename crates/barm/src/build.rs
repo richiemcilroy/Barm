@@ -455,14 +455,51 @@ fn js_objects(cc: &str, flags: &[String], c_dir: &Path, key: &str) -> Result<Vec
     Ok(objs)
 }
 
-/// How programs importing npm packages compile and link against JavaScriptCore: on macOS the
-/// system's framework; elsewhere WebKitGTK's library (pkg-config's javascriptcoregtk-4.1, or 6.0).
+/// How programs importing npm packages compile and link against JavaScriptCore: Barm's own build
+/// of it (scripts/jsc/build.sh: a static library in ~/.cache/barm/jsc/<os>-<arch>, or
+/// BARM_JSC_DIR) when there's one, unless BARM_JSC=system; otherwise on macOS the system's
+/// framework, elsewhere WebKitGTK's library (pkg-config's javascriptcoregtk-4.1, or 6.0).
 struct JscFlags {
     cflags: Vec<String>,
     libs: Vec<String>,
 }
 
+fn own_jsc_dir() -> Option<PathBuf> {
+    if std::env::var("BARM_JSC").is_ok_and(|v| v == "system") {
+        return None;
+    }
+    let dir = match std::env::var_os("BARM_JSC_DIR") {
+        Some(d) => PathBuf::from(d),
+        None => {
+            let os = if cfg!(target_vendor = "apple") { "darwin" } else { std::env::consts::OS };
+            let arch = match std::env::consts::ARCH {
+                "aarch64" => "arm64",
+                a => a,
+            };
+            cache_dir().join("jsc").join(format!("{os}-{arch}"))
+        }
+    };
+    dir.join("lib/libbarmjsc.a").is_file().then_some(dir)
+}
+
 fn jsc_flags() -> Result<JscFlags, BuildError> {
+    if let Some(dir) = own_jsc_dir() {
+        // (the build's version: a rebuilt engine relinks programs)
+        let version = std::fs::read_to_string(dir.join("VERSION")).unwrap_or_default();
+        // (and the library as built: its size and time, so programs relink when it's rebuilt)
+        let lib = std::fs::metadata(dir.join("lib/libbarmjsc.a")).ok();
+        let stamp = lib.map(|m| format!("{}-{:?}", m.len(), m.modified().ok())).unwrap_or_default();
+        // (the cache's format: its files go in a directory of its own, BM_JSC_CACHE_FORMAT)
+        let format = version.split_whitespace().last().unwrap_or("0").to_string();
+        let cflags = vec![format!("-I{}", dir.join("include").display()), "-DBM_JSC_OWN=1".to_string(), format!("-DBM_JSC_CACHE_FORMAT=\"{format}\""), format!("-DBM_JSC_BUILD=\"{} {}\"", version.trim(), stamp)];
+        let mut libs = vec![dir.join("lib/libbarmjsc.a").to_string_lossy().into_owned()];
+        if cfg!(target_vendor = "apple") {
+            libs.extend(["-licucore", "-lc++", "-framework", "CoreFoundation", "-framework", "Foundation"].map(String::from));
+        } else {
+            libs.extend(["-licui18n", "-licuuc", "-licudata", "-lstdc++", "-ldl", "-latomic"].map(String::from));
+        }
+        return Ok(JscFlags { cflags, libs });
+    }
     if cfg!(target_vendor = "apple") {
         return Ok(JscFlags { cflags: Vec::new(), libs: ["-framework", "JavaScriptCore", "-framework", "CoreFoundation", "-lobjc"].map(String::from).to_vec() });
     }
