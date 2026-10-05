@@ -1941,9 +1941,11 @@ typedef struct {
     size_t answer_len;
 } bm_node_dnsq;
 
+/* (an error counts as ready, for the read or write to report: Linux raises a refused UDP query's
+ * as POLLERR alone, where macOS makes the socket readable) */
 static bool bm_node_dns_wait(int fd, short ev, int ms) {
     struct pollfd p = { fd, ev, 0 };
-    return poll(&p, 1, ms) == 1 && (p.revents & ev);
+    return poll(&p, 1, ms) == 1 && (p.revents & (ev | POLLERR | POLLHUP));
 }
 
 /* one query over TCP (for an answer too big for UDP) */
