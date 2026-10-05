@@ -28,10 +28,17 @@
 #elif defined(__GLIBC__)
 #include <malloc.h>
 #endif
+#include <fcntl.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 
 JSGlobalContextRef bm_js_ctx;
 bool bm_js_encoded;
@@ -62,6 +69,44 @@ static JSValueRef bm_js_noop_fn(JSContextRef ctx, JSObjectRef f, JSObjectRef sel
  * the prelude's offset, then per module its name's offset, its source's offset and length — and
  * NUL-terminated strings. */
 static uint32_t bm_js_u32(const unsigned char *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
+
+/* The blob is in the program (bm_js_blob, assembled in) or, when the program says so (bm_js_blob
+ * is "BARMAPP"), appended to its executable file, mapped from there: a build whose JavaScript
+ * changed then makes the program by appending it to the binary it linked before, without linking
+ * again (crates/barm/src/build.rs, with_blob). The file ends with the blob's offset and length
+ * (u64s) and "BARMBLOB". */
+static const unsigned char *bm_js_blob_p;
+
+static bool bm_js_exe_path(char *out, size_t cap);
+
+static const unsigned char *bm_js_blob_data(void) {
+    if (bm_js_blob_p) return bm_js_blob_p;
+    if (memcmp(bm_js_blob, "BARMAPP", 8) != 0) return bm_js_blob_p = bm_js_blob;
+    char exe[1024];
+    int fd = bm_js_exe_path(exe, sizeof exe) ? open(exe, O_RDONLY | O_CLOEXEC) : -1;
+    struct stat st;
+    unsigned char tail[24];
+    if (fd < 0 || fstat(fd, &st) != 0 || st.st_size < 24 || pread(fd, tail, 24, st.st_size - 24) != 24 || memcmp(tail + 16, "BARMBLOB", 8) != 0) {
+        const char *m = "barm: the program's JavaScript is missing from its file (was it changed or stripped?)\n";
+        bm_write_fd(2, m, strlen(m));
+        _exit(1);
+    }
+    uint64_t at = 0, len = 0;
+    for (int k = 7; k >= 0; k--) {
+        at = at << 8 | tail[k];
+        len = len << 8 | tail[8 + k];
+    }
+    void *p = mmap(NULL, (size_t)len, PROT_READ, MAP_PRIVATE, fd, (off_t)at);
+    close(fd);
+    if (p == MAP_FAILED) {
+        const char *m = "barm: can't map the program's JavaScript\n";
+        bm_write_fd(2, m, strlen(m));
+        _exit(1);
+    }
+    return bm_js_blob_p = p;
+}
+
+#define bm_js_blob bm_js_blob_data()
 static uint32_t bm_js_nmodules(void) { return bm_js_u32(bm_js_blob); }
 static const char *bm_js_prelude(void) { return (const char *)bm_js_blob + bm_js_u32(bm_js_blob + 4); }
 static const char *bm_js_module_name(uint32_t i) { return (const char *)bm_js_blob + bm_js_u32(bm_js_blob + 8 + 16 * i); }
@@ -161,17 +206,7 @@ static struct {
 } bm_jsc;
 
 /* This program's executable, to start again (the cache's writer). */
-static bool bm_jsc_exe(char *out, size_t cap) {
-#ifdef __APPLE__
-    uint32_t size = (uint32_t)cap;
-    return _NSGetExecutablePath(out, &size) == 0;
-#else
-    ssize_t n = readlink("/proc/self/exe", out, cap - 1);
-    if (n <= 0) return false;
-    out[n] = 0;
-    return true;
-#endif
-}
+static bool bm_jsc_exe(char *out, size_t cap) { return bm_js_exe_path(out, cap); }
 
 static void bm_jsc_low_priority(posix_spawnattr_t *attr) {
 #ifdef __APPLE__
@@ -575,6 +610,19 @@ __attribute__((constructor)) static void bm_jsc_writer(void) {
     _exit(0);
 }
 #endif
+
+/* This program's executable file. */
+static bool bm_js_exe_path(char *out, size_t cap) {
+#ifdef __APPLE__
+    uint32_t size = (uint32_t)cap;
+    return _NSGetExecutablePath(out, &size) == 0;
+#else
+    ssize_t n = readlink("/proc/self/exe", out, cap - 1);
+    if (n <= 0) return false;
+    out[n] = 0;
+    return true;
+#endif
+}
 
 /* globalThis.__barm_compile(id): module `id`'s function, compiled on first require with the
  * module's name as its URL (stack traces name the file; line numbers are the file's). */

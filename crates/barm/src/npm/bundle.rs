@@ -48,6 +48,7 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
     let mut warnings = Vec::new();
     let mut entry_ids = Vec::new();
     let mut native = false;
+    let mut pack = Pack::load(root, specs);
     // Node's globals (`process`, `Buffer`, ...) as a module that runs before the entries
     let globals_id = super::node_shims::shim("__globals").map(|_| add(&mut modules, &mut index, &mut queue, Target::Builtin("internal/bootstrap/globals".into())));
     for spec in specs {
@@ -77,51 +78,72 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
                 (name, body, Vec::new(), root.to_path_buf())
             }
             Target::File(path) => {
-                let bytes = std::fs::read(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
-                let src = match String::from_utf8(bytes) {
-                    Ok(src) if !is_binary_ext(path) => src,
-                    _ => {
-                        // a native addon: loaded from where it is (runtime/napi.c); another binary
-                        // fails when required, as in Node.js (packages that try one usually catch
-                        // it and fall back)
-                        let name = display(path, root);
-                        let addon = path.extension().is_some_and(|e| e == "node");
-                        native |= addon;
-                        let msg = format!("Cannot load {name}: binary modules other than Node-API addons aren't supported by Barm");
-                        let fail = format!("var e = new Error({}); e.code = \"ERR_DLOPEN_FAILED\"; throw e;", js_string(&msg));
-                        let body = if addon { format!("if (typeof __barm_dlopen !== \"function\") {{ {fail} }} module.exports = __barm_dlopen({}, module.exports);", js_string(&name)) } else { fail };
-                        modules[id].name = name;
-                        modules[id].body = body;
-                        continue;
-                    }
-                };
                 let name = display(path, root);
                 let dir = path.parent().unwrap_or(root).to_path_buf();
-                let ts = super::resolve::is_typescript(path);
-                let jsx = matches!(path.extension().and_then(|e| e.to_str()), Some("tsx" | "jsx"));
-                let format = match resolver.format(path) {
-                    Format::Detect if ts || jsx || super::esm::has_module_syntax(&src) => Format::Esm,
-                    Format::Detect => Format::CommonJs,
-                    f => f,
-                };
-                match format {
-                    Format::Json => (name, format!("module.exports = {};", src.trim_end().trim_start_matches('\u{feff}')), Vec::new(), dir),
-                    Format::CommonJs | Format::Detect if !ts && !jsx => {
-                        let mut reqs = static_requires(&src).map_err(|e| format!("{name}: {e}"))?;
-                        for (prefix, suffix) in super::lex::require_patterns(&src) {
-                            reqs.extend(expand_pattern(&dir, &prefix, &suffix));
+                let declared = resolver.format(path);
+                // (unchanged since the last build: as transformed then, the file not read)
+                let stamp = file_stamp(path);
+                let (is_esm, t) = match stamp.and_then(|st| pack.get(path, st, declared)) {
+                    Some(hit) => hit,
+                    None => {
+                        let bytes = std::fs::read(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
+                        let src = match String::from_utf8(bytes) {
+                            Ok(src) if !is_binary_ext(path) => src,
+                            _ => {
+                                // a native addon: loaded from where it is (runtime/napi.c); another binary
+                                // fails when required, as in Node.js (packages that try one usually catch
+                                // it and fall back)
+                                let addon = path.extension().is_some_and(|e| e == "node");
+                                native |= addon;
+                                let msg = format!("Cannot load {name}: binary modules other than Node-API addons aren't supported by Barm");
+                                let fail = format!("var e = new Error({}); e.code = \"ERR_DLOPEN_FAILED\"; throw e;", js_string(&msg));
+                                let body = if addon { format!("if (typeof __barm_dlopen !== \"function\") {{ {fail} }} module.exports = __barm_dlopen({}, module.exports);", js_string(&name)) } else { fail };
+                                modules[id].name = name;
+                                modules[id].body = body;
+                                continue;
+                            }
+                        };
+                        let ts = super::resolve::is_typescript(path);
+                        let jsx = matches!(path.extension().and_then(|e| e.to_str()), Some("tsx" | "jsx"));
+                        let format = match declared {
+                            Format::Detect if ts || jsx || super::esm::has_module_syntax(&src) => Format::Esm,
+                            Format::Detect => Format::CommonJs,
+                            f => f,
+                        };
+                        let made = match format {
+                            Format::Json => (false, Transformed { body: format!("module.exports = {};", src.trim_end().trim_start_matches('\u{feff}')), requires: Vec::new(), patterns: Vec::new() }),
+                            Format::CommonJs | Format::Detect if !ts && !jsx => {
+                                let t = transformed(&src, "cjs", || {
+                                    let requires = static_requires(&src)?;
+                                    let patterns = super::lex::require_patterns(&src);
+                                    Ok(Transformed { body: minified(src.clone()), requires, patterns })
+                                })
+                                .map_err(|e| format!("{name}: {e}"))?;
+                                (false, t)
+                            }
+                            _ => {
+                                let runtime = jsx.then(|| jsx_runtime(path));
+                                let kind = format!("esm ts={ts} jsx={runtime:?}");
+                                let t = transformed(&src, &kind, || {
+                                    let (body, requires) = super::esm::to_commonjs(&src, ts, runtime.as_deref())?;
+                                    Ok(Transformed { body: minified(body), requires, patterns: Vec::new() })
+                                })
+                                .map_err(|e| format!("{name}: {e}"))?;
+                                (true, t)
+                            }
+                        };
+                        if let Some(st) = stamp {
+                            pack.put(path, st, declared, made.0, &made.1);
                         }
-                        let src = minified(src);
-                        (name, src, reqs, dir)
+                        made
                     }
-                    _ => {
-                        let runtime = jsx.then(|| jsx_runtime(path));
-                        let (body, reqs) = super::esm::to_commonjs(&src, ts, runtime.as_deref()).map_err(|e| format!("{name}: {e}"))?;
-                        let body = minified(body);
-                        esm = true;
-                        (name, body, reqs, dir)
-                    }
+                };
+                esm = is_esm;
+                let mut reqs = t.requires;
+                for (prefix, suffix) in &t.patterns {
+                    reqs.extend(expand_pattern(&dir, prefix, suffix));
                 }
+                (name, t.body, reqs, dir)
             }
         };
         let mut map = Vec::with_capacity(requires.len());
@@ -187,6 +209,7 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
         modules[id].map = map;
         modules[id].esm = esm;
     }
+    pack.save();
     let mut js = String::with_capacity(4096 + modules.len() * 64);
     if globals_id.is_none() {
         js.push_str(super::node_shims::globals());
@@ -708,3 +731,237 @@ Object.defineProperty(globalThis, "__barm_modules", { value: {
 globalThis.__barm_npm = function (spec) { return __barm_load(entries[spec]); };
 })();
 "#;
+
+/// What transforming a module's text gave: its code as a function body (converted to CommonJS,
+/// TypeScript and JSX stripped, minified), its static requires, and its required patterns
+/// (`require("./locale/" + x + ".js")`, expanded against the directory as it is).
+struct Transformed {
+    body: String,
+    requires: Vec<String>,
+    patterns: Vec<(String, String)>,
+}
+
+/// `compute`d, or what it gave for the same text before: cached on disk by the text, `kind` (how
+/// it's transformed) and this compiler's build, so a rebuild transforms only the files that
+/// changed (Cap's media server: 654 modules, 5 MB, ~90 ms to transform, ~5 ms to read back).
+fn transformed(src: &str, kind: &str, compute: impl FnOnce() -> Result<Transformed, String>) -> Result<Transformed, String> {
+    let Some((dir, build)) = cache_build() else { return compute() };
+    let key = fast_hash(src.as_bytes(), fast_hash(kind.as_bytes(), *build));
+    let path = dir.join(format!("{key:016x}"));
+    if let Ok(bytes) = std::fs::read(&path)
+        && let Some(t) = Transformed::decode(&bytes)
+    {
+        return Ok(t);
+    }
+    let t = compute()?;
+    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    if std::fs::write(&tmp, t.encode()).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+    Ok(t)
+}
+
+impl Transformed {
+    /// "barm-t1", the requires and patterns (each a u32 length and bytes), then the body.
+    fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.body.len() + 64);
+        out.extend_from_slice(b"barm-t1");
+        let put = |out: &mut Vec<u8>, s: &str| {
+            out.extend_from_slice(&(s.len() as u32).to_le_bytes());
+            out.extend_from_slice(s.as_bytes());
+        };
+        out.extend_from_slice(&(self.requires.len() as u32).to_le_bytes());
+        for r in &self.requires {
+            put(&mut out, r);
+        }
+        out.extend_from_slice(&(self.patterns.len() as u32).to_le_bytes());
+        for (a, b) in &self.patterns {
+            put(&mut out, a);
+            put(&mut out, b);
+        }
+        out.extend_from_slice(self.body.as_bytes());
+        out
+    }
+
+    fn decode(bytes: &[u8]) -> Option<Transformed> {
+        let mut at = bytes.strip_prefix(b"barm-t1")?;
+        let u32_ = |at: &mut &[u8]| -> Option<usize> {
+            let (n, rest) = at.split_first_chunk::<4>()?;
+            *at = rest;
+            Some(u32::from_le_bytes(*n) as usize)
+        };
+        let string = |at: &mut &[u8]| -> Option<String> {
+            let (n, rest) = at.split_first_chunk::<4>()?;
+            let n = u32::from_le_bytes(*n) as usize;
+            let s = std::str::from_utf8(rest.get(..n)?).ok()?.to_string();
+            *at = &rest[n..];
+            Some(s)
+        };
+        let nreq = u32_(&mut at)?;
+        let mut requires = Vec::with_capacity(nreq);
+        for _ in 0..nreq {
+            requires.push(string(&mut at)?);
+        }
+        let npat = u32_(&mut at)?;
+        let mut patterns = Vec::with_capacity(npat);
+        for _ in 0..npat {
+            let a = string(&mut at)?;
+            patterns.push((a, string(&mut at)?));
+        }
+        let body = std::str::from_utf8(at).ok()?.to_string();
+        Some(Transformed { body, requires, patterns })
+    }
+}
+
+/// A 64-bit hash of `bytes` (eight at a time), seeded. For cache keys, not security.
+fn fast_hash(bytes: &[u8], seed: u64) -> u64 {
+    let mut h = seed ^ 0x9e37_79b9_7f4a_7c15 ^ (bytes.len() as u64).wrapping_mul(0xff51_afd7_ed55_8ccd);
+    let mut chunks = bytes.chunks_exact(8);
+    for c in &mut chunks {
+        let w = u64::from_le_bytes(c.try_into().unwrap());
+        h = (h ^ w).wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(29);
+    }
+    for &b in chunks.remainder() {
+        h = (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    h ^ (h >> 29)
+}
+
+/// A file's size and modification time (nanoseconds): what says it's unchanged.
+fn file_stamp(path: &Path) -> Option<(u64, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let t = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some((meta.len(), t.as_nanos() as u64))
+}
+
+/// The project's modules as the last build transformed them, by path, size and modification
+/// time: a rebuild reads (and transforms) only the files that changed; the others come from one
+/// file (Cap's media server: 654 files, 5 MB, read and hashed in ~25 ms without it).
+struct Pack {
+    path: Option<PathBuf>,
+    entries: FxMap<PathBuf, PackEntry>,
+    used: Vec<PathBuf>,
+    dirty: bool,
+}
+
+struct PackEntry {
+    stamp: (u64, u64),
+    format: u8,
+    esm: bool,
+    t: Transformed,
+}
+
+fn format_code(f: Format) -> u8 {
+    match f {
+        Format::CommonJs => 0,
+        Format::Esm => 1,
+        Format::Detect => 2,
+        Format::Json => 3,
+    }
+}
+
+impl Pack {
+    fn load(root: &Path, specs: &[String]) -> Pack {
+        let mut pack = Pack { path: None, entries: FxMap::default(), used: Vec::new(), dirty: false };
+        let Some((dir, build)) = cache_build() else { return pack };
+        let mut key = fast_hash(root.as_os_str().as_encoded_bytes(), *build);
+        for s in specs {
+            key = fast_hash(s.as_bytes(), key);
+        }
+        let path = dir.join(format!("pack-{key:016x}"));
+        if let Ok(bytes) = std::fs::read(&path) {
+            pack.decode(&bytes);
+        }
+        pack.path = Some(path);
+        pack
+    }
+
+    fn get(&mut self, path: &Path, stamp: (u64, u64), format: Format) -> Option<(bool, Transformed)> {
+        let e = self.entries.get(path)?;
+        if e.stamp != stamp || e.format != format_code(format) {
+            return None;
+        }
+        self.used.push(path.to_path_buf());
+        Some((e.esm, Transformed { body: e.t.body.clone(), requires: e.t.requires.clone(), patterns: e.t.patterns.clone() }))
+    }
+
+    fn put(&mut self, path: &Path, stamp: (u64, u64), format: Format, esm: bool, t: &Transformed) {
+        let t = Transformed { body: t.body.clone(), requires: t.requires.clone(), patterns: t.patterns.clone() };
+        self.entries.insert(path.to_path_buf(), PackEntry { stamp, format: format_code(format), esm, t });
+        self.used.push(path.to_path_buf());
+        self.dirty = true;
+    }
+
+    /// Written when something changed, with only the modules this build used.
+    fn save(&mut self) {
+        let Some(path) = &self.path else { return };
+        if !self.dirty && self.used.len() == self.entries.len() {
+            return;
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(b"barm-p1");
+        let mut seen = crate::hash::FxSet::default();
+        for p in &self.used {
+            if !seen.insert(p.clone()) {
+                continue;
+            }
+            let Some(e) = self.entries.get(p) else { continue };
+            let name = p.as_os_str().as_encoded_bytes();
+            let t = e.t.encode();
+            out.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            out.extend_from_slice(name);
+            out.extend_from_slice(&e.stamp.0.to_le_bytes());
+            out.extend_from_slice(&e.stamp.1.to_le_bytes());
+            out.push(e.format);
+            out.push(e.esm as u8);
+            out.extend_from_slice(&(t.len() as u32).to_le_bytes());
+            out.extend_from_slice(&t);
+        }
+        let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+        if std::fs::write(&tmp, &out).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
+        }
+    }
+
+    fn decode(&mut self, bytes: &[u8]) {
+        let Some(mut at) = bytes.strip_prefix(b"barm-p1") else { return };
+        fn take<'a>(at: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
+            let (a, b) = (at.get(..n)?, at.get(n..)?);
+            *at = b;
+            Some(a)
+        }
+        let u32_ = |at: &mut &[u8]| take(at, 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize);
+        let u64_ = |at: &mut &[u8]| take(at, 8).map(|b| u64::from_le_bytes(b.try_into().unwrap()));
+        while !at.is_empty() {
+            let Some(entry) = (|| {
+                let n = u32_(&mut at)?;
+                let name = PathBuf::from(std::str::from_utf8(take(&mut at, n)?).ok()?);
+                let stamp = (u64_(&mut at)?, u64_(&mut at)?);
+                let flags = take(&mut at, 2)?;
+                let (format, esm) = (flags[0], flags[1] != 0);
+                let n = u32_(&mut at)?;
+                let t = Transformed::decode(take(&mut at, n)?)?;
+                Some((name, PackEntry { stamp, format, esm, t }))
+            })() else {
+                self.entries.clear();
+                return;
+            };
+            self.entries.insert(entry.0, entry.1);
+        }
+    }
+}
+
+/// The transform caches' directory, and this compiler's build (the transforms are its code).
+fn cache_build() -> &'static Option<(PathBuf, u64)> {
+    static DIR: std::sync::OnceLock<Option<(PathBuf, u64)>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let exe = std::env::current_exe().ok()?;
+        let meta = std::fs::metadata(&exe).ok()?;
+        let built = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos() as u64;
+        let dir = crate::build::cache_dir().join("npm");
+        std::fs::create_dir_all(&dir).ok()?;
+        Some((dir, fast_hash(env!("CARGO_PKG_VERSION").as_bytes(), built ^ meta.len())))
+    })
+}
