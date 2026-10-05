@@ -23,7 +23,7 @@
     "node": "v26.3.0",
     "bun": "1.4.0",
     "scriptc": "0.1.7",
-    "barm": "barm 0.0.1"
+    "tov": "tov 0.0.1"
   },
   "results": [
     {
@@ -58,7 +58,7 @@
     },
     {
       "bench": "array_push",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.2838959170039743,
@@ -118,7 +118,7 @@
     },
     {
       "bench": "binary_trees",
-      "lang": "barm",
+      "lang": "tov",
       "status": "build failed",
       "reason": "thread 'main' (14863318) has overflowed its stack\nfatal runtime error: stack overflow, aborting",
       "compile_s": null,
@@ -166,7 +166,7 @@
     },
     {
       "bench": "fib",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.27946337504545227,
@@ -226,7 +226,7 @@
     },
     {
       "bench": "map_insert",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.28586841601645574,
@@ -286,7 +286,7 @@
     },
     {
       "bench": "nbody",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.31604150001658127,
@@ -346,7 +346,7 @@
     },
     {
       "bench": "points",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.28504937497200444,
@@ -406,7 +406,7 @@
     },
     {
       "bench": "sort",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.2907918749842793,
@@ -466,7 +466,7 @@
     },
     {
       "bench": "strings",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.0038862089859321713,

@@ -108,7 +108,7 @@ const {
   isUint8Array,
   isTypedArray,
 } = require('internal/util/types');
-// (Barm: internal/util/inspect, 100KB, loads when something is first formatted)
+// (Tov: internal/util/inspect, 100KB, loads when something is first formatted)
 const utilInspect = (...args) => require('internal/util/inspect').inspect(...args);
 
 const {

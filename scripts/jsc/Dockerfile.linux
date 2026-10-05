@@ -1,4 +1,4 @@
-# Builds Barm's JavaScriptCore for Linux (scripts/jsc/build.sh linux).
+# Builds Tov's JavaScriptCore for Linux (scripts/jsc/build.sh linux).
 FROM debian:trixie
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git cmake ninja-build clang lld \
     ruby perl python3 libicu-dev && apt-get clean

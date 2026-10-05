@@ -28,7 +28,7 @@ const {
 } = primordials;
 
 const { validateInteger, validateObject } = require('internal/validators');
-// (Barm: the client side loads when it's first used, so a server doesn't load it)
+// (Tov: the client side loads when it's first used, so a server doesn't load it)
 let httpAgentModule;
 let clientModule;
 const lazyAgent = () => (httpAgentModule ??= require('_http_agent'));

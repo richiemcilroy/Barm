@@ -23,9 +23,9 @@
     "node": "v26.3.0",
     "bun": "1.4.0",
     "scriptc": "0.1.7",
-    "barm": "barm 0.0.1",
+    "tov": "tov 0.0.1",
     "rust-checked": null,
-    "barm-unchecked": null
+    "tov-unchecked": null
   },
   "results": [
     {
@@ -180,7 +180,7 @@
     },
     {
       "bench": "array_push",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.4257339169853367,
@@ -210,7 +210,7 @@
     },
     {
       "bench": "array_push",
-      "lang": "barm-unchecked",
+      "lang": "tov-unchecked",
       "status": "ok",
       "reason": "",
       "compile_s": 0.4186729170032777,
@@ -390,7 +390,7 @@
     },
     {
       "bench": "binary_trees",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.3747380420099944,
@@ -420,7 +420,7 @@
     },
     {
       "bench": "binary_trees",
-      "lang": "barm-unchecked",
+      "lang": "tov-unchecked",
       "status": "ok",
       "reason": "",
       "compile_s": 0.37206245900597423,
@@ -600,7 +600,7 @@
     },
     {
       "bench": "fib",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.3478635000064969,
@@ -630,7 +630,7 @@
     },
     {
       "bench": "fib",
-      "lang": "barm-unchecked",
+      "lang": "tov-unchecked",
       "status": "ok",
       "reason": "",
       "compile_s": 0.35594170802505687,
@@ -810,7 +810,7 @@
     },
     {
       "bench": "map_insert",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.3591571249999106,
@@ -840,7 +840,7 @@
     },
     {
       "bench": "map_insert",
-      "lang": "barm-unchecked",
+      "lang": "tov-unchecked",
       "status": "ok",
       "reason": "",
       "compile_s": 0.37687104096403345,
@@ -1020,7 +1020,7 @@
     },
     {
       "bench": "nbody",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.4274149580160156,
@@ -1050,7 +1050,7 @@
     },
     {
       "bench": "nbody",
-      "lang": "barm-unchecked",
+      "lang": "tov-unchecked",
       "status": "ok",
       "reason": "",
       "compile_s": 0.43953058402985334,
@@ -1230,7 +1230,7 @@
     },
     {
       "bench": "points",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.35828016605228186,
@@ -1260,7 +1260,7 @@
     },
     {
       "bench": "points",
-      "lang": "barm-unchecked",
+      "lang": "tov-unchecked",
       "status": "ok",
       "reason": "",
       "compile_s": 0.35634025000035763,
@@ -1440,7 +1440,7 @@
     },
     {
       "bench": "sort",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.42029837501468137,
@@ -1470,7 +1470,7 @@
     },
     {
       "bench": "sort",
-      "lang": "barm-unchecked",
+      "lang": "tov-unchecked",
       "status": "ok",
       "reason": "",
       "compile_s": 0.4671192080131732,
@@ -1650,7 +1650,7 @@
     },
     {
       "bench": "strings",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.4329084579949267,
@@ -1680,7 +1680,7 @@
     },
     {
       "bench": "strings",
-      "lang": "barm-unchecked",
+      "lang": "tov-unchecked",
       "status": "ok",
       "reason": "",
       "compile_s": 0.4387171249836683,

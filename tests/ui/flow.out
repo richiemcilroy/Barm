@@ -1,18 +1,18 @@
-error[F0101] flow.barm:1:10: function `sign` doesn't return a value on every path
+error[F0101] flow.tov:1:10: function `sign` doesn't return a value on every path
     1 | function sign(n: int): string {
   falls through: at the closing `}` on line 7
   expected: every path ends in `return <string>`
 
-error[F0302] flow.barm:12:5: this case falls through into the next one
+error[F0302] flow.tov:12:5: this case falls through into the next one
    12 |     case "a":
   why: implicit fallthrough is almost always a bug
   fix[safe]: end the case with `break`
 
-error[F0102] flow.barm:21:3: unreachable code
+error[F0102] flow.tov:21:3: unreachable code
    21 |   console.log("done")
   why: the previous statement always returns, breaks or continues
 
-error[F0201] flow.barm:25:3: `break` outside of a loop or `switch`
+error[F0201] flow.tov:25:3: `break` outside of a loop or `switch`
    25 |   break
 
 4 error(s)

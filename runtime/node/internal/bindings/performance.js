@@ -3,10 +3,10 @@
 // internalBinding('performance'): Node.js's src/node_perf.cc and histogram.cc. The clock is the
 // program's monotonic one (native hrtime, nanoseconds since it started); milestones are
 // nanoseconds on that clock, as Node.js's are on its own. Histograms are exact (a count per
-// value) where Node.js's are HdrHistogram's approximations. Barm reports no garbage collection
+// value) where Node.js's are HdrHistogram's approximations. Tov reports no garbage collection
 // entries.
 
-const native = globalThis.__barm_native;
+const native = globalThis.__tov_native;
 const hrtime = native?.hrtime
   ? () => native.hrtime()
   : (() => {

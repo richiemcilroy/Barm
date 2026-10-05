@@ -1,6 +1,6 @@
 'use strict';
 
-// The `process` global, over Barm's natives (globalThis.__barm_native, which runtime/node.c
+// The `process` global, over Tov's natives (globalThis.__tov_native, which runtime/node.c
 // installs). It costs one native call to make: the fields are plain values, and everything that
 // needs another module (EventEmitter, nextTick, warnings, stdio) loads it on first use, so a
 // package that only reads process.env starts nothing else. The natives this uses:
@@ -14,8 +14,8 @@
 //   cpuUsage()      [user µs, system µs]
 //   kill(pid, signal) / ids() -> [uid, gid, euid, egid]
 
-// (outside Barm's runtime, e.g. a bare engine: the host_fallback natives)
-const native = globalThis.__barm_native ?? require('internal/bootstrap/host_fallback');
+// (outside Tov's runtime, e.g. a bare engine: the host_fallback natives)
+const native = globalThis.__tov_native ?? require('internal/bootstrap/host_fallback');
 const info = native.info();
 
 const VERSION = 'v26.3.0';
@@ -40,11 +40,11 @@ function lazyProperty(name, make) {
   });
 }
 
-process.title = info.title ?? 'barm';
+process.title = info.title ?? 'tov';
 process.version = VERSION;
 process.versions = {
   node: VERSION.slice(1),
-  barm: info.barmVersion ?? '0.1.0',
+  tov: info.tovVersion ?? '0.1.0',
   modules: '141',
   uv: '1.51.0',
   boringssl: '0.20260929.0',
@@ -58,7 +58,7 @@ process.platform = info.platform;
 process.release = { name: 'node', lts: undefined };
 process.argv = info.argv;
 process.execArgv = info.execArgv ?? [];
-process.argv0 = info.argv[0] ?? 'barm';
+process.argv0 = info.argv[0] ?? 'tov';
 process.execPath = info.execPath;
 // (~50 µs of strings: made when first read)
 lazyProperty('env', () => (native.env ? native.env() : info.env));
@@ -236,7 +236,7 @@ native.setFatalHandler?.((err) => {
 });
 
 // for the host: whether anything can be listening (to 'exit' and 'beforeExit')
-Object.defineProperty(process, '_barmEmitter', { __proto__: null, get: () => emitter, enumerable: false, configurable: true });
+Object.defineProperty(process, '_tovEmitter', { __proto__: null, get: () => emitter, enumerable: false, configurable: true });
 
 // stdio: synchronous writes to fds 1 and 2 (as Node.js does for files, and pipes on macOS)
 function stdioStream(fd) {

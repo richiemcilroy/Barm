@@ -1,5 +1,5 @@
 "use strict";
-// whatwg-url 14.2.0 lib/url-state-machine.js (MIT, see LICENSE.txt), for Barm's internalBinding('url'):
+// whatwg-url 14.2.0 lib/url-state-machine.js (MIT, see LICENSE.txt), for Tov's internalBinding('url'):
 // tr46 loads only for hostnames that need it, and domainToASCII is exported
 let tr46;
 const lazyTr46 = () => (tr46 ??= require("internal/deps/tr46/index"));

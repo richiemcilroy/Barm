@@ -5,7 +5,7 @@ module.exports = new Proxy({}, {
   get(target, key) {
     if (typeof key === 'symbol' || key === 'then') return undefined;
     return target[key] ??= function notImplemented() {
-      const e = new Error(`internalBinding('process_methods').${String(key)} is not implemented in Barm yet`);
+      const e = new Error(`internalBinding('process_methods').${String(key)} is not implemented in Tov yet`);
       e.code = 'ERR_NOT_IMPLEMENTED';
       throw e;
     };

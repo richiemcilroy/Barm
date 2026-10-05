@@ -8,7 +8,7 @@ fn files(dir: &Path, out: &mut Vec<PathBuf>) {
         let p = e.path();
         if p.is_dir() {
             files(&p, out);
-        } else if p.extension().map(|x| x == "barm").unwrap_or(false) {
+        } else if p.extension().map(|x| x == "tov").unwrap_or(false) {
             out.push(p);
         }
     }
@@ -65,18 +65,18 @@ fn main() {
     files(&root.join("examples"), &mut sources);
     files(&root.join("tests/ui"), &mut sources);
     sources.sort();
-    let tmp = std::env::temp_dir().join(format!("barm-robustness-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("tov-robustness-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
     let mut rng = Rng(0x9E3779B97F4A7C15);
     let mut count = 0;
     for src_path in &sources {
         let src = std::fs::read_to_string(src_path).unwrap();
         for v in variants(&src, &mut rng) {
-            let file = tmp.join("case.barm");
+            let file = tmp.join("case.tov");
             std::fs::write(&file, &v).unwrap();
-            let r = std::panic::catch_unwind(|| barm::driver::check_paths(std::slice::from_ref(&file), &tmp));
+            let r = std::panic::catch_unwind(|| tov::driver::check_paths(std::slice::from_ref(&file), &tmp));
             if r.is_err() {
-                let keep = tmp.join(format!("panic-{count}.barm"));
+                let keep = tmp.join(format!("panic-{count}.tov"));
                 std::fs::write(&keep, &v).unwrap();
                 eprintln!("panic on a variant of {} (saved to {})", src_path.display(), keep.display());
                 std::process::exit(1);

@@ -1,8 +1,8 @@
-# Cap's media server: Bun vs Barm
+# Cap's media server: Bun vs Tov
 
 [Cap's media server](https://github.com/CapSoftware/Cap/tree/main/apps/media-server) is a Bun app: Hono routes, zod, mediabunny with node-av (an N-API addon wrapping FFmpeg), `Bun.spawn` for ffmpeg subprocesses, `Bun.file`, and Bun's convention of serving an entry point's default export. Cap runs it as `bun src/index.ts`.
 
-Barm runs the same source, unchanged. `out/ms/main.barm` is the whole port:
+Tov runs the same source, unchanged. `out/ms/main.tov` is the whole port:
 
 ```ts
 import server from "cap-media-server"
@@ -14,11 +14,11 @@ function main() {
 }
 ```
 
-`cap-media-server` is a one-line package re-exporting `src/index.ts`. `bun` is Barm's `bun` module (`runtime/node/bun.js`): `serve` on Barm's native HTTP server, `spawn` over `child_process`, and `file` as a Blob read from its file.
+`cap-media-server` is a one-line package re-exporting `src/index.ts`. `bun` is Tov's `bun` module (`runtime/node/bun.js`): `serve` on Tov's native HTTP server, `spawn` over `child_process`, and `file` as a Blob read from its file.
 
 ## What's measured
 
-`run.py` copies the media server out of a Cap checkout, installs its packages with `bun install --production`, and builds the Barm binary. It then serves a generated test video (10 s, 1280×720 H.264 with AAC) over local HTTP. Each runtime is started in turn, interleaved across repetitions, and for each:
+`run.py` copies the media server out of a Cap checkout, installs its packages with `bun install --production`, and builds the Tov binary. It then serves a generated test video (10 s, 1280×720 H.264 with AAC) over local HTTP. Each runtime is started in turn, interleaved across repetitions, and for each:
 
 | metric | how |
 |---|---|
@@ -39,9 +39,9 @@ bench/cap-media/run.py --cap ~/github/Cap --reps 3 --secs 10
 
 ## Results
 
-Apple M4 Max, macOS, Bun 1.4.0, Barm on its own JavaScriptCore (`scripts/jsc`). Medians of 3 repetitions with 10 s per load, from `bench/results/cap-media-20261005-131621.json`. The origin and the load generator run on the same machine, which was busy (load average above 10), so differences of a few percent are noise.
+Apple M4 Max, macOS, Bun 1.4.0, Tov on its own JavaScriptCore (`scripts/jsc`). Medians of 3 repetitions with 10 s per load, from `bench/results/cap-media-20261005-131621.json`. The origin and the load generator run on the same machine, which was busy (load average above 10), so differences of a few percent are noise.
 
-| | Bun | Barm |
+| | Bun | Tov |
 |---|---:|---:|
 | startup (exec to first `/health`) | 120 ms | **105 ms** |
 | idle memory | 50 MB | 51 MB |
@@ -54,10 +54,10 @@ Apple M4 Max, macOS, Bun 1.4.0, Barm on its own JavaScriptCore (`scripts/jsc`). 
 | peak memory | 143 MB | **129 MB** |
 | failed requests | 0 | 0 |
 
-The Barm binary builds in 3.8 s and is 34 MB with its engine (on the system's JavaScriptCore, `BARM_JSC=system`: 1.3 s and 8.4 MB), plus the packages' native addon (node-av, 61 MB, loaded from `node_modules` as under Bun).
+The Tov binary builds in 3.8 s and is 34 MB with its engine (on the system's JavaScriptCore, `TOV_JSC=system`: 1.3 s and 8.4 MB), plus the packages' native addon (node-av, 61 MB, loaded from `node_modules` as under Bun).
 
-- **CPU**: Barm probes a video on 27% less CPU than Bun.
-- **Throughput**: with 4 probes in flight Bun completes 16% more each second. Its `fetch()` client runs on a thread of its own, so the server's thread and the client's work in parallel; Barm's client runs on the event loop. `/health` (Hono, zod, `os` and `process` metrics) is 6% faster on Bun; on the system's JavaScriptCore Barm matched it.
-- **Startup**: Barm loads the server's 654 modules from its bytecode cache, written the first time the program idles.
-- **Memory**: Barm peaks lower under load: its engine lets the heap grow to about twice what survives a collection, where JavaScriptCore's default on a machine with 16 GB or more is about four times. After a burst Bun gives memory back sooner; Barm collects and returns memory once the server has been idle a second, and drops compiled code after ten.
-- **Reliability**: when the origin refuses a connection under load, mediabunny's retried fetch rejects. Bun 1.4.0 has exited on it in earlier runs; Barm reports the request's failure and carries on.
+- **CPU**: Tov probes a video on 27% less CPU than Bun.
+- **Throughput**: with 4 probes in flight Bun completes 16% more each second. Its `fetch()` client runs on a thread of its own, so the server's thread and the client's work in parallel; Tov's client runs on the event loop. `/health` (Hono, zod, `os` and `process` metrics) is 6% faster on Bun; on the system's JavaScriptCore Tov matched it.
+- **Startup**: Tov loads the server's 654 modules from its bytecode cache, written the first time the program idles.
+- **Memory**: Tov peaks lower under load: its engine lets the heap grow to about twice what survives a collection, where JavaScriptCore's default on a machine with 16 GB or more is about four times. After a burst Bun gives memory back sooner; Tov collects and returns memory once the server has been idle a second, and drops compiled code after ten.
+- **Reliability**: when the origin refuses a connection under load, mediabunny's retried fetch rejects. Bun 1.4.0 has exited on it in earlier runs; Tov reports the request's failure and carries on.

@@ -1,0 +1,53 @@
+[package]
+name = "tov"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+description = "The Tov compiler and toolchain"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "tov"
+path = "src/main.rs"
+
+[[test]]
+name = "ui"
+path = "../../tests/ui.rs"
+harness = false
+
+[[test]]
+name = "robustness"
+path = "../../tests/robustness.rs"
+harness = false
+
+[[test]]
+name = "run"
+path = "../../tests/run.rs"
+harness = false
+
+[[test]]
+name = "http"
+path = "../../tests/http.rs"
+harness = false
+
+[[test]]
+name = "parity"
+path = "../../tests/parity.rs"
+harness = false
+
+[[test]]
+name = "async"
+path = "../../tests/async.rs"
+harness = false
+
+[[test]]
+name = "fetch"
+path = "../../tests/fetch.rs"
+harness = false
+
+[[test]]
+name = "npm"
+path = "../../tests/npm.rs"
+harness = false

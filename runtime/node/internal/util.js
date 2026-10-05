@@ -725,7 +725,7 @@ function setOwnProperty(obj, key, value) {
 let internalGlobal;
 function getInternalGlobal() {
   if (internalGlobal == null) {
-    // (Barm: no second realm from vm yet; the built-ins as they were before user code ran)
+    // (Tov: no second realm from vm yet; the built-ins as they were before user code ran)
     internalGlobal = { __proto__: null, RegExp: primordials.RegExp, Object: primordials.Object, Array: primordials.Array };
   }
   return internalGlobal;

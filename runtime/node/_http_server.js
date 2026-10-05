@@ -116,7 +116,7 @@ const kUpgradeStream = Symbol('UpgradeStream');
 
 const kOptimizeEmptyRequests = Symbol('OptimizeEmptyRequestsOption');
 
-// (Barm: internal/perf/observe loads when performance observers are used; whether there are
+// (Tov: internal/perf/observe loads when performance observers are used; whether there are
 // any is the binding's count)
 const { observerCounts: perfObserverCounts } = internalBinding('performance');
 const hasObserver = (type) => perfObserverCounts[type === 'http' ? 1 : type === 'net' ? 3 : type === 'dns' ? 4 : type === 'http2' ? 2 : 0] > 0;
@@ -1450,8 +1450,8 @@ function generateSocketListenerWrapper(originalFnName) {
   };
 }
 
-// (Barm) servers listen on Barm's native HTTP server when they can (internal/barm/http_server)
-require('internal/barm/http_server').install(Server, { IncomingMessage, kServerResponse, kIncomingMessage, kUniqueHeaders, continueExpression });
+// (Tov) servers listen on Tov's native HTTP server when they can (internal/tov/http_server)
+require('internal/tov/http_server').install(Server, { IncomingMessage, kServerResponse, kIncomingMessage, kUniqueHeaders, continueExpression });
 
 module.exports = {
   STATUS_CODES,

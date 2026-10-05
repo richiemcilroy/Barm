@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""npm packages from Barm against Bun: startup, a call-heavy loop, an HTTP service, binary size and
-build time. Run `bun install` here first (zod). Interleaves Barm and Bun per repetition and
+"""npm packages from Tov against Bun: startup, a call-heavy loop, an HTTP service, binary size and
+build time. Run `bun install` here first (zod). Interleaves Tov and Bun per repetition and
 reports medians.
 
   bench/npm/run.py [--repeat N]
@@ -10,7 +10,7 @@ import argparse, json, os, re, statistics, subprocess, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 OUT = os.path.join(ROOT, "target", "bench-npm")
-BARM = os.path.join(ROOT, "target", "release", "barm")
+TOV = os.path.join(ROOT, "target", "release", "tov")
 LOAD = os.path.join(OUT, "load")
 BODY = '{"name":"Ada Lovelace","email":"ada@example.com","age":36}'
 
@@ -66,9 +66,9 @@ def main():
     sh(["cc", "-O2", "-o", LOAD, os.path.join(ROOT, "bench", "http", "load.c"), "-lpthread"])
     builds = {}
     for name in ("startup", "loop", "service"):
-        src = os.path.join(HERE, f"{name}.barm")
+        src = os.path.join(HERE, f"{name}.tov")
         exe = os.path.join(OUT, name)
-        sh([BARM, "build", src, "-o", exe])
+        sh([TOV, "build", src, "-o", exe])
         # a rebuild after an edit: generate C, compile, link and sign again
         text = open(src).read()
         times = []
@@ -76,11 +76,11 @@ def main():
             with open(src, "w") as f:
                 f.write(text.replace('"Ada"', f'"Ada {i}"', 1))
             t = time.perf_counter()
-            sh([BARM, "build", src, "-o", exe])
+            sh([TOV, "build", src, "-o", exe])
             times.append((time.perf_counter() - t) * 1000)
         with open(src, "w") as f:
             f.write(text)
-        sh([BARM, "build", src, "-o", exe])
+        sh([TOV, "build", src, "-o", exe])
         builds[name] = statistics.median(times)
     t = time.perf_counter()
     sh(["bun", "build", "--compile", os.path.join(HERE, "startup.js"), "--outfile", os.path.join(OUT, "startup-bun")], cwd=HERE)
@@ -104,11 +104,11 @@ def main():
     rows["service rss (MB)"] = (med(svc[0], 2), med(svc[1], 2))
     rows["binary (MB)"] = (os.path.getsize(os.path.join(OUT, "startup")) / 1e6, os.path.getsize(os.path.join(OUT, "startup-bun")) / 1e6)
     rows["rebuild after an edit (ms)"] = (builds["startup"], bun_build)
-    print(f"{'':28} {'Barm':>10} {'Bun':>10}")
+    print(f"{'':28} {'Tov':>10} {'Bun':>10}")
     for k, (b, u) in rows.items():
         print(f"{k:28} {b:10.1f} {u:10.1f}")
     with open(os.path.join(ROOT, "bench", "results", time.strftime("npm-%Y%m%d-%H%M%S.json")), "w") as f:
-        json.dump({k: {"barm": b, "bun": u} for k, (b, u) in rows.items()}, f, indent=1)
+        json.dump({k: {"tov": b, "bun": u} for k, (b, u) in rows.items()}, f, indent=1)
 
 
 if __name__ == "__main__":

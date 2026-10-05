@@ -21,7 +21,7 @@
     195596,
     202374
    ],
-   "server": "barm",
+   "server": "tov",
    "route": "hello",
    "workers": 1,
    "conns": 128,
@@ -129,7 +129,7 @@
     199921,
     203462
    ],
-   "server": "barm",
+   "server": "tov",
    "route": "json",
    "workers": 1,
    "conns": 128,
@@ -237,7 +237,7 @@
     200037,
     201870
    ],
-   "server": "barm",
+   "server": "tov",
    "route": "echo",
    "workers": 1,
    "conns": 128,
@@ -345,7 +345,7 @@
     177864,
     178377
    ],
-   "server": "barm",
+   "server": "tov",
    "route": "hello",
    "workers": 4,
    "conns": 128,
@@ -453,7 +453,7 @@
     175920,
     176863
    ],
-   "server": "barm",
+   "server": "tov",
    "route": "json",
    "workers": 4,
    "conns": 128,
@@ -561,7 +561,7 @@
     176463,
     176883
    ],
-   "server": "barm",
+   "server": "tov",
    "route": "echo",
    "workers": 4,
    "conns": 128,

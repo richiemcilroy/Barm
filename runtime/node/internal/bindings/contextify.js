@@ -1,18 +1,18 @@
 'use strict';
 
-// internalBinding('contextify'): Node.js's src/node_contextify.cc over Barm's natives
-// (globalThis.__barm_native.vm, in runtime/node.c, on JavaScriptCore's C API). Scripts are
+// internalBinding('contextify'): Node.js's src/node_contextify.cc over Tov's natives
+// (globalThis.__tov_native.vm, in runtime/node.c, on JavaScriptCore's C API). Scripts are
 // checked when made and run in this context or a contextified one, whose global looks things up
 // in its sandbox object first. V8's code cache, timeouts and SIGINT watchdogs have no
 // counterpart: cached data is rejected, and a timeout doesn't stop a script.
 
 const { privateSymbols: { contextify_context_private_symbol: kContext } } = require('internal/bindings/util');
 
-const native = globalThis.__barm_native?.vm;
+const native = globalThis.__tov_native?.vm;
 
 function vm() {
   if (native) return native;
-  const e = new Error('vm is not available outside Barm\'s runtime');
+  const e = new Error('vm is not available outside Tov\'s runtime');
   e.code = 'ERR_METHOD_NOT_IMPLEMENTED';
   throw e;
 }
@@ -78,8 +78,8 @@ function compileFunction(code, filename, lineOffset, columnOffset, cachedData, p
   if (contextExtensions?.length) {
     // (the extensions' properties are in scope, through `with` blocks around the function)
     let body = `return function (${names.join(', ')}) {\n${code}\n};`;
-    for (let i = contextExtensions.length - 1; i >= 0; i--) body = `with (__barm_extensions[${i}]) { ${body} }`;
-    fn = vm().fn(['__barm_extensions'], body, filename, lineOffset, handle)(contextExtensions);
+    for (let i = contextExtensions.length - 1; i >= 0; i--) body = `with (__tov_extensions[${i}]) { ${body} }`;
+    fn = vm().fn(['__tov_extensions'], body, filename, lineOffset, handle)(contextExtensions);
   } else {
     fn = vm().fn(names, `${code}`, filename, lineOffset + 1, handle);
   }

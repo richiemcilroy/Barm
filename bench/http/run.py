@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""HTTP server benchmark: Barm (std/http) vs Bun.serve vs node:http vs Rust (axum/tokio).
+"""HTTP server benchmark: Tov (std/http) vs Bun.serve vs node:http vs Rust (axum/tokio).
 
-    bench/http/run.py [--workers 1,8] [--conns 64] [--secs 5] [--only barm,bun] [--pipeline 1]
+    bench/http/run.py [--workers 1,8] [--conns 64] [--secs 5] [--only tov,bun] [--pipeline 1]
 
 Builds every server, then for each worker count and route starts one server at a time and
 drives it with ./load (a wrk-style keep-alive generator in load.c). Prints req/s and latency
@@ -29,7 +29,7 @@ def build():
     os.makedirs(OUT, exist_ok=True)
     sh(["cc", "-O2", "-o", os.path.join(OUT, "load"), os.path.join(HERE, "load.c"), "-lpthread"])
     sh(["cargo", "build", "--release", "-q", "--manifest-path", os.path.join(ROOT, "Cargo.toml")])
-    sh([os.path.join(ROOT, "target/release/barm"), "build", os.path.join(HERE, "server.barm.ts"), "-o", os.path.join(OUT, "barm-server")], stdout=subprocess.DEVNULL)
+    sh([os.path.join(ROOT, "target/release/tov"), "build", os.path.join(HERE, "server.tov.ts"), "-o", os.path.join(OUT, "tov-server")], stdout=subprocess.DEVNULL)
     sh(["cargo", "build", "--release", "-q", "--offline", "--manifest-path", os.path.join(HERE, "rust/Cargo.toml")])
 
 
@@ -37,13 +37,13 @@ def build():
 BIN = os.environ.get("BIN_DIR")
 
 SERVERS = {
-    "barm": lambda: [os.path.join(BIN or OUT, "barm-server")],
+    "tov": lambda: [os.path.join(BIN or OUT, "tov-server")],
     "rust": lambda: [os.path.join(BIN, "rust-server") if BIN else os.path.join(HERE, "rust/target/release/server")],
     "bun": lambda: [os.path.join(BIN, "bun") if BIN else "bun", os.path.join(HERE, "server.bun.ts")],
     "node": lambda: ["node", os.path.join(HERE, "server.node.mjs")],
 }
 SERVERS["rust-tpc"] = SERVERS["rust"]  # with MODE=tpc (Linux: SO_REUSEPORT balances)
-# Rust with TCP_NODELAY (NODELAY=1; thread-per-core on Linux): responses go out at once, as Barm
+# Rust with TCP_NODELAY (NODELAY=1; thread-per-core on Linux): responses go out at once, as Tov
 # sends them. axum's default keeps Nagle's algorithm on, which holds a response while earlier
 # data is unacknowledged: on loopback that moves the cost of sending onto the client, and the
 # wait shows up as latency.

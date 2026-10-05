@@ -1,11 +1,11 @@
 'use strict';
 
-// internalBinding('os'): Node.js's src/node_os.cc. The natives (globalThis.__barm_native.os, from
+// internalBinding('os'): Node.js's src/node_os.cc. The natives (globalThis.__tov_native.os, from
 // runtime/node.c) are named as Node.js's binding functions are and answer the same way; a
 // function that fails returns undefined after filling ctx with { errno, code, message, syscall },
 // which os.js turns into ERR_SYSTEM_ERROR.
 
-const native = globalThis.__barm_native?.os ?? require('internal/bootstrap/host_fallback').os;
+const native = globalThis.__tov_native?.os ?? require('internal/bootstrap/host_fallback').os;
 
 module.exports = {
   // -> [type, version, release, machine]

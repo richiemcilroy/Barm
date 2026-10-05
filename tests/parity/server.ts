@@ -1,5 +1,5 @@
-// An idiomatic Bun server. tests/parity.rs serves this file with `bun` and its Barm port
-// (server.barm.ts — the same file with Barm's usual edits) natively, sends both the same
+// An idiomatic Bun server. tests/parity.rs serves this file with `bun` and its Tov port
+// (server.tov.ts — the same file with Tov's usual edits) natively, sends both the same
 // requests, and compares the responses.
 
 type Todo = { id: number; title: string; done: boolean }

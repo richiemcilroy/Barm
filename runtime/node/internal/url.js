@@ -161,7 +161,7 @@ function lazyBlob() {
 
 function lazyCryptoRandom() {
   try {
-    cryptoRandom ??= require('internal/barm/random');
+    cryptoRandom ??= require('internal/tov/random');
   } catch {
     // If Node.js built without crypto support, we'll fall
     // through here and handle it later.
@@ -1212,7 +1212,7 @@ ObjectDefineProperties(URL, {
 });
 
 function installObjectURLMethods() {
-  // (Barm: the binding loads with the first blob: URL)
+  // (Tov: the binding loads with the first blob: URL)
   let binding;
   const bindingBlob = {
     storeDataObject: (...args) => (binding ??= internalBinding('blob')).storeDataObject(...args),
@@ -1736,5 +1736,5 @@ module.exports = {
   slashedProtocol,
 };
 
-// (Barm: Node.js's bootstrap installs these; here internal/url does, as it loads)
+// (Tov: Node.js's bootstrap installs these; here internal/url does, as it loads)
 installObjectURLMethods();

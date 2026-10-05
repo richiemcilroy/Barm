@@ -1,6 +1,6 @@
-//! npm packages: each tests/npm/<name>.barm imports packages from tests/npm/node_modules (small
+//! npm packages: each tests/npm/<name>.tov imports packages from tests/npm/node_modules (small
 //! CommonJS, ES module and TypeScript packages) and runs; stdout must equal <name>.stdout.
-//! Barm runs JavaScript on JavaScriptCore: the system's on macOS, WebKitGTK's elsewhere
+//! Tov runs JavaScript on JavaScriptCore: the system's on macOS, WebKitGTK's elsewhere
 //! (scripts/linux.sh runs these in Linux).
 
 use std::path::{Path, PathBuf};
@@ -22,19 +22,19 @@ fn main() {
         let ok = Command::new("cc").arg("-O1").args(link).arg("-o").arg(&built).arg(addon.join("addon.c")).status().map(|s| s.success()).unwrap_or(false);
         assert!(ok, "can't compile tests/npm/node_modules/napi-addon/addon.c");
     }
-    let mut cases: Vec<PathBuf> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "barm")).collect();
+    let mut cases: Vec<PathBuf> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "tov")).collect();
     cases.sort();
     let mut failed = Vec::new();
     for case in &cases {
         let name = case.file_stem().unwrap().to_string_lossy().into_owned();
-        let opts = barm::build::Options { mode: barm::codegen::Mode::Run, unchecked: false, opt: "-O1".into(), emit_c: None, symbols: false };
-        let built = match barm::build::build(std::slice::from_ref(case), &root, &opts) {
+        let opts = tov::build::Options { mode: tov::codegen::Mode::Run, unchecked: false, opt: "-O1".into(), emit_c: None, symbols: false };
+        let built = match tov::build::build(std::slice::from_ref(case), &root, &opts) {
             Ok(b) => b,
-            Err(barm::build::BuildError::Diagnostics(sm, d)) => {
-                failed.push(format!("{name}: build failed\n{}", barm::diag::render_text(&d, &sm)));
+            Err(tov::build::BuildError::Diagnostics(sm, d)) => {
+                failed.push(format!("{name}: build failed\n{}", tov::diag::render_text(&d, &sm)));
                 continue;
             }
-            Err(barm::build::BuildError::Message(m)) => {
+            Err(tov::build::BuildError::Message(m)) => {
                 failed.push(format!("{name}: {m}"));
                 continue;
             }
@@ -43,8 +43,8 @@ fn main() {
         let os_expected = case.with_extension(format!("{}.stdout", std::env::consts::OS));
         let expected = std::fs::read_to_string(&os_expected).or_else(|_| std::fs::read_to_string(case.with_extension("stdout"))).unwrap_or_default();
         // `cache`: runs twice, with a cache of its own: compiled (writing the bytecode cache as it
-        // exits), then from the cache (on macOS, or with Barm's own engine: BARM_JSC_DIR)
-        let cache = (name == "cache" && (cfg!(target_vendor = "apple") || std::env::var_os("BARM_JSC_DIR").is_some())).then(|| std::env::temp_dir().join(format!("barm-npm-cache-{}", std::process::id())));
+        // exits), then from the cache (on macOS, or with Tov's own engine: TOV_JSC_DIR)
+        let cache = (name == "cache" && (cfg!(target_vendor = "apple") || std::env::var_os("TOV_JSC_DIR").is_some())).then(|| std::env::temp_dir().join(format!("tov-npm-cache-{}", std::process::id())));
         let runs = if cache.is_some() { 2 } else { 1 };
         for run in 0..runs {
             let mut cmd = Command::new(&built.binary);
@@ -54,16 +54,16 @@ fn main() {
                     std::fs::create_dir_all(dir).unwrap();
                 } else {
                     wait_for_cache(dir);
-                    cmd.env("BARM_JS_TRACE", "1");
+                    cmd.env("TOV_JS_TRACE", "1");
                 }
-                cmd.env("BARM_JS_CACHE_DIR", dir);
+                cmd.env("TOV_JS_CACHE_DIR", dir);
             }
             let out = cmd.output().expect("run binary");
             let actual = String::from_utf8_lossy(&out.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&out.stderr);
             if actual != expected || !out.status.success() {
                 failed.push(format!("{name} (run {}): output differs (exit {:?})\n--- expected\n{expected}--- actual\n{actual}{stderr}", run + 1, out.status.code()));
-            } else if run == 1 && !stderr.contains("node_modules/cache-lib/index.js") || run == 1 && !stderr.lines().any(|l| l.starts_with("barm: loaded") && l.contains("cache-lib")) {
+            } else if run == 1 && !stderr.contains("node_modules/cache-lib/index.js") || run == 1 && !stderr.lines().any(|l| l.starts_with("tov: loaded") && l.contains("cache-lib")) {
                 failed.push(format!("{name}: the second run didn't load cache-lib from the bytecode cache\n{stderr}"));
             }
         }

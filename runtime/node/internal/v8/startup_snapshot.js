@@ -1,6 +1,6 @@
 'use strict';
 
-// internal/v8/startup_snapshot: Barm doesn't build V8 startup snapshots, so nothing is ever being
+// internal/v8/startup_snapshot: Tov doesn't build V8 startup snapshots, so nothing is ever being
 // built and the callbacks never run.
 module.exports = {
   runDeserializeCallbacks() {},

@@ -304,8 +304,8 @@ function format(href, fragment, unicode, search, auth) {
 
 module.exports = {
   urlComponents,
-  _barmFastParse: fastParse,
-  _barmFastParseRelative: fastParseRelative,
+  _tovFastParse: fastParse,
+  _tovFastParseRelative: fastParseRelative,
   parse,
   canParse,
   pathToFileURL,

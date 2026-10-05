@@ -1,6 +1,6 @@
 'use strict';
 
-// The `bun` module and the `Bun` global, for packages and apps written for Bun: serve (on Barm's
+// The `bun` module and the `Bun` global, for packages and apps written for Bun: serve (on Tov's
 // native HTTP server, as node:http's servers are: requests come to JavaScript as fetch Requests
 // and Responses go back out raw), spawn and spawnSync (over child_process, with web streams),
 // file and write (BunFile is a Blob read from the file when it's used), sleep, semver, which,
@@ -9,12 +9,12 @@
 
 const { Buffer } = require('buffer');
 
-const http = globalThis.__barm_native?.http;
-const streams = globalThis.__barm_native?.stream;
+const http = globalThis.__tov_native?.http;
+const streams = globalThis.__tov_native?.stream;
 
 let fetchModule;
 function fetchApi() {
-  fetchModule ??= require('internal/barm/fetch');
+  fetchModule ??= require('internal/tov/fetch');
   return fetchModule;
 }
 let fs;
@@ -29,7 +29,7 @@ function Blob() {
 }
 
 function notImplemented(what) {
-  const e = new Error(`${what} is not implemented in Barm yet`);
+  const e = new Error(`${what} is not implemented in Tov yet`);
   e.code = 'ERR_NOT_IMPLEMENTED';
   return e;
 }
@@ -645,7 +645,7 @@ function onGone(id) {
 
 function serve(options) {
   if (options === null || typeof options !== 'object') throw new TypeError('Bun.serve expects an object');
-  if (!http) throw notImplemented('Bun.serve outside Barm\'s runtime');
+  if (!http) throw notImplemented('Bun.serve outside Tov\'s runtime');
   if (options.unix !== undefined) throw notImplemented('Bun.serve on a unix socket');
   if (options.tls !== undefined && options.tls !== null && options.tls !== false) throw notImplemented('Bun.serve with TLS');
   if (typeof options.fetch !== 'function' && options.routes === undefined) throw new TypeError('Bun.serve expects a fetch function or routes');
@@ -668,7 +668,7 @@ class Server {
     callFromHost ??= require('internal/bindings/task_queue').callFromHost;
     if (!goneHooked && typeof http.onGone === 'function') {
       goneHooked = true;
-      const shared = require('internal/barm/http_server');
+      const shared = require('internal/tov/http_server');
       shared.goneHandlers.push(onGone);
       if (!shared.isGoneHooked()) {
         shared.setGoneHooked();
@@ -700,9 +700,9 @@ class Server {
   get pendingWebSockets() { return 0; }
 
   // (for the request handler, below)
-  get _barmOptions() { return this.#options; }
-  get _barmRoutes() { return this.#routes; }
-  _barmPending(n) { this.#pending += n; }
+  get _tovOptions() { return this.#options; }
+  get _tovRoutes() { return this.#routes; }
+  _tovPending(n) { this.#pending += n; }
 
   fetch(input, init) {
     const req = input instanceof Request ? input : new Request(input, init);
@@ -758,7 +758,7 @@ function compileRoutes(routes) {
 }
 
 function matchRoute(server, req, pathname) {
-  const routes = server._barmRoutes;
+  const routes = server._tovRoutes;
   if (!routes) return undefined;
   for (const r of routes) {
     const m = r.re.exec(pathname);
@@ -791,12 +791,12 @@ function onRequest(server, id, method, target, wire, body, http10) {
   live.set(id, req);
   const connection = /(^|\n)connection:([^\r]*)/i.exec(wire)?.[2].toLowerCase() ?? '';
   const keep = http10 ? connection.includes('keep-alive') : !connection.includes('close');
-  server._barmPending(1);
+  server._tovPending(1);
   let result;
   try {
-    const options = server._barmOptions;
+    const options = server._tovOptions;
     let handler = options.fetch;
-    if (server._barmRoutes) {
+    if (server._tovRoutes) {
       const q = target.indexOf('?');
       const route = matchRoute(server, req, q < 0 ? target : target.slice(0, q));
       if (route !== undefined) handler = route;
@@ -817,7 +817,7 @@ function onRequest(server, id, method, target, wire, body, http10) {
 }
 
 function onError(server, error) {
-  const handler = server._barmOptions.error;
+  const handler = server._tovOptions.error;
   if (typeof handler === 'function') {
     try {
       return handler.call(server, error);
@@ -833,7 +833,7 @@ function fail(server, id, error) {
   live.delete(id);
   console.error(error);
   http.write(id, 'HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n', 2, true);
-  server._barmPending(-1);
+  server._tovPending(-1);
 }
 
 function respond(server, id, res, method, keep, http10) {
@@ -870,7 +870,7 @@ function respond(server, id, res, method, keep, http10) {
   if (body === null || body === undefined) {
     if (length < 0 && !NULL_BODY.has(status) && !(status >= 100 && status < 200)) head += 'Content-Length: 0\r\n';
     http.write(id, `${head}\r\n`, end, true);
-    server._barmPending(-1);
+    server._tovPending(-1);
     return;
   }
   bodyState.used = true;
@@ -882,7 +882,7 @@ function respond(server, id, res, method, keep, http10) {
       http.write(id, `${head}\r\n`, 0, true);
       http.write(id, body, end, false);
     }
-    server._barmPending(-1);
+    server._tovPending(-1);
     return;
   }
   if (body instanceof FormBody) {
@@ -890,7 +890,7 @@ function respond(server, id, res, method, keep, http10) {
       if (length < 0) head += `Content-Length: ${bytes.byteLength}\r\n`;
       http.write(id, `${head}\r\n`, 0, true);
       http.write(id, noBody ? null : bytes, end, false);
-      server._barmPending(-1);
+      server._tovPending(-1);
     }, (e) => fail(server, id, e));
     return;
   }
@@ -899,7 +899,7 @@ function respond(server, id, res, method, keep, http10) {
     if (length < 0) length = body.size, head += `Content-Length: ${length}\r\n`;
     if (noBody) {
       http.write(id, `${head}\r\n`, end, true);
-      server._barmPending(-1);
+      server._tovPending(-1);
       return;
     }
     stream = body.stream();
@@ -908,7 +908,7 @@ function respond(server, id, res, method, keep, http10) {
     if (noBody) {
       http.write(id, `${head}\r\n`, end, true);
       stream.cancel?.().catch?.(() => {});
-      server._barmPending(-1);
+      server._tovPending(-1);
       return;
     }
     if (length < 0) {
@@ -949,7 +949,7 @@ async function pump(server, id, stream, chunked, end) {
     // (the body failed partway: the connection closes, so the client sees it cut short)
     http.write(id, null, 2, true);
   } finally {
-    server._barmPending(-1);
+    server._tovPending(-1);
   }
 }
 

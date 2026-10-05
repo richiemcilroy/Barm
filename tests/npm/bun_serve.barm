@@ -1,6 +1,0 @@
-import run from "bun-serve"
-
-async function main() {
-  // Bun.serve on Barm's HTTP server
-  try await run()
-}

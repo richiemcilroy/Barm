@@ -1,15 +1,15 @@
 'use strict';
 
-// internalBinding('zlib'): Node.js's src/node_zlib.cc over Barm's natives
-// (globalThis.__barm_native.zlib, runtime/node.c over runtime/compress.c). A handle's write()
+// internalBinding('zlib'): Node.js's src/node_zlib.cc over Tov's natives
+// (globalThis.__tov_native.zlib, runtime/node.c over runtime/compress.c). A handle's write()
 // runs the codec on a later loop turn and then calls the callback init() gave it, as Node.js's
 // thread pool does; writeSync() runs it now. Failures go to handle.onerror(message, errno, code).
 
-const native = globalThis.__barm_native?.zlib;
+const native = globalThis.__tov_native?.zlib;
 
 function zlib() {
   if (native?.available) return native;
-  const e = new Error('zlib is not available outside Barm\'s runtime');
+  const e = new Error('zlib is not available outside Tov\'s runtime');
   e.code = 'ERR_METHOD_NOT_IMPLEMENTED';
   throw e;
 }
@@ -149,7 +149,7 @@ module.exports = {
     }
   },
   crc32(data, value) {
-    if (typeof data === 'string' && !native?.available) throw new Error('zlib is not available outside Barm\'s runtime');
+    if (typeof data === 'string' && !native?.available) throw new Error('zlib is not available outside Tov\'s runtime');
     return zlib().crc32(data, value >>> 0);
   },
   ZLIB_VERSION: '1.3.1',

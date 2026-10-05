@@ -1,6 +1,6 @@
 #!/bin/sh
-# Runs the Barm runtime tests:
-#   1. warning-free compile of barm.c (-std=c11 -Wall -Wextra -Werror)
+# Runs the Tov runtime tests:
+#   1. warning-free compile of tov.c (-std=c11 -Wall -Wextra -Werror)
 #   2. test_runtime.c at -O2
 #   3. test_runtime.c under AddressSanitizer + UndefinedBehaviorSanitizer (+ LeakSanitizer on Linux)
 #   4. for each build: `test_runtime trap` must print the trap to stderr, flush stdout, exit 101
@@ -12,13 +12,13 @@ cd "$(dirname "$0")"
 
 if [ "${1:-}" = "--docker" ]; then
     # stream the sources in (bind mounts can serve stale files on Docker Desktop)
-    COPYFILE_DISABLE=1 tar -cf - barm.h barm.c test_runtime.c test.sh |
+    COPYFILE_DISABLE=1 tar -cf - tov.h tov.c test_runtime.c test.sh |
         docker run --rm -i gcc:14 sh -c 'mkdir /rt && tar -C /rt -xf - 2>/dev/null && sh /rt/test.sh'
     exit $?
 fi
 
 CC=${CC:-cc}
-OUT=$(mktemp -d "${TMPDIR:-/tmp}/barm-runtime-test.XXXXXX")
+OUT=$(mktemp -d "${TMPDIR:-/tmp}/tov-runtime-test.XXXXXX")
 trap 'rm -rf "$OUT"' EXIT INT TERM
 WARN="-std=c11 -Wall -Wextra -Werror"
 
@@ -29,7 +29,7 @@ check_trap_exit() { # $1 = binary
     set -e
     if [ "$st" -ne 101 ] || ! grep -qx "flushed before trap" "$OUT/trap.out" ||
         ! grep -qx "trap: index 5 out of bounds for length 0" "$OUT/trap.err" ||
-        ! grep -qx "  at cli.barm:1:1" "$OUT/trap.err"; then
+        ! grep -qx "  at cli.tov:1:1" "$OUT/trap.err"; then
         echo "FAIL: trap exit check (status $st)"
         cat "$OUT/trap.out" "$OUT/trap.err"
         exit 1
@@ -56,8 +56,8 @@ asan_works() ( # subshell: keeps the shell's "Killed" job notice out of the outp
 )
 
 echo "== $($CC --version | head -n 1)"
-echo "== compile barm.c"
-$CC $WARN -O2 -c barm.c -o "$OUT/barm.o"
+echo "== compile tov.c"
+$CC $WARN -O2 -c tov.c -o "$OUT/tov.o"
 
 echo "== -O2"
 $CC $WARN -O2 test_runtime.c -o "$OUT/t_o2" -lm

@@ -1,4 +1,4 @@
-//! std/http protocol tests: builds tests/http/app.barm, starts it on a free port, and checks raw
+//! std/http protocol tests: builds tests/http/app.tov, starts it on a free port, and checks raw
 //! HTTP/1.1 conversations (keep-alive, pipelining, chunked bodies, 100-continue, HEAD, errors,
 //! header sanitizing, large responses, several workers).
 
@@ -124,12 +124,12 @@ fn check(failed: &mut Vec<String>, name: &str, ok: bool, detail: impl std::fmt::
 
 fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
-    let app = root.join("tests/http/app.barm");
-    let opts = barm::build::Options { mode: barm::codegen::Mode::Run, unchecked: false, opt: "-O2".into(), emit_c: None, symbols: false };
-    let built = match barm::build::build(std::slice::from_ref(&app), &root, &opts) {
+    let app = root.join("tests/http/app.tov");
+    let opts = tov::build::Options { mode: tov::codegen::Mode::Run, unchecked: false, opt: "-O2".into(), emit_c: None, symbols: false };
+    let built = match tov::build::build(std::slice::from_ref(&app), &root, &opts) {
         Ok(b) => b,
-        Err(barm::build::BuildError::Diagnostics(sm, d)) => panic!("build failed\n{}", barm::diag::render_text(&d, &sm)),
-        Err(barm::build::BuildError::Message(m)) => panic!("{m}"),
+        Err(tov::build::BuildError::Diagnostics(sm, d)) => panic!("build failed\n{}", tov::diag::render_text(&d, &sm)),
+        Err(tov::build::BuildError::Message(m)) => panic!("{m}"),
     };
     let mut failed = Vec::new();
     let f = &mut failed;

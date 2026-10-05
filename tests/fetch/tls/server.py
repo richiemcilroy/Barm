@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""HTTPS servers for tests/fetch (native_tls.barm): three listeners on 127.0.0.1, using a
+"""HTTPS servers for tests/fetch (native_tls.tov): three listeners on 127.0.0.1, using a
 certificate for localhost/127.0.0.1 signed by ca.pem (the test CA), an expired one, and a
 self-signed one. Prints "PORTS <good> <expired> <self>", then serves until killed.
 The certificates last until 2126; ca.pem's private key isn't kept."""

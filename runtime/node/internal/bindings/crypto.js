@@ -1,10 +1,10 @@
 'use strict';
 
-// internalBinding('crypto'): what tls and https need to load (Barm's crypto module doesn't use
+// internalBinding('crypto'): what tls and https need to load (Tov's crypto module doesn't use
 // this binding; it has its own natives). The rest isn't written yet: using it throws.
 
 // A TLS context's settings (Node.js's SecureContext, over OpenSSL's SSL_CTX): recorded, for
-// tls_wrap to configure Barm's TLS client with once TLS sockets are written.
+// tls_wrap to configure Tov's TLS client with once TLS sockets are written.
 class SecureContext {
   constructor() {
     this.settings = { ca: [], certs: [], keys: [], crls: [] };
@@ -33,7 +33,7 @@ class SecureContext {
   getTicketKeys() { return this.settings.ticketKeys; }
   setClientCertEngine() {}
   loadPKCS12() {
-    const e = new Error('PKCS#12 isn\'t supported by Barm yet');
+    const e = new Error('PKCS#12 isn\'t supported by Tov yet');
     e.code = 'ERR_METHOD_NOT_IMPLEMENTED';
     throw e;
   }
@@ -47,7 +47,7 @@ class SecureContext {
 
 const known = {
   SecureContext,
-  // (certificates load when TLS connections are made, by Barm's TLS client)
+  // (certificates load when TLS connections are made, by Tov's TLS client)
   startLoadingCertificatesOffThread() {},
   getRootCertificates: () => [],
   getBundledRootCertificates: () => [],
@@ -77,7 +77,7 @@ module.exports = new Proxy(known, {
   get(target, key) {
     if (typeof key === 'symbol' || key === 'then') return undefined;
     return target[key] ??= function notImplemented() {
-      const e = new Error(`internalBinding('crypto').${String(key)} is not implemented in Barm yet`);
+      const e = new Error(`internalBinding('crypto').${String(key)} is not implemented in Tov yet`);
       e.code = 'ERR_NOT_IMPLEMENTED';
       throw e;
     };

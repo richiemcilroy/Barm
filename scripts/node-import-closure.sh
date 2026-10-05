@@ -1,6 +1,6 @@
 #!/bin/sh
 # Imports every Node.js lib file that a file in runtime/node requires (statically) and that
-# isn't there yet, repeatedly, until nothing is missing. (internal/bindings/* are Barm's own:
+# isn't there yet, repeatedly, until nothing is missing. (internal/bindings/* are Tov's own:
 # missing ones get placeholders.)
 set -u
 root=$(cd "$(dirname "$0")/.." && pwd)

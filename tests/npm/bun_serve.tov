@@ -1,0 +1,6 @@
+import run from "bun-serve"
+
+async function main() {
+  // Bun.serve on Tov's HTTP server
+  try await run()
+}

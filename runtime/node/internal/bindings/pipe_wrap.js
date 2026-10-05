@@ -13,15 +13,15 @@ class Pipe extends SocketWrap {
   }
 
   open(fd) {
-    return this._barmOpen(fd);
+    return this._tovOpen(fd);
   }
 
   bind(path) {
-    return this._barmBind(path, 0, 0, false);
+    return this._tovBind(path, 0, 0, false);
   }
 
   connect(req, path) {
-    return this._barmConnect(req, path, 0, 0);
+    return this._tovConnect(req, path, 0, 0);
   }
 
   fchmod() {

@@ -1,20 +1,20 @@
 #!/bin/sh
-# Builds Barm's JavaScriptCore: WebKit's JSCOnly port at a pinned release, with Barm's patches
+# Builds Tov's JavaScriptCore: WebKit's JSCOnly port at a pinned release, with Tov's patches
 # (scripts/jsc/patches), as one static library and its headers in
-#   ~/.cache/barm/jsc/<os>-<arch>/{lib/libbarmjsc.a, include/JavaScriptCore/*.h, VERSION}
-# which `barm build` links programs that import npm packages with (BARM_JSC=system uses the
+#   ~/.cache/tov/jsc/<os>-<arch>/{lib/libtovjsc.a, include/JavaScriptCore/*.h, VERSION}
+# which `tov build` links programs that import npm packages with (TOV_JSC=system uses the
 # system's instead). On macOS it builds here; `scripts/jsc/build.sh linux` builds Linux's in a
 # container (scripts/jsc/Dockerfile.linux).
 set -eu
 TAG=webkitgtk-2.54.1
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
-cache=${BARM_JSC_CACHE:-$HOME/.cache/barm/jsc}
+cache=${TOV_JSC_CACHE:-$HOME/.cache/tov/jsc}
 mkdir -p "$cache"
 
 if [ "${1:-}" = linux ]; then
-    docker build -q -t barm-jsc-linux -f "$here/Dockerfile.linux" "$here" > /dev/null
-    exec docker run --rm -v "$root:/barm" -v "$cache:/jsc" -e BARM_JSC_CACHE=/jsc barm-jsc-linux sh /barm/scripts/jsc/build.sh
+    docker build -q -t tov-jsc-linux -f "$here/Dockerfile.linux" "$here" > /dev/null
+    exec docker run --rm -v "$root:/tov" -v "$cache:/jsc" -e TOV_JSC_CACHE=/jsc tov-jsc-linux sh /tov/scripts/jsc/build.sh
 fi
 
 src="$cache/src-$TAG"
@@ -50,7 +50,7 @@ cmake -S "$src" -B "$build" -G Ninja -DPORT=JSCOnly -DCMAKE_BUILD_TYPE=Release -
     -DUSE_THIN_ARCHIVES=OFF -DENABLE_FTL_JIT=ON -DDEVELOPER_MODE=OFF -DENABLE_API_TESTS=OFF -DENABLE_TOOLS=OFF \
     -DUSE_CXX_STDLIB_ASSERTIONS=OFF -DLTO_MODE=thin -DUSE_LD_LLD=OFF \
     -DCMAKE_C_FLAGS="$flags" \
-    -DCMAKE_CXX_FLAGS="$flags -DBARM_JSC_CACHE_VERSION=${version}u" > "$cache/configure-$os-$arch.log"
+    -DCMAKE_CXX_FLAGS="$flags -DTOV_JSC_CACHE_VERSION=${version}u" > "$cache/configure-$os-$arch.log"
 nice -n 10 cmake --build "$build" --target JavaScriptCore JavaScriptCoreJIT > "$cache/build-$os-$arch.log"
 
 # one archive: JavaScriptCore, its JIT's objects (an object library), WTF and bmalloc
@@ -78,12 +78,12 @@ open(sys.argv[1], "wb").write(b)' "$llint"
     nm -u "$llint" | sed 's/^/-Wl,-u,/' > "$out.tmp/llint-uses"
     clang -r -nostdlib -flto=thin -O3 -Wl,-keep_private_externs @"$out.tmp/llint-uses" -Wl,-force_load,"$out.tmp/libJavaScriptCore.a" $jit "$build/lib/libWTF.a" "$build/lib/libbmalloc.a" \
         -Wl,-cache_path_lto,"$cache/lto-cache-$os-$arch" -o "$out.tmp/engine.o"
-    libtool -static -o "$out.tmp/lib/libbarmjsc.a" "$out.tmp/engine.o" "$llint" 2> /dev/null
+    libtool -static -o "$out.tmp/lib/libtovjsc.a" "$out.tmp/engine.o" "$llint" 2> /dev/null
     rm "$llint" "$out.tmp/llint-uses" "$out.tmp/libJavaScriptCore.a" "$out.tmp/engine.o"
     headers="$build/JavaScriptCore.framework/Headers"
 else
     {
-        echo "CREATE $out.tmp/lib/libbarmjsc.a"
+        echo "CREATE $out.tmp/lib/libtovjsc.a"
         for a in libJavaScriptCore.a libWTF.a libbmalloc.a; do echo "ADDLIB $build/lib/$a"; done
         for o in $jit; do echo "ADDMOD $o"; done
         echo SAVE
@@ -95,4 +95,4 @@ cp "$headers"/*.h "$out.tmp/include/JavaScriptCore/"
 echo "$TAG $version" > "$out.tmp/VERSION"
 rm -rf "$out"
 mv "$out.tmp" "$out"
-echo "built $out ($(du -sh "$out/lib/libbarmjsc.a" | cut -f1))"
+echo "built $out ($(du -sh "$out/lib/libtovjsc.a" | cut -f1))"

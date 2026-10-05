@@ -1,6 +1,6 @@
 'use strict';
 
-// tty (Barm's own; Node.js's builds on net.Socket and its tty_wrap handle): isatty, and the
+// tty (Tov's own; Node.js's builds on net.Socket and its tty_wrap handle): isatty, and the
 // streams for terminal file descriptors, writing and reading through the natives.
 
 const { primordials } = require('internal/bootstrap');
@@ -8,7 +8,7 @@ const { NumberIsInteger } = primordials;
 const { Writable, Readable } = require('stream');
 const { getColorDepth, hasColors } = require('internal/tty');
 
-const native = globalThis.__barm_native ?? require('internal/bootstrap/host_fallback');
+const native = globalThis.__tov_native ?? require('internal/bootstrap/host_fallback');
 
 function isatty(fd) {
   return NumberIsInteger(fd) && fd >= 0 && fd <= 2147483647 && native.isatty(fd);

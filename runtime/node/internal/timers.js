@@ -118,7 +118,7 @@ const {
 const L = require('internal/linkedlist');
 const PriorityQueue = require('internal/priority_queue');
 
-// (Barm: internal/util/inspect, 100KB, loads when something is first formatted)
+// (Tov: internal/util/inspect, 100KB, loads when something is first formatted)
 const inspect = (...args) => require('internal/util/inspect').inspect(...args);
 inspect.custom = Symbol.for('nodejs.util.inspect.custom');
 let debug = require('internal/util/debuglog').debuglog('timer', (fn) => {

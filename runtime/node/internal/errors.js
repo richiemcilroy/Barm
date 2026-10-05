@@ -69,7 +69,7 @@ const kIsNodeError = Symbol('kIsNodeError');
 const isWindows = process.platform === 'win32';
 
 const messages = new SafeMap();
-// (Barm: an error code's class is made the first time it's asked for: Node.js has all ~400 in
+// (Tov: an error code's class is made the first time it's asked for: Node.js has all ~400 in
 // its startup snapshot, where they cost nothing, while making them at startup costs megabytes)
 const pendingCodes = new SafeMap();
 const codes = new Proxy({}, {

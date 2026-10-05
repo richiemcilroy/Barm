@@ -1,10 +1,10 @@
-error[T0120] path_narrowing.barm:25:12: `u.left` may be `undefined`
+error[T0120] path_narrowing.tov:25:12: `u.left` may be `undefined`
    25 |     return u.left.value
   narrow first: `if (u.left !== undefined) { ... }`
   fix[maybe]: optional chaining: `u.left?.value`
   fix[maybe]: assert defined (traps if not): `u.left!.value`
 
-error[T0120] path_narrowing.barm:33:21: `u.left` may be `undefined`
+error[T0120] path_narrowing.tov:33:21: `u.left` may be `undefined`
    33 |     const f = () => u.left.value
   narrow first: `if (u.left !== undefined) { ... }`
   fix[maybe]: optional chaining: `u.left?.value`

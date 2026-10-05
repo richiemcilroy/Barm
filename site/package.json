@@ -1,8 +1,8 @@
 {
-  "name": "barm-site",
+  "name": "tov-site",
   "private": true,
   "scripts": {
-    "dev": "barm --watch server.barm",
-    "start": "barm server.barm"
+    "dev": "tov --watch server.tov",
+    "start": "tov server.tov"
   }
 }

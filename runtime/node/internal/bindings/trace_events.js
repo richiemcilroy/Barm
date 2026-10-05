@@ -1,6 +1,6 @@
 'use strict';
 
-// internalBinding('trace_events'): Barm records no trace events; every category is off.
+// internalBinding('trace_events'): Tov records no trace events; every category is off.
 module.exports = {
   trace() {},
   isTraceCategoryEnabled: () => false,

@@ -1,10 +1,10 @@
 'use strict';
 
-// internalBinding('spawn_sync'): Node.js's src/spawn_sync.cc over Barm's native spawnSync
+// internalBinding('spawn_sync'): Node.js's src/spawn_sync.cc over Tov's native spawnSync
 // (runtime/node.c): runs a program to the end, writing each pipe's input and collecting its
 // output, with a timeout and a size limit, and answers as Node.js's does.
 
-const native = globalThis.__barm_native;
+const native = globalThis.__tov_native;
 
 // (runtime/node.c's stdio kinds)
 const IGNORE = 0;
@@ -20,7 +20,7 @@ function signalNumber(signal) {
 // spawn(options) -> { pid, status, signal, output, error }
 function spawn(options) {
   if (!native?.spawnSync) {
-    const e = new Error('child processes are not available outside Barm\'s runtime');
+    const e = new Error('child processes are not available outside Tov\'s runtime');
     e.code = 'ERR_METHOD_NOT_IMPLEMENTED';
     throw e;
   }

@@ -36,7 +36,7 @@ const {
   kEmptyObject,
   kEnumerableProperty,
 } = require('internal/util');
-// (Barm: internal/util/inspect, 100KB, loads when something is first formatted)
+// (Tov: internal/util/inspect, 100KB, loads when something is first formatted)
 const inspect = (...args) => require('internal/util/inspect').inspect(...args);
 const {
   codes: {

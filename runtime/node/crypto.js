@@ -1,8 +1,8 @@
 'use strict';
 
-// crypto (Barm's own; Node.js's binds all of OpenSSL): hashes, HMAC, random values, key
+// crypto (Tov's own; Node.js's binds all of OpenSSL): hashes, HMAC, random values, key
 // derivation and timingSafeEqual, on BoringSSL through the natives
-// (globalThis.__barm_native.crypto, runtime/node.c over runtime/crypto.c). It answers and fails
+// (globalThis.__tov_native.crypto, runtime/node.c over runtime/crypto.c). It answers and fails
 // as Node.js does. Ciphers, signatures and key objects aren't there yet: those functions throw
 // ERR_METHOD_NOT_IMPLEMENTED.
 
@@ -25,7 +25,7 @@ const {
 } = require('internal/validators');
 const { isArrayBufferView, isAnyArrayBuffer } = require('internal/util/types');
 const LazyTransform = require('internal/streams/lazy_transform');
-const { getRandomValues, randomUUID, randomFillBytes } = require('internal/barm/random');
+const { getRandomValues, randomUUID, randomFillBytes } = require('internal/tov/random');
 
 // (errors Node.js raises from C++, so internal/errors doesn't have them)
 function nativeError(Base, code, message) {
@@ -34,10 +34,10 @@ function nativeError(Base, code, message) {
   return e;
 }
 
-const native = globalThis.__barm_native?.crypto;
+const native = globalThis.__tov_native?.crypto;
 function crypto() {
   if (native?.available) return native;
-  const e = new Error('crypto is not available outside Barm\'s runtime');
+  const e = new Error('crypto is not available outside Tov\'s runtime');
   e.code = 'ERR_METHOD_NOT_IMPLEMENTED';
   throw e;
 }
@@ -328,7 +328,7 @@ const subtle = {
 for (const m of ['encrypt', 'decrypt', 'sign', 'verify', 'generateKey', 'deriveKey', 'deriveBits', 'importKey', 'exportKey', 'wrapKey', 'unwrapKey']) {
   subtle[m] = async () => {
     const { DOMException } = require('internal/bindings/messaging');
-    throw new DOMException(`crypto.subtle.${m} is not supported in Barm yet`, 'NotSupportedError');
+    throw new DOMException(`crypto.subtle.${m} is not supported in Tov yet`, 'NotSupportedError');
   };
 }
 const webcrypto = { getRandomValues, randomUUID, subtle, CryptoKey: class CryptoKey {} };

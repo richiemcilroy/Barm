@@ -58,7 +58,7 @@ function hasTickScheduled() {
 
 function setHasTickScheduled(value) {
   tickInfo[kHasTickScheduled] = value ? 1 : 0;
-  // (Barm: the binding runs the queue when the host's callback returns, or as a promise job)
+  // (Tov: the binding runs the queue when the host's callback returns, or as a promise job)
   if (value) setTickScheduled();
 }
 

@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="8 16 112 80" role="img" aria-label="Barm">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="8 16 112 80" role="img" aria-label="Tov">
   <defs>
     <filter id="r" x="-10%" y="-10%" width="120%" height="120%">
       <feTurbulence type="fractalNoise" baseFrequency="0.022" numOctaves="2" seed="7"/>

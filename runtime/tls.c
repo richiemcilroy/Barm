@@ -1,7 +1,7 @@
 /* tls.c — TLS for the fetch client, on the vendored BoringSSL (vendor/boringssl).
  *
  * The build compiles this file with BoringSSL into an archive that only programs calling fetch()
- * link: their generated code calls bm_tls_install(), which points the runtime's `bm_tls_impl`
+ * link: their generated code calls tv_tls_install(), which points the runtime's `tv_tls_impl`
  * at the operations below. The runtime never names anything here directly.
  *
  * Certificates are verified against the system's CA bundle (loaded once per configuration):
@@ -15,7 +15,7 @@
  * costs ~40 us per new connection over plain X25519 (which Bun offers); pooled connections don't
  * pay it again. */
 
-#include "barm.h"
+#include "tov.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -31,32 +31,32 @@
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 
-struct bm_tls {
+struct tv_tls {
     SSL *ssl;
-    struct bm_tls_conf *conf;
+    struct tv_tls_conf *conf;
     char key[256];            /* the session cache key (origin + configuration) */
-    char code[64];            /* the last failure's code (ERR_SSL_...), see bm_tls_why */
+    char code[64];            /* the last failure's code (ERR_SSL_...), see tv_tls_why */
 };
 
 /* A context per (verify, extra CA): few in a program. */
-typedef struct bm_tls_conf {
-    struct bm_tls_conf *next;
+typedef struct tv_tls_conf {
+    struct tv_tls_conf *next;
     bool verify;
     char *ca;                 /* extra PEM, or NULL */
     size_t ca_len;
     SSL_CTX *ctx;
-    bool *added;              /* which roots its store has (see bm_tls_verify) */
-} bm_tls_conf;
+    bool *added;              /* which roots its store has (see tv_tls_verify) */
+} tv_tls_conf;
 
 /* The trusted roots (the system bundle and NODE_EXTRA_CA_CERTS), indexed by the canonical hash of
  * their subject name and parsed only when a server's chain names one as an issuer: a program
  * that fetches from one site parses one or two of the ~130 roots, not all of them (~13 ms and
  * ~1.4 MB saved). */
-typedef struct { uint8_t *der; size_t len; uint32_t subject; X509 *x; } bm_root;
-static bm_root *bm_roots;
-static size_t bm_nroots;
+typedef struct { uint8_t *der; size_t len; uint32_t subject; X509 *x; } tv_root;
+static tv_root *tv_roots;
+static size_t tv_nroots;
 
-static void bm_roots_add_pem(const char *path) {
+static void tv_roots_add_pem(const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) return;
     size_t cap = 1 << 16, n = 0;
@@ -98,8 +98,8 @@ static void bm_roots_add_pem(const char *path) {
                 /* the subject's hash; only the DER is kept (parsed if a chain needs it) */
                 uint32_t h = (uint32_t)X509_NAME_hash(name);
                 X509_NAME_free(name);
-                bm_roots = realloc(bm_roots, (bm_nroots + 1) * sizeof *bm_roots);
-                bm_roots[bm_nroots++] = (bm_root){ der, len, h, NULL };
+                tv_roots = realloc(tv_roots, (tv_nroots + 1) * sizeof *tv_roots);
+                tv_roots[tv_nroots++] = (tv_root){ der, len, h, NULL };
                 der = NULL;
             }
             free(der);
@@ -110,52 +110,52 @@ static void bm_roots_add_pem(const char *path) {
     ERR_clear_error();
 }
 
-static bool bm_tls_ready;
-static const char *bm_tls_bundle;   /* the CA bundle file */
-static bm_tls_conf *bm_tls_confs;
-static int bm_tls_index;            /* SSL ex_data slot holding the bm_tls */
+static bool tv_tls_ready;
+static const char *tv_tls_bundle;   /* the CA bundle file */
+static tv_tls_conf *tv_tls_confs;
+static int tv_tls_index;            /* SSL ex_data slot holding the tv_tls */
 
 /* ---- remembered sessions (most recent per key) */
 
-#define BM_TLS_SESSIONS 64
-typedef struct { char key[256]; SSL_SESSION *s; unsigned long stamp; } bm_tls_saved;
-static bm_tls_saved bm_tls_sessions[BM_TLS_SESSIONS];
-static unsigned long bm_tls_clock;
+#define TV_TLS_SESSIONS 64
+typedef struct { char key[256]; SSL_SESSION *s; unsigned long stamp; } tv_tls_saved;
+static tv_tls_saved tv_tls_sessions[TV_TLS_SESSIONS];
+static unsigned long tv_tls_clock;
 
-static bm_tls_saved *bm_tls_find(const char *key) {
-    for (int i = 0; i < BM_TLS_SESSIONS; i++)
-        if (bm_tls_sessions[i].s && strcmp(bm_tls_sessions[i].key, key) == 0) return &bm_tls_sessions[i];
+static tv_tls_saved *tv_tls_find(const char *key) {
+    for (int i = 0; i < TV_TLS_SESSIONS; i++)
+        if (tv_tls_sessions[i].s && strcmp(tv_tls_sessions[i].key, key) == 0) return &tv_tls_sessions[i];
     return NULL;
 }
 
 /* BoringSSL hands over new sessions (after a handshake, or tickets that arrive later). */
-static int bm_tls_new_session(SSL *ssl, SSL_SESSION *s) {
-    bm_tls *t = SSL_get_ex_data(ssl, bm_tls_index);
+static int tv_tls_new_session(SSL *ssl, SSL_SESSION *s) {
+    tv_tls *t = SSL_get_ex_data(ssl, tv_tls_index);
     if (!t) return 0;
-    bm_tls_saved *e = bm_tls_find(t->key);
+    tv_tls_saved *e = tv_tls_find(t->key);
     if (!e) {
-        e = &bm_tls_sessions[0];
-        for (int i = 0; i < BM_TLS_SESSIONS; i++) {
-            if (!bm_tls_sessions[i].s) { e = &bm_tls_sessions[i]; break; }
-            if (bm_tls_sessions[i].stamp < e->stamp) e = &bm_tls_sessions[i];
+        e = &tv_tls_sessions[0];
+        for (int i = 0; i < TV_TLS_SESSIONS; i++) {
+            if (!tv_tls_sessions[i].s) { e = &tv_tls_sessions[i]; break; }
+            if (tv_tls_sessions[i].stamp < e->stamp) e = &tv_tls_sessions[i];
         }
     }
     if (e->s) SSL_SESSION_free(e->s);
     e->s = s; /* ours now (returning 1 keeps the reference) */
     snprintf(e->key, sizeof e->key, "%s", t->key);
-    e->stamp = ++bm_tls_clock;
+    e->stamp = ++tv_tls_clock;
     return 1;
 }
 
 /* ---- roots */
 
-static void bm_tls_init(void) {
-    if (bm_tls_ready) return;
-    bm_tls_ready = true;
-    bm_tls_index = SSL_get_ex_new_index(0, NULL, NULL, NULL, NULL);
+static void tv_tls_init(void) {
+    if (tv_tls_ready) return;
+    tv_tls_ready = true;
+    tv_tls_index = SSL_get_ex_new_index(0, NULL, NULL, NULL, NULL);
     const char *file = getenv("SSL_CERT_FILE");
-    if (file && *file) { bm_tls_bundle = file; return; }
-    bm_tls_bundle = NULL;
+    if (file && *file) { tv_tls_bundle = file; return; }
+    tv_tls_bundle = NULL;
     static const char *const bundles[] = {
         "/etc/ssl/cert.pem",                                  /* macOS, Alpine, BSDs */
         "/etc/ssl/certs/ca-certificates.crt",                 /* Debian, Ubuntu, Arch */
@@ -164,48 +164,48 @@ static void bm_tls_init(void) {
         "/etc/ssl/ca-bundle.pem",                             /* openSUSE */
     };
     for (size_t i = 0; i < sizeof bundles / sizeof *bundles; i++)
-        if (access(bundles[i], R_OK) == 0) { bm_tls_bundle = bundles[i]; return; }
+        if (access(bundles[i], R_OK) == 0) { tv_tls_bundle = bundles[i]; return; }
 }
 
 /* The roots, indexed on first use (the first verification). */
-static void bm_roots_load(void) {
+static void tv_roots_load(void) {
     static bool loaded;
     if (loaded) return;
     loaded = true;
-    if (bm_tls_bundle) bm_roots_add_pem(bm_tls_bundle);
+    if (tv_tls_bundle) tv_roots_add_pem(tv_tls_bundle);
     const char *extra = getenv("NODE_EXTRA_CA_CERTS");
-    if (extra && *extra) bm_roots_add_pem(extra);
+    if (extra && *extra) tv_roots_add_pem(extra);
 }
 
 /* Adds to the context's store the roots that could have issued `x`. */
-static void bm_tls_add_issuers(bm_tls_conf *c, X509 *x) {
+static void tv_tls_add_issuers(tv_tls_conf *c, X509 *x) {
     uint32_t h = (uint32_t)X509_NAME_hash(X509_get_issuer_name(x));
     X509_STORE *store = SSL_CTX_get_cert_store(c->ctx);
-    for (size_t i = 0; i < bm_nroots; i++) {
-        if (bm_roots[i].subject != h || c->added[i]) continue;
-        if (!bm_roots[i].x) {
-            const uint8_t *in = bm_roots[i].der;
-            bm_roots[i].x = d2i_X509(NULL, &in, (long)bm_roots[i].len);
+    for (size_t i = 0; i < tv_nroots; i++) {
+        if (tv_roots[i].subject != h || c->added[i]) continue;
+        if (!tv_roots[i].x) {
+            const uint8_t *in = tv_roots[i].der;
+            tv_roots[i].x = d2i_X509(NULL, &in, (long)tv_roots[i].len);
         }
-        if (bm_roots[i].x) X509_STORE_add_cert(store, bm_roots[i].x);
+        if (tv_roots[i].x) X509_STORE_add_cert(store, tv_roots[i].x);
         c->added[i] = true;
     }
 }
 
 /* Certificate verification: bring in the roots this chain can use, then verify as usual. */
-static int bm_tls_verify(X509_STORE_CTX *sc, void *arg) {
-    bm_tls_conf *c = arg;
-    bm_roots_load();
-    if (!c->added) c->added = calloc(bm_nroots ? bm_nroots : 1, sizeof *c->added);
-    bm_tls_add_issuers(c, X509_STORE_CTX_get0_cert(sc));
+static int tv_tls_verify(X509_STORE_CTX *sc, void *arg) {
+    tv_tls_conf *c = arg;
+    tv_roots_load();
+    if (!c->added) c->added = calloc(tv_nroots ? tv_nroots : 1, sizeof *c->added);
+    tv_tls_add_issuers(c, X509_STORE_CTX_get0_cert(sc));
     STACK_OF(X509) *chain = X509_STORE_CTX_get0_untrusted(sc);
-    for (size_t i = 0; chain && i < sk_X509_num(chain); i++) bm_tls_add_issuers(c, sk_X509_value(chain, i));
+    for (size_t i = 0; chain && i < sk_X509_num(chain); i++) tv_tls_add_issuers(c, sk_X509_value(chain, i));
     ERR_clear_error();
     return X509_verify_cert(sc);
 }
 
 /* Adds every certificate in PEM text to the store. */
-static void bm_tls_add_pem(X509_STORE *store, const char *pem, size_t len) {
+static void tv_tls_add_pem(X509_STORE *store, const char *pem, size_t len) {
     BIO *bio = BIO_new_mem_buf(pem, (ptrdiff_t)len);
     if (!bio) return;
     X509 *x;
@@ -217,12 +217,12 @@ static void bm_tls_add_pem(X509_STORE *store, const char *pem, size_t len) {
     BIO_free(bio);
 }
 
-static bm_tls_conf *bm_tls_conf_for(bool verify, const char *ca, size_t ca_len) {
-    for (bm_tls_conf *c = bm_tls_confs; c; c = c->next)
+static tv_tls_conf *tv_tls_conf_for(bool verify, const char *ca, size_t ca_len) {
+    for (tv_tls_conf *c = tv_tls_confs; c; c = c->next)
         if (c->verify == verify && c->ca_len == ca_len && (ca_len == 0 || memcmp(c->ca, ca, ca_len) == 0)) return c;
     SSL_CTX *ctx = SSL_CTX_new(TLS_method());
     if (!ctx) return NULL;
-    bm_tls_conf *c = calloc(1, sizeof *c);
+    tv_tls_conf *c = calloc(1, sizeof *c);
     c->verify = verify;
     c->ctx = ctx;
     SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
@@ -230,12 +230,12 @@ static bm_tls_conf *bm_tls_conf_for(bool verify, const char *ca, size_t ca_len) 
     static const uint8_t alpn[] = "\x08http/1.1";
     SSL_CTX_set_alpn_protos(ctx, alpn, sizeof alpn - 1);
     SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_CLIENT | SSL_SESS_CACHE_NO_INTERNAL);
-    SSL_CTX_sess_set_new_cb(ctx, bm_tls_new_session);
+    SSL_CTX_sess_set_new_cb(ctx, tv_tls_new_session);
     SSL_CTX_set_verify(ctx, verify ? SSL_VERIFY_PEER : SSL_VERIFY_NONE, NULL);
     if (verify) {
         /* the system's roots come in on demand; a request's own `ca` right away */
-        SSL_CTX_set_cert_verify_callback(ctx, bm_tls_verify, c);
-        if (ca_len) bm_tls_add_pem(SSL_CTX_get_cert_store(ctx), ca, ca_len);
+        SSL_CTX_set_cert_verify_callback(ctx, tv_tls_verify, c);
+        if (ca_len) tv_tls_add_pem(SSL_CTX_get_cert_store(ctx), ca, ca_len);
         ERR_clear_error();
     }
     if (ca_len) {
@@ -243,26 +243,26 @@ static bm_tls_conf *bm_tls_conf_for(bool verify, const char *ca, size_t ca_len) 
         memcpy(c->ca, ca, ca_len);
         c->ca_len = ca_len;
     }
-    c->next = bm_tls_confs;
-    bm_tls_confs = c;
+    c->next = tv_tls_confs;
+    tv_tls_confs = c;
     return c;
 }
 
 /* ---- operations */
 
-static bm_tls *bm_tls_open(int fd, const char *host, const char *key, bool verify, const char *ca, size_t ca_len) {
-    bm_tls_init();
+static tv_tls *tv_tls_open(int fd, const char *host, const char *key, bool verify, const char *ca, size_t ca_len) {
+    tv_tls_init();
     const char *off = getenv("NODE_TLS_REJECT_UNAUTHORIZED");
     if (off && strcmp(off, "0") == 0) verify = false;
-    bm_tls_conf *conf = bm_tls_conf_for(verify, ca, ca_len);
+    tv_tls_conf *conf = tv_tls_conf_for(verify, ca, ca_len);
     if (!conf) return NULL;
     SSL *ssl = SSL_new(conf->ctx);
     if (!ssl) return NULL;
-    bm_tls *t = calloc(1, sizeof *t);
+    tv_tls *t = calloc(1, sizeof *t);
     t->ssl = ssl;
     t->conf = conf;
     snprintf(t->key, sizeof t->key, "%s|%d|%p", key, verify, (void *)conf);
-    SSL_set_ex_data(ssl, bm_tls_index, t);
+    SSL_set_ex_data(ssl, tv_tls_index, t);
     SSL_set_fd(ssl, fd);
     SSL_set_connect_state(ssl);
     /* the name the certificate must match; SNI unless it's an IP address */
@@ -277,14 +277,14 @@ static bm_tls *bm_tls_open(int fd, const char *host, const char *key, bool verif
         X509_VERIFY_PARAM_set1_host(param, name, strlen(name));
     }
     ERR_clear_error();
-    bm_tls_saved *s = bm_tls_find(t->key);
+    tv_tls_saved *s = tv_tls_find(t->key);
     if (s) SSL_set_session(ssl, s->s);
     return t;
 }
 
 /* An SSL call's result: > 0 as is; else -1 wants read, -2 wants write, -3 failed, or 0 when
  * the connection ended (close_notify, or the peer closed the socket). */
-static long bm_tls_result(bm_tls *t, int rc) {
+static long tv_tls_result(tv_tls *t, int rc) {
     if (rc > 0) return rc;
     int err = SSL_get_error(t->ssl, rc);
     switch (err) {
@@ -296,27 +296,27 @@ static long bm_tls_result(bm_tls *t, int rc) {
     }
 }
 
-static int bm_tls_handshake(bm_tls *t) {
+static int tv_tls_handshake(tv_tls *t) {
     int rc = SSL_do_handshake(t->ssl);
     if (rc == 1) return 0;
-    long r = bm_tls_result(t, rc);
+    long r = tv_tls_result(t, rc);
     return r == -1 ? 1 : r == -2 ? 2 : -1;
 }
 
-static long bm_tls_read(bm_tls *t, void *buf, size_t n) {
-    return bm_tls_result(t, SSL_read(t->ssl, buf, n > INT32_MAX ? INT32_MAX : (int)n));
+static long tv_tls_read(tv_tls *t, void *buf, size_t n) {
+    return tv_tls_result(t, SSL_read(t->ssl, buf, n > INT32_MAX ? INT32_MAX : (int)n));
 }
 
-static long bm_tls_write(bm_tls *t, const void *buf, size_t n) {
-    return bm_tls_result(t, SSL_write(t->ssl, buf, n > INT32_MAX ? INT32_MAX : (int)n));
+static long tv_tls_write(tv_tls *t, const void *buf, size_t n) {
+    return tv_tls_result(t, SSL_write(t->ssl, buf, n > INT32_MAX ? INT32_MAX : (int)n));
 }
 
-static size_t bm_tls_pending(bm_tls *t) {
+static size_t tv_tls_pending(tv_tls *t) {
     return (size_t)SSL_pending(t->ssl);
 }
 
 /* Why the handshake or a read failed, as Node and Bun report it: (code, message). */
-static void bm_tls_why(bm_tls *t, const char *url, const char **code, char *msg, size_t n) {
+static void tv_tls_why(tv_tls *t, const char *url, const char **code, char *msg, size_t n) {
     long vr = SSL_get_verify_result(t->ssl);
     static const char verb[] = "For more information, pass `verbose: true` in the second argument to fetch()";
     if (vr != X509_V_OK) {
@@ -362,19 +362,19 @@ static void bm_tls_why(bm_tls *t, const char *url, const char **code, char *msg,
     ERR_clear_error();
 }
 
-static void bm_tls_close(bm_tls *t, bool notify) {
+static void tv_tls_close(tv_tls *t, bool notify) {
     if (notify) SSL_shutdown(t->ssl); /* best effort: the socket may be gone */
     SSL_free(t->ssl);
     ERR_clear_error();
     free(t);
 }
 
-static const bm_tls_ops bm_tls_table = {
-    bm_tls_open, bm_tls_handshake, bm_tls_read, bm_tls_write, bm_tls_pending, bm_tls_why, bm_tls_close,
+static const tv_tls_ops tv_tls_table = {
+    tv_tls_open, tv_tls_handshake, tv_tls_read, tv_tls_write, tv_tls_pending, tv_tls_why, tv_tls_close,
 };
 
-void bm_tls_install(void) {
-    bm_tls_impl = &bm_tls_table;
-    bm_codec = &bm_codecs;
-    bm_crypto = &bm_crypto_table;
+void tv_tls_install(void) {
+    tv_tls_impl = &tv_tls_table;
+    tv_codec = &tv_codecs;
+    tv_crypto = &tv_crypto_table;
 }

@@ -75,8 +75,8 @@ const isMap = branded(Object.getOwnPropertyDescriptor(Map.prototype, 'size').get
 const isSet = branded(Object.getOwnPropertyDescriptor(Set.prototype, 'size').get, Set, '[object Set]');
 
 // ArrayBuffer (1) or SharedArrayBuffer (2), else 0: the engine says which objects are either,
-// without a throw (globalThis.__barm_native.typedArrayType: 9), and the likelier getter says which
-const typedArrayType = globalThis.__barm_native?.typedArrayType;
+// without a throw (globalThis.__tov_native.typedArrayType: 9), and the likelier getter says which
+const typedArrayType = globalThis.__tov_native?.typedArrayType;
 function arrayBufferKind(v) {
   if (v === null || (typeof v !== 'object' && typeof v !== 'function')) return 0;
   if (typedArrayType !== undefined && typedArrayType(v) !== 9) return 0;

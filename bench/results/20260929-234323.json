@@ -23,7 +23,7 @@
     "node": "v26.3.0",
     "bun": "1.4.0",
     "scriptc": "0.1.7",
-    "barm": "barm 0.0.1"
+    "tov": "tov 0.0.1"
   },
   "results": [
     {
@@ -148,7 +148,7 @@
     },
     {
       "bench": "array_push",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.31668491603340954,
@@ -298,7 +298,7 @@
     },
     {
       "bench": "binary_trees",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.2987582919886336,
@@ -448,7 +448,7 @@
     },
     {
       "bench": "fib",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.28342712501762435,
@@ -598,7 +598,7 @@
     },
     {
       "bench": "map_insert",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.2894595420220867,
@@ -748,7 +748,7 @@
     },
     {
       "bench": "nbody",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.005485875008162111,
@@ -898,7 +898,7 @@
     },
     {
       "bench": "points",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.27571587497368455,
@@ -1048,7 +1048,7 @@
     },
     {
       "bench": "sort",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.30381995800416917,
@@ -1198,7 +1198,7 @@
     },
     {
       "bench": "strings",
-      "lang": "barm",
+      "lang": "tov",
       "status": "ok",
       "reason": "",
       "compile_s": 0.2886942500481382,

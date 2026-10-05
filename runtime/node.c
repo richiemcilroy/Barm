@@ -1,5 +1,5 @@
 /* node.c — the natives Node.js's built-ins run on (runtime/node), as functions on
- * globalThis.__barm_native: process, timers (on Barm's event loop), os, tty and fs. Linked with
+ * globalThis.__tov_native: process, timers (on Tov's event loop), os, tty and fs. Linked with
  * js.c by programs that import npm packages. The JS side of each is documented where it's used
  * (runtime/node/internal/bootstrap/process.js, internal/bindings/timers.js, ...os.js, ...fs.js).
  *
@@ -8,7 +8,7 @@
 
 #include "js.h"
 
-#if defined(__APPLE__) && !defined(BM_JSC_OWN)
+#if defined(__APPLE__) && !defined(TV_JSC_OWN)
 #include <JavaScriptCore/JavaScriptCore.h>
 #else
 #include <JavaScriptCore/JavaScript.h>
@@ -53,7 +53,7 @@ static JSValueRef num(JSContextRef ctx, double d) { return JSValueMakeNumber(ctx
 
 static JSValueRef str(JSContextRef ctx, const char *s) {
     (void)ctx;
-    return bm_js_str(s, strlen(s));
+    return tv_js_str(s, strlen(s));
 }
 
 static double arg_num(JSContextRef ctx, size_t n, const JSValueRef a[], size_t i, double dflt) {
@@ -85,7 +85,7 @@ static JSObjectRef array(JSContextRef ctx, size_t count, const JSValueRef *items
 
 /* ------------------------------------------------------------------ errors, as libuv names them */
 
-static const struct { int err; const char *code, *message; } bm_uv_errors[] = {
+static const struct { int err; const char *code, *message; } tv_uv_errors[] = {
     {E2BIG, "E2BIG", "argument list too long"},
     {EACCES, "EACCES", "permission denied"},
     {EADDRINUSE, "EADDRINUSE", "address already in use"},
@@ -132,11 +132,11 @@ static const struct { int err; const char *code, *message; } bm_uv_errors[] = {
     {EXDEV, "EXDEV", "cross-device link not permitted"},
 };
 
-static void bm_uv_name(int err, const char **code, const char **message) {
-    for (size_t i = 0; i < sizeof bm_uv_errors / sizeof *bm_uv_errors; i++) {
-        if (bm_uv_errors[i].err == err) {
-            *code = bm_uv_errors[i].code;
-            *message = bm_uv_errors[i].message;
+static void tv_uv_name(int err, const char **code, const char **message) {
+    for (size_t i = 0; i < sizeof tv_uv_errors / sizeof *tv_uv_errors; i++) {
+        if (tv_uv_errors[i].err == err) {
+            *code = tv_uv_errors[i].code;
+            *message = tv_uv_errors[i].message;
             return;
         }
     }
@@ -146,9 +146,9 @@ static void bm_uv_name(int err, const char **code, const char **message) {
 
 /* The Error Node.js throws for a failed system call (uvException): "CODE: message, syscall
  * 'path' -> 'dest'", with errno (negative), code, syscall, path and dest. */
-static JSValueRef bm_node_errno(JSContextRef ctx, int err, const char *syscall, const char *path, const char *dest) {
+static JSValueRef tv_node_errno(JSContextRef ctx, int err, const char *syscall, const char *path, const char *dest) {
     const char *code, *message;
-    bm_uv_name(err, &code, &message);
+    tv_uv_name(err, &code, &message);
     char text[4096];
     int len = snprintf(text, sizeof text, "%s: %s, %s", code, message, syscall);
     if (path && len < (int)sizeof text) len += snprintf(text + len, sizeof text - (size_t)len, " '%s'", path);
@@ -164,17 +164,17 @@ static JSValueRef bm_node_errno(JSContextRef ctx, int err, const char *syscall, 
 }
 
 /* throws the errno error; returns undefined for the native to return */
-static JSValueRef bm_node_throw(JSContextRef ctx, JSValueRef *exc, int err, const char *syscall, const char *path, const char *dest) {
-    *exc = bm_node_errno(ctx, err, syscall, path, dest);
+static JSValueRef tv_node_throw(JSContextRef ctx, JSValueRef *exc, int err, const char *syscall, const char *path, const char *dest) {
+    *exc = tv_node_errno(ctx, err, syscall, path, dest);
     return undef(ctx);
 }
 
 /* For os.js: fills ctx (a JS object) with { errno, code, message, syscall } and returns undefined. */
-static JSValueRef bm_node_ctx_error(JSContextRef ctx, size_t n, const JSValueRef a[], size_t i, int err, const char *syscall) {
+static JSValueRef tv_node_ctx_error(JSContextRef ctx, size_t n, const JSValueRef a[], size_t i, int err, const char *syscall) {
     if (i < n && JSValueIsObject(ctx, a[i])) {
         JSObjectRef c = (JSObjectRef)a[i];
         const char *code, *message;
-        bm_uv_name(err, &code, &message);
+        tv_uv_name(err, &code, &message);
         set(ctx, c, "errno", num(ctx, -err));
         set(ctx, c, "code", str(ctx, code));
         set(ctx, c, "message", str(ctx, message));
@@ -185,7 +185,7 @@ static JSValueRef bm_node_ctx_error(JSContextRef ctx, size_t n, const JSValueRef
 
 /* ------------------------------------------------------------------ process */
 
-static const char *bm_node_platform(void) {
+static const char *tv_node_platform(void) {
 #if defined(__APPLE__)
     return "darwin";
 #elif defined(__linux__)
@@ -195,7 +195,7 @@ static const char *bm_node_platform(void) {
 #endif
 }
 
-static const char *bm_node_arch(void) {
+static const char *tv_node_arch(void) {
 #if defined(__aarch64__)
     return "arm64";
 #elif defined(__x86_64__)
@@ -205,7 +205,7 @@ static const char *bm_node_arch(void) {
 #endif
 }
 
-static void bm_node_exec_path(char *out, size_t cap) {
+static void tv_node_exec_path(char *out, size_t cap) {
 #if defined(__APPLE__)
     uint32_t size = (uint32_t)cap;
     char raw[4096];
@@ -219,27 +219,27 @@ static void bm_node_exec_path(char *out, size_t cap) {
         return;
     }
 #endif
-    snprintf(out, cap, "%s", bm_argc > 0 ? bm_argv[0] : "barm");
+    snprintf(out, cap, "%s", tv_argc > 0 ? tv_argv[0] : "tov");
 }
 
 NATIVE(n_info) {
     UNUSED;
     JSObjectRef o = JSObjectMake(ctx, NULL, NULL);
-    /* Node.js: [node, script, args...]; a Barm program is both */
-    size_t count = (size_t)bm_argc + 1;
+    /* Node.js: [node, script, args...]; a Tov program is both */
+    size_t count = (size_t)tv_argc + 1;
     JSValueRef *items = malloc(sizeof(JSValueRef) * count);
     char exe[4096];
-    bm_node_exec_path(exe, sizeof exe);
+    tv_node_exec_path(exe, sizeof exe);
     items[0] = str(ctx, exe);
-    for (int i = 0; i < bm_argc; i++) items[i + 1] = str(ctx, i == 0 ? exe : bm_argv[i]);
+    for (int i = 0; i < tv_argc; i++) items[i + 1] = str(ctx, i == 0 ? exe : tv_argv[i]);
     set(ctx, o, "argv", array(ctx, count, items));
     free(items);
     set(ctx, o, "execArgv", array(ctx, 0, NULL));
     set(ctx, o, "execPath", str(ctx, exe));
     set(ctx, o, "pid", num(ctx, getpid()));
     set(ctx, o, "ppid", num(ctx, getppid()));
-    set(ctx, o, "platform", str(ctx, bm_node_platform()));
-    set(ctx, o, "arch", str(ctx, bm_node_arch()));
+    set(ctx, o, "platform", str(ctx, tv_node_platform()));
+    set(ctx, o, "arch", str(ctx, tv_node_arch()));
     const char *base = strrchr(exe, '/');
     set(ctx, o, "title", str(ctx, base ? base + 1 : exe));
     return o;
@@ -264,7 +264,7 @@ NATIVE(n_env) {
 NATIVE(n_cwd) {
     UNUSED;
     char buf[4096];
-    if (!getcwd(buf, sizeof buf)) return bm_node_throw(ctx, exc, errno, "uv_cwd", NULL, NULL);
+    if (!getcwd(buf, sizeof buf)) return tv_node_throw(ctx, exc, errno, "uv_cwd", NULL, NULL);
     return str(ctx, buf);
 }
 
@@ -274,7 +274,7 @@ NATIVE(n_chdir) {
     if (!path) return undef(ctx);
     if (chdir(path) != 0) {
         char cwd[4096];
-        JSValueRef r = bm_node_throw(ctx, exc, errno, "chdir", getcwd(cwd, sizeof cwd) ? cwd : "", path);
+        JSValueRef r = tv_node_throw(ctx, exc, errno, "chdir", getcwd(cwd, sizeof cwd) ? cwd : "", path);
         free(path);
         return r;
     }
@@ -284,7 +284,7 @@ NATIVE(n_chdir) {
 
 NATIVE(n_exit) {
     UNUSED;
-    bm_out_flush();
+    tv_out_flush();
     exit((int)arg_num(ctx, n, a, 0, 0));
 }
 
@@ -304,16 +304,16 @@ NATIVE(n_umask) {
 /* nanoseconds since the program started */
 NATIVE(n_hrtime) {
     UNUSED;
-    return num(ctx, bm_performance_now() * 1e6);
+    return num(ctx, tv_performance_now() * 1e6);
 }
 
 /* nowMs() -> milliseconds since the program started (performance.now's clock) */
 NATIVE(n_now_ms) {
     UNUSED;
-    return num(ctx, bm_performance_now());
+    return num(ctx, tv_performance_now());
 }
 
-/* write(fd, string | bytes): stdout through Barm's buffer (in order with the program's own
+/* write(fd, string | bytes): stdout through Tov's buffer (in order with the program's own
  * output), other fds directly */
 NATIVE(n_write) {
     UNUSED;
@@ -329,14 +329,14 @@ NATIVE(n_write) {
         len = JSStringGetUTF8CString(s, text, cap) - 1;
         JSStringRelease(s);
         p = (uint8_t *)text;
-    } else if (!bm_js_bytes_view(a[1], &p, &len)) {
+    } else if (!tv_js_bytes_view(a[1], &p, &len)) {
         return num(ctx, 0);
     }
     if (fd == 1) {
-        bm_out_write((const char *)p, len);
+        tv_out_write((const char *)p, len);
     } else if (fd == 2) {
-        bm_out_flush();
-        bm_write_fd(2, (const char *)p, len);
+        tv_out_flush();
+        tv_write_fd(2, (const char *)p, len);
     } else {
         size_t off = 0;
         while (off < len) {
@@ -344,7 +344,7 @@ NATIVE(n_write) {
             if (w < 0) {
                 if (errno == EINTR) continue;
                 free(text);
-                return bm_node_throw(ctx, exc, errno, "write", NULL, NULL);
+                return tv_node_throw(ctx, exc, errno, "write", NULL, NULL);
             }
             off += (size_t)w;
         }
@@ -366,7 +366,7 @@ NATIVE(n_window_size) {
     return array(ctx, 2, items);
 }
 
-static double bm_node_rss(void) {
+static double tv_node_rss(void) {
 #if defined(__APPLE__)
     struct mach_task_basic_info info;
     mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
@@ -383,19 +383,19 @@ static double bm_node_rss(void) {
 #endif
 }
 
-static double bm_node_free_mem(void);
+static double tv_node_free_mem(void);
 
 NATIVE(n_memory_usage) {
     UNUSED;
     JSObjectRef o = JSObjectMake(ctx, NULL, NULL);
-    double rss = bm_node_rss();
+    double rss = tv_node_rss();
     set(ctx, o, "rss", num(ctx, rss));
     /* JavaScriptCore doesn't report its heap through the public API */
     set(ctx, o, "heapTotal", num(ctx, 0));
     set(ctx, o, "heapUsed", num(ctx, 0));
     set(ctx, o, "external", num(ctx, 0));
     set(ctx, o, "arrayBuffers", num(ctx, 0));
-    set(ctx, o, "available", num(ctx, bm_node_free_mem()));
+    set(ctx, o, "available", num(ctx, tv_node_free_mem()));
     return o;
 }
 
@@ -416,7 +416,7 @@ NATIVE(n_ids) {
     return array(ctx, 4, items);
 }
 
-static const struct { const char *name; int sig; } bm_signals[] = {
+static const struct { const char *name; int sig; } tv_signals[] = {
     {"SIGHUP", SIGHUP}, {"SIGINT", SIGINT}, {"SIGQUIT", SIGQUIT}, {"SIGILL", SIGILL}, {"SIGTRAP", SIGTRAP},
     {"SIGABRT", SIGABRT}, {"SIGBUS", SIGBUS}, {"SIGFPE", SIGFPE}, {"SIGKILL", SIGKILL}, {"SIGUSR1", SIGUSR1},
     {"SIGSEGV", SIGSEGV}, {"SIGUSR2", SIGUSR2}, {"SIGPIPE", SIGPIPE}, {"SIGALRM", SIGALRM}, {"SIGTERM", SIGTERM},
@@ -434,18 +434,18 @@ NATIVE(n_kill) {
     } else if (n > 1 && JSValueIsString(ctx, a[1])) {
         char *name = arg_cstr(ctx, n, a, 1);
         sig = -1;
-        for (size_t i = 0; i < sizeof bm_signals / sizeof *bm_signals; i++)
-            if (strcmp(bm_signals[i].name, name) == 0) sig = bm_signals[i].sig;
+        for (size_t i = 0; i < sizeof tv_signals / sizeof *tv_signals; i++)
+            if (strcmp(tv_signals[i].name, name) == 0) sig = tv_signals[i].sig;
         free(name);
-        if (sig < 0) return bm_node_throw(ctx, exc, EINVAL, "kill", NULL, NULL);
+        if (sig < 0) return tv_node_throw(ctx, exc, EINVAL, "kill", NULL, NULL);
     }
-    if (kill(pid, sig) != 0) return bm_node_throw(ctx, exc, errno, "kill", NULL, NULL);
+    if (kill(pid, sig) != 0) return tv_node_throw(ctx, exc, errno, "kill", NULL, NULL);
     return JSValueMakeBoolean(ctx, true);
 }
 
 /* process's 'uncaughtException' (set by internal/bootstrap/process): handler(err) -> whether a
  * listener took it */
-static JSObjectRef bm_node_fatal_handler;
+static JSObjectRef tv_node_fatal_handler;
 
 /* typedArrayType(value) -> JavaScriptCore's JSTypedArrayType for it (0..11: Int8Array ..
  * Float64Array, then ArrayBuffer; 12 none; later kinds after), without throwing */
@@ -458,115 +458,115 @@ NATIVE(n_typed_array_type) {
 /* setFatalHandler(fn); fatal(err): report an uncaught exception from JavaScript */
 NATIVE(n_set_fatal_handler) {
     UNUSED;
-    if (bm_node_fatal_handler) JSValueUnprotect(ctx, bm_node_fatal_handler);
-    bm_node_fatal_handler = n > 0 && JSValueIsObject(ctx, a[0]) ? (JSObjectRef)a[0] : NULL;
-    if (bm_node_fatal_handler) JSValueProtect(ctx, bm_node_fatal_handler);
+    if (tv_node_fatal_handler) JSValueUnprotect(ctx, tv_node_fatal_handler);
+    tv_node_fatal_handler = n > 0 && JSValueIsObject(ctx, a[0]) ? (JSObjectRef)a[0] : NULL;
+    if (tv_node_fatal_handler) JSValueProtect(ctx, tv_node_fatal_handler);
     return undef(ctx);
 }
 
-static void bm_node_report(JSValueRef exc);
+static void tv_node_report(JSValueRef exc);
 
 NATIVE(n_fatal) {
     UNUSED;
-    bm_node_report(n > 0 ? a[0] : undef(ctx));
+    tv_node_report(n > 0 ? a[0] : undef(ctx));
     return undef(ctx);
 }
 
-/* ------------------------------------------------------------------ timers, on Barm's loop
+/* ------------------------------------------------------------------ timers, on Tov's loop
  *
- * One Barm timer stands for all of Node.js's (internal/timers keeps the lists): when it fires,
+ * One Tov timer stands for all of Node.js's (internal/timers keeps the lists): when it fires,
  * onTimer runs what's due and re-arms it. Immediates run in the loop's check phase (onCheck). */
 
-static JSObjectRef bm_node_on_timer, bm_node_on_check;
-static bm_int bm_node_timer_id;     /* the pending Barm timer (0: none) */
-static double bm_node_timer_due;    /* when it fires (ms, bm_performance_now's clock) */
-static bool bm_node_timer_refed = true;
+static JSObjectRef tv_node_on_timer, tv_node_on_check;
+static tv_int tv_node_timer_id;     /* the pending Tov timer (0: none) */
+static double tv_node_timer_due;    /* when it fires (ms, tv_performance_now's clock) */
+static bool tv_node_timer_refed = true;
 
 /* an exception nothing caught: to 'uncaughtException' listeners if there are any, else printed,
  * and the program ends (exit code 1, as Node.js's) */
-static void bm_node_report(JSValueRef exc) {
+static void tv_node_report(JSValueRef exc) {
     static bool reporting;
-    if (bm_node_fatal_handler && !reporting) {
+    if (tv_node_fatal_handler && !reporting) {
         reporting = true;
         JSValueRef inner = NULL;
-        JSValueRef handled = JSObjectCallAsFunction(bm_js_ctx, bm_node_fatal_handler, NULL, 1, &exc, &inner);
+        JSValueRef handled = JSObjectCallAsFunction(tv_js_ctx, tv_node_fatal_handler, NULL, 1, &exc, &inner);
         reporting = false;
         if (inner) exc = inner;
-        else if (handled && JSValueToBoolean(bm_js_ctx, handled)) return;
+        else if (handled && JSValueToBoolean(tv_js_ctx, handled)) return;
     }
-    bm_str text = bm_js_error_text(exc);
-    bm_out_flush();
-    bm_err_cstr(text.p->data);
-    bm_err_cstr("\n");
+    tv_str text = tv_js_error_text(exc);
+    tv_out_flush();
+    tv_err_cstr(text.p->data);
+    tv_err_cstr("\n");
     exit(1);
 }
 
-static void bm_node_call(JSObjectRef fn) {
+static void tv_node_call(JSObjectRef fn) {
     JSValueRef exc = NULL;
-    JSObjectCallAsFunction(bm_js_ctx, fn, NULL, 0, NULL, &exc);
-    if (exc) bm_node_report(exc);
+    JSObjectCallAsFunction(tv_js_ctx, fn, NULL, 0, NULL, &exc);
+    if (exc) tv_node_report(exc);
 }
 
-static void bm_node_timer_fire(bm_env *env) {
+static void tv_node_timer_fire(tv_env *env) {
     (void)env;
-    bm_node_timer_id = 0;
-    if (bm_node_on_timer) bm_node_call(bm_node_on_timer);
+    tv_node_timer_id = 0;
+    if (tv_node_on_timer) tv_node_call(tv_node_on_timer);
 }
 
-static void bm_node_timer_arm(double ms) {
-    if (bm_node_timer_id) bm_clear_timer(bm_node_timer_id);
-    bm_fn cb = {(void *)bm_node_timer_fire, NULL};
-    bm_node_timer_id = bm_set_timer(cb, ms, false);
-    bm_node_timer_due = bm_performance_now() + ms;
-    if (!bm_node_timer_refed) bm_native_timerUnref(bm_node_timer_id);
+static void tv_node_timer_arm(double ms) {
+    if (tv_node_timer_id) tv_clear_timer(tv_node_timer_id);
+    tv_fn cb = {(void *)tv_node_timer_fire, NULL};
+    tv_node_timer_id = tv_set_timer(cb, ms, false);
+    tv_node_timer_due = tv_performance_now() + ms;
+    if (!tv_node_timer_refed) tv_native_timerUnref(tv_node_timer_id);
 }
 
-static void bm_node_check(void) {
-    if (bm_node_on_check) bm_node_call(bm_node_on_check);
+static void tv_node_check(void) {
+    if (tv_node_on_check) tv_node_call(tv_node_on_check);
 }
 
 NATIVE(n_now) {
     UNUSED;
-    return num(ctx, (double)(int64_t)bm_performance_now());
+    return num(ctx, (double)(int64_t)tv_performance_now());
 }
 
 NATIVE(n_timer_setup) {
     UNUSED;
     if (n < 2) return undef(ctx);
-    bm_node_on_timer = (JSObjectRef)a[0];
-    bm_node_on_check = (JSObjectRef)a[1];
+    tv_node_on_timer = (JSObjectRef)a[0];
+    tv_node_on_check = (JSObjectRef)a[1];
     JSValueProtect(ctx, a[0]);
     JSValueProtect(ctx, a[1]);
-    bm_loop_check = bm_node_check;
+    tv_loop_check = tv_node_check;
     return undef(ctx);
 }
 
 NATIVE(n_timer_schedule) {
     UNUSED;
-    bm_node_timer_arm(arg_num(ctx, n, a, 0, 1));
+    tv_node_timer_arm(arg_num(ctx, n, a, 0, 1));
     return undef(ctx);
 }
 
 NATIVE(n_timer_ref) {
     UNUSED;
     bool ref = n > 0 && JSValueToBoolean(ctx, a[0]);
-    if (ref == bm_node_timer_refed) return undef(ctx);
-    bm_node_timer_refed = ref;
-    if (!bm_node_timer_id) return undef(ctx);
+    if (ref == tv_node_timer_refed) return undef(ctx);
+    tv_node_timer_refed = ref;
+    if (!tv_node_timer_id) return undef(ctx);
     if (!ref) {
-        bm_native_timerUnref(bm_node_timer_id);
+        tv_native_timerUnref(tv_node_timer_id);
     } else {
-        /* (Barm's timers can't be ref'd again: arm a new one for the same moment) */
-        double left = bm_node_timer_due - bm_performance_now();
-        bm_node_timer_arm(left > 1 ? left : 1);
+        /* (Tov's timers can't be ref'd again: arm a new one for the same moment) */
+        double left = tv_node_timer_due - tv_performance_now();
+        tv_node_timer_arm(left > 1 ? left : 1);
     }
     return undef(ctx);
 }
 
 NATIVE(n_request_check) {
     UNUSED;
-    bm_loop_check_pending = true;
-    bm_loop_check_ref = n > 0 && JSValueToBoolean(ctx, a[0]);
+    tv_loop_check_pending = true;
+    tv_loop_check_ref = n > 0 && JSValueToBoolean(ctx, a[0]);
     return undef(ctx);
 }
 
@@ -583,12 +583,12 @@ NATIVE(n_os_info) {
 NATIVE(n_os_hostname) {
     UNUSED;
     char buf[256];
-    if (gethostname(buf, sizeof buf) != 0) return bm_node_ctx_error(ctx, n, a, 0, errno, "uv_os_gethostname");
+    if (gethostname(buf, sizeof buf) != 0) return tv_node_ctx_error(ctx, n, a, 0, errno, "uv_os_gethostname");
     buf[sizeof buf - 1] = 0;
     return str(ctx, buf);
 }
 
-static const char *bm_node_home(void) {
+static const char *tv_node_home(void) {
     const char *h = getenv("HOME");
     if (h && *h) return h;
     struct passwd *pw = getpwuid(getuid());
@@ -597,8 +597,8 @@ static const char *bm_node_home(void) {
 
 NATIVE(n_os_homedir) {
     UNUSED;
-    const char *h = bm_node_home();
-    if (!h) return bm_node_ctx_error(ctx, n, a, 0, ENOENT, "uv_os_homedir");
+    const char *h = tv_node_home();
+    if (!h) return tv_node_ctx_error(ctx, n, a, 0, ENOENT, "uv_os_homedir");
     return str(ctx, h);
 }
 
@@ -608,11 +608,11 @@ NATIVE(n_os_uptime) {
     struct timeval boot;
     size_t len = sizeof boot;
     int mib[2] = {CTL_KERN, KERN_BOOTTIME};
-    if (sysctl(mib, 2, &boot, &len, NULL, 0) != 0) return bm_node_ctx_error(ctx, n, a, 0, errno, "uv_uptime");
+    if (sysctl(mib, 2, &boot, &len, NULL, 0) != 0) return tv_node_ctx_error(ctx, n, a, 0, errno, "uv_uptime");
     return num(ctx, (double)(time(NULL) - boot.tv_sec));
 #else
     struct sysinfo si;
-    if (sysinfo(&si) != 0) return bm_node_ctx_error(ctx, n, a, 0, errno, "uv_uptime");
+    if (sysinfo(&si) != 0) return tv_node_ctx_error(ctx, n, a, 0, errno, "uv_uptime");
     return num(ctx, (double)si.uptime);
 #endif
 }
@@ -630,7 +630,7 @@ NATIVE(n_os_totalmem) {
 #endif
 }
 
-static double bm_node_free_mem(void) {
+static double tv_node_free_mem(void) {
 #if defined(__APPLE__)
     vm_statistics64_data_t vm;
     mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
@@ -652,7 +652,7 @@ static double bm_node_free_mem(void) {
 
 NATIVE(n_os_freemem) {
     UNUSED;
-    return num(ctx, bm_node_free_mem());
+    return num(ctx, tv_node_free_mem());
 }
 
 NATIVE(n_os_loadavg) {
@@ -742,7 +742,7 @@ NATIVE(n_os_cpus) {
 NATIVE(n_os_interfaces) {
     UNUSED;
     struct ifaddrs *list;
-    if (getifaddrs(&list) != 0) return bm_node_ctx_error(ctx, n, a, 0, errno, "uv_interface_addresses");
+    if (getifaddrs(&list) != 0) return tv_node_ctx_error(ctx, n, a, 0, errno, "uv_interface_addresses");
     size_t cap = 64, k = 0;
     JSValueRef *items = malloc(sizeof(JSValueRef) * cap * 7);
     for (struct ifaddrs *i = list; i; i = i->ifa_next) {
@@ -798,7 +798,7 @@ NATIVE(n_os_interfaces) {
 NATIVE(n_os_userinfo) {
     UNUSED;
     struct passwd *pw = getpwuid(geteuid());
-    if (!pw) return bm_node_ctx_error(ctx, n, a, 1, errno ? errno : ENOENT, "uv_os_get_passwd");
+    if (!pw) return tv_node_ctx_error(ctx, n, a, 1, errno ? errno : ENOENT, "uv_os_get_passwd");
     JSObjectRef o = JSObjectMake(ctx, NULL, NULL);
     set(ctx, o, "uid", num(ctx, pw->pw_uid));
     set(ctx, o, "gid", num(ctx, pw->pw_gid));
@@ -812,14 +812,14 @@ NATIVE(n_os_getpriority) {
     UNUSED;
     errno = 0;
     int p = getpriority(PRIO_PROCESS, (id_t)arg_num(ctx, n, a, 0, 0));
-    if (p == -1 && errno) return bm_node_ctx_error(ctx, n, a, 1, errno, "uv_os_getpriority");
+    if (p == -1 && errno) return tv_node_ctx_error(ctx, n, a, 1, errno, "uv_os_getpriority");
     return num(ctx, p);
 }
 
 NATIVE(n_os_setpriority) {
     UNUSED;
     if (setpriority(PRIO_PROCESS, (id_t)arg_num(ctx, n, a, 0, 0), (int)arg_num(ctx, n, a, 1, 0)) != 0)
-        return bm_node_ctx_error(ctx, n, a, 2, errno, "uv_os_setpriority");
+        return tv_node_ctx_error(ctx, n, a, 2, errno, "uv_os_setpriority");
     return num(ctx, 0);
 }
 
@@ -875,7 +875,7 @@ static char *arg_path(JSContextRef ctx, size_t n, const JSValueRef a[], size_t i
     if (s) return s;
     uint8_t *p;
     size_t len;
-    if (i < n && bm_js_bytes_view(a[i], &p, &len)) {
+    if (i < n && tv_js_bytes_view(a[i], &p, &len)) {
         s = malloc(len + 1);
         memcpy(s, p, len);
         s[len] = 0;
@@ -884,21 +884,21 @@ static char *arg_path(JSContextRef ctx, size_t n, const JSValueRef a[], size_t i
     return NULL;
 }
 
-#define PATH_ARG(var, i) char *var = arg_path(ctx, n, a, i); if (!var) return bm_node_throw(ctx, exc, EINVAL, "open", NULL, NULL)
-#define FAIL(syscall, path) do { int e_ = errno; JSValueRef r_ = bm_node_throw(ctx, exc, e_, syscall, path, NULL); return r_; } while (0)
+#define PATH_ARG(var, i) char *var = arg_path(ctx, n, a, i); if (!var) return tv_node_throw(ctx, exc, EINVAL, "open", NULL, NULL)
+#define FAIL(syscall, path) do { int e_ = errno; JSValueRef r_ = tv_node_throw(ctx, exc, e_, syscall, path, NULL); return r_; } while (0)
 
 NATIVE(n_fs_open) {
     UNUSED;
     PATH_ARG(path, 0);
     int fd = open(path, (int)arg_num(ctx, n, a, 1, O_RDONLY) | O_CLOEXEC, (mode_t)arg_num(ctx, n, a, 2, 0666));
-    if (fd < 0) { int e = errno; JSValueRef r = bm_node_throw(ctx, exc, e, "open", path, NULL); free(path); return r; }
+    if (fd < 0) { int e = errno; JSValueRef r = tv_node_throw(ctx, exc, e, "open", path, NULL); free(path); return r; }
     free(path);
     return num(ctx, fd);
 }
 
 NATIVE(n_fs_close) {
     UNUSED;
-    if (close((int)arg_num(ctx, n, a, 0, -1)) != 0 && errno != EINTR) return bm_node_throw(ctx, exc, errno, "close", NULL, NULL);
+    if (close((int)arg_num(ctx, n, a, 0, -1)) != 0 && errno != EINTR) return tv_node_throw(ctx, exc, errno, "close", NULL, NULL);
     return undef(ctx);
 }
 
@@ -908,7 +908,7 @@ NATIVE(n_fs_read) {
     int fd = (int)arg_num(ctx, n, a, 0, -1);
     uint8_t *p;
     size_t len;
-    if (n < 2 || !bm_js_bytes_view(a[1], &p, &len)) return bm_node_throw(ctx, exc, EINVAL, "read", NULL, NULL);
+    if (n < 2 || !tv_js_bytes_view(a[1], &p, &len)) return tv_node_throw(ctx, exc, EINVAL, "read", NULL, NULL);
     size_t off = (size_t)arg_num(ctx, n, a, 2, 0), want = (size_t)arg_num(ctx, n, a, 3, (double)len);
     double pos = arg_num(ctx, n, a, 4, -1);
     if (off > len) off = len;
@@ -916,7 +916,7 @@ NATIVE(n_fs_read) {
     for (;;) {
         ssize_t r = pos >= 0 ? pread(fd, p + off, want, (off_t)pos) : read(fd, p + off, want);
         if (r >= 0) return num(ctx, (double)r);
-        if (errno != EINTR) return bm_node_throw(ctx, exc, errno, "read", NULL, NULL);
+        if (errno != EINTR) return tv_node_throw(ctx, exc, errno, "read", NULL, NULL);
     }
 }
 
@@ -926,7 +926,7 @@ NATIVE(n_fs_write) {
     int fd = (int)arg_num(ctx, n, a, 0, -1);
     uint8_t *p;
     size_t len;
-    if (n < 2 || !bm_js_bytes_view(a[1], &p, &len)) return bm_node_throw(ctx, exc, EINVAL, "write", NULL, NULL);
+    if (n < 2 || !tv_js_bytes_view(a[1], &p, &len)) return tv_node_throw(ctx, exc, EINVAL, "write", NULL, NULL);
     size_t off = (size_t)arg_num(ctx, n, a, 2, 0), want = (size_t)arg_num(ctx, n, a, 3, (double)len);
     double pos = arg_num(ctx, n, a, 4, -1);
     if (off > len) off = len;
@@ -934,13 +934,13 @@ NATIVE(n_fs_write) {
     for (;;) {
         ssize_t w = pos >= 0 ? pwrite(fd, p + off, want, (off_t)pos) : write(fd, p + off, want);
         if (w >= 0) return num(ctx, (double)w);
-        if (errno != EINTR) return bm_node_throw(ctx, exc, errno, "write", NULL, NULL);
+        if (errno != EINTR) return tv_node_throw(ctx, exc, errno, "write", NULL, NULL);
     }
 }
 
 /* Node.js's 18 stat fields: dev, mode, nlink, uid, gid, rdev, blksize, ino, size, blocks, then
  * atime, mtime, ctime and birthtime as (seconds, nanoseconds) */
-static JSValueRef bm_node_stat_array(JSContextRef ctx, const struct stat *st) {
+static JSValueRef tv_node_stat_array(JSContextRef ctx, const struct stat *st) {
 #if defined(__APPLE__)
     struct timespec at = st->st_atimespec, mt = st->st_mtimespec, ct = st->st_ctimespec, bt = st->st_birthtimespec;
 #else
@@ -958,34 +958,34 @@ static JSValueRef bm_node_stat_array(JSContextRef ctx, const struct stat *st) {
 
 /* stat(path, throwIfNoEntry) / lstat: the 18 fields, or undefined for a missing entry when
  * throwIfNoEntry is false */
-static JSValueRef bm_node_stat(JSContextRef ctx, size_t n, const JSValueRef a[], JSValueRef *exc, bool link) {
+static JSValueRef tv_node_stat(JSContextRef ctx, size_t n, const JSValueRef a[], JSValueRef *exc, bool link) {
     char *path = arg_path(ctx, n, a, 0);
-    if (!path) return bm_node_throw(ctx, exc, EINVAL, link ? "lstat" : "stat", NULL, NULL);
+    if (!path) return tv_node_throw(ctx, exc, EINVAL, link ? "lstat" : "stat", NULL, NULL);
     struct stat st;
     int r = link ? lstat(path, &st) : stat(path, &st);
     if (r != 0) {
         int e = errno;
         bool quiet = n > 1 && JSValueIsBoolean(ctx, a[1]) && !JSValueToBoolean(ctx, a[1]) && (e == ENOENT || e == ENOTDIR);
-        JSValueRef out = quiet ? undef(ctx) : bm_node_throw(ctx, exc, e, link ? "lstat" : "stat", path, NULL);
+        JSValueRef out = quiet ? undef(ctx) : tv_node_throw(ctx, exc, e, link ? "lstat" : "stat", path, NULL);
         free(path);
         return out;
     }
     free(path);
-    return bm_node_stat_array(ctx, &st);
+    return tv_node_stat_array(ctx, &st);
 }
 
-NATIVE(n_fs_stat) { UNUSED; return bm_node_stat(ctx, n, a, exc, false); }
-NATIVE(n_fs_lstat) { UNUSED; return bm_node_stat(ctx, n, a, exc, true); }
+NATIVE(n_fs_stat) { UNUSED; return tv_node_stat(ctx, n, a, exc, false); }
+NATIVE(n_fs_lstat) { UNUSED; return tv_node_stat(ctx, n, a, exc, true); }
 
 NATIVE(n_fs_fstat) {
     UNUSED;
     struct stat st;
-    if (fstat((int)arg_num(ctx, n, a, 0, -1), &st) != 0) return bm_node_throw(ctx, exc, errno, "fstat", NULL, NULL);
-    return bm_node_stat_array(ctx, &st);
+    if (fstat((int)arg_num(ctx, n, a, 0, -1), &st) != 0) return tv_node_throw(ctx, exc, errno, "fstat", NULL, NULL);
+    return tv_node_stat_array(ctx, &st);
 }
 
 /* Node.js's dirent types (UV_DIRENT_*) */
-static int bm_node_dirent_type(unsigned char t) {
+static int tv_node_dirent_type(unsigned char t) {
     switch (t) {
     case DT_REG: return 1;
     case DT_DIR: return 2;
@@ -1002,10 +1002,10 @@ static int bm_node_dirent_type(unsigned char t) {
 NATIVE(n_fs_readdir) {
     UNUSED;
     char *path = arg_path(ctx, n, a, 0);
-    if (!path) return bm_node_throw(ctx, exc, EINVAL, "scandir", NULL, NULL);
+    if (!path) return tv_node_throw(ctx, exc, EINVAL, "scandir", NULL, NULL);
     bool types = n > 1 && JSValueToBoolean(ctx, a[1]);
     DIR *d = opendir(path);
-    if (!d) { int e = errno; JSValueRef r = bm_node_throw(ctx, exc, e, "scandir", path, NULL); free(path); return r; }
+    if (!d) { int e = errno; JSValueRef r = tv_node_throw(ctx, exc, e, "scandir", path, NULL); free(path); return r; }
     size_t cap = 64, k = 0;
     JSValueRef *names = malloc(sizeof(JSValueRef) * cap), *kinds = malloc(sizeof(JSValueRef) * cap);
     struct dirent *e;
@@ -1017,7 +1017,7 @@ NATIVE(n_fs_readdir) {
             kinds = realloc(kinds, sizeof(JSValueRef) * cap);
         }
         names[k] = str(ctx, e->d_name);
-        kinds[k] = num(ctx, bm_node_dirent_type(e->d_type));
+        kinds[k] = num(ctx, tv_node_dirent_type(e->d_type));
         k++;
     }
     closedir(d);
@@ -1037,11 +1037,11 @@ NATIVE(n_fs_readdir) {
 NATIVE(n_fs_mkdir) {
     UNUSED;
     char *path = arg_path(ctx, n, a, 0);
-    if (!path) return bm_node_throw(ctx, exc, EINVAL, "mkdir", NULL, NULL);
+    if (!path) return tv_node_throw(ctx, exc, EINVAL, "mkdir", NULL, NULL);
     mode_t mode = (mode_t)arg_num(ctx, n, a, 1, 0777);
     bool recursive = n > 2 && JSValueToBoolean(ctx, a[2]);
     if (!recursive) {
-        if (mkdir(path, mode) != 0) { int e = errno; JSValueRef r = bm_node_throw(ctx, exc, e, "mkdir", path, NULL); free(path); return r; }
+        if (mkdir(path, mode) != 0) { int e = errno; JSValueRef r = tv_node_throw(ctx, exc, e, "mkdir", path, NULL); free(path); return r; }
         free(path);
         return undef(ctx);
     }
@@ -1056,7 +1056,7 @@ NATIVE(n_fs_mkdir) {
         } else if (errno != EEXIST) {
             int e = errno;
             path[i] = c;
-            JSValueRef r = bm_node_throw(ctx, exc, e, "mkdir", path, NULL);
+            JSValueRef r = tv_node_throw(ctx, exc, e, "mkdir", path, NULL);
             free(path);
             free(first);
             return r;
@@ -1064,7 +1064,7 @@ NATIVE(n_fs_mkdir) {
             struct stat st;
             if (stat(path, &st) == 0 && !S_ISDIR(st.st_mode)) {
                 path[i] = c;
-                JSValueRef r = bm_node_throw(ctx, exc, i == len ? EEXIST : ENOTDIR, "mkdir", path, NULL);
+                JSValueRef r = tv_node_throw(ctx, exc, i == len ? EEXIST : ENOTDIR, "mkdir", path, NULL);
                 free(path);
                 free(first);
                 return r;
@@ -1082,8 +1082,8 @@ NATIVE(n_fs_mkdir) {
     NATIVE(name) { \
         UNUSED; \
         char *path = arg_path(ctx, n, a, 0); \
-        if (!path) return bm_node_throw(ctx, exc, EINVAL, syscall, NULL, NULL); \
-        if ((call) != 0) { int e = errno; JSValueRef r = bm_node_throw(ctx, exc, e, syscall, path, NULL); free(path); return r; } \
+        if (!path) return tv_node_throw(ctx, exc, EINVAL, syscall, NULL, NULL); \
+        if ((call) != 0) { int e = errno; JSValueRef r = tv_node_throw(ctx, exc, e, syscall, path, NULL); free(path); return r; } \
         free(path); \
         return undef(ctx); \
     }
@@ -1095,7 +1095,7 @@ PATH_OP(n_fs_chown, "chown", chown(path, (uid_t)arg_num(ctx, n, a, 1, -1), (gid_
 PATH_OP(n_fs_lchown, "lchown", lchown(path, (uid_t)arg_num(ctx, n, a, 1, -1), (gid_t)arg_num(ctx, n, a, 2, -1)))
 PATH_OP(n_fs_access, "access", access(path, (int)arg_num(ctx, n, a, 1, F_OK)))
 
-static struct timespec bm_node_ts(double secs) {
+static struct timespec tv_node_ts(double secs) {
     struct timespec t;
     t.tv_sec = (time_t)secs;
     t.tv_nsec = (long)((secs - (double)t.tv_sec) * 1e9);
@@ -1104,21 +1104,21 @@ static struct timespec bm_node_ts(double secs) {
 }
 
 /* utimes(path, atime, mtime) / lutimes, in seconds */
-static JSValueRef bm_node_utimes(JSContextRef ctx, size_t n, const JSValueRef a[], JSValueRef *exc, int flags, const char *syscall) {
+static JSValueRef tv_node_utimes(JSContextRef ctx, size_t n, const JSValueRef a[], JSValueRef *exc, int flags, const char *syscall) {
     char *path = arg_path(ctx, n, a, 0);
-    if (!path) return bm_node_throw(ctx, exc, EINVAL, syscall, NULL, NULL);
-    struct timespec t[2] = {bm_node_ts(arg_num(ctx, n, a, 1, 0)), bm_node_ts(arg_num(ctx, n, a, 2, 0))};
-    if (utimensat(AT_FDCWD, path, t, flags) != 0) { int e = errno; JSValueRef r = bm_node_throw(ctx, exc, e, syscall, path, NULL); free(path); return r; }
+    if (!path) return tv_node_throw(ctx, exc, EINVAL, syscall, NULL, NULL);
+    struct timespec t[2] = {tv_node_ts(arg_num(ctx, n, a, 1, 0)), tv_node_ts(arg_num(ctx, n, a, 2, 0))};
+    if (utimensat(AT_FDCWD, path, t, flags) != 0) { int e = errno; JSValueRef r = tv_node_throw(ctx, exc, e, syscall, path, NULL); free(path); return r; }
     free(path);
     return undef(ctx);
 }
-NATIVE(n_fs_utimes) { UNUSED; return bm_node_utimes(ctx, n, a, exc, 0, "utime"); }
-NATIVE(n_fs_lutimes) { UNUSED; return bm_node_utimes(ctx, n, a, exc, AT_SYMLINK_NOFOLLOW, "lutime"); }
+NATIVE(n_fs_utimes) { UNUSED; return tv_node_utimes(ctx, n, a, exc, 0, "utime"); }
+NATIVE(n_fs_lutimes) { UNUSED; return tv_node_utimes(ctx, n, a, exc, AT_SYMLINK_NOFOLLOW, "lutime"); }
 
 NATIVE(n_fs_futimes) {
     UNUSED;
-    struct timespec t[2] = {bm_node_ts(arg_num(ctx, n, a, 1, 0)), bm_node_ts(arg_num(ctx, n, a, 2, 0))};
-    if (futimens((int)arg_num(ctx, n, a, 0, -1), t) != 0) return bm_node_throw(ctx, exc, errno, "futime", NULL, NULL);
+    struct timespec t[2] = {tv_node_ts(arg_num(ctx, n, a, 1, 0)), tv_node_ts(arg_num(ctx, n, a, 2, 0))};
+    if (futimens((int)arg_num(ctx, n, a, 0, -1), t) != 0) return tv_node_throw(ctx, exc, errno, "futime", NULL, NULL);
     return undef(ctx);
 }
 
@@ -1126,7 +1126,7 @@ NATIVE(n_fs_futimes) {
     NATIVE(name) { \
         UNUSED; \
         int fd = (int)arg_num(ctx, n, a, 0, -1); \
-        if ((call) != 0) return bm_node_throw(ctx, exc, errno, syscall, NULL, NULL); \
+        if ((call) != 0) return tv_node_throw(ctx, exc, errno, syscall, NULL, NULL); \
         return undef(ctx); \
     }
 
@@ -1141,27 +1141,27 @@ FD_OP(n_fs_fchmod, "fchmod", fchmod(fd, (mode_t)arg_num(ctx, n, a, 1, 0)))
 FD_OP(n_fs_fchown, "fchown", fchown(fd, (uid_t)arg_num(ctx, n, a, 1, -1), (gid_t)arg_num(ctx, n, a, 2, -1)))
 
 /* two-path operations: rename(from, to), link, symlink(target, path) */
-static JSValueRef bm_node_two_paths(JSContextRef ctx, size_t n, const JSValueRef a[], JSValueRef *exc, const char *syscall, int which) {
+static JSValueRef tv_node_two_paths(JSContextRef ctx, size_t n, const JSValueRef a[], JSValueRef *exc, const char *syscall, int which) {
     char *from = arg_path(ctx, n, a, 0), *to = arg_path(ctx, n, a, 1);
-    if (!from || !to) { free(from); free(to); return bm_node_throw(ctx, exc, EINVAL, syscall, NULL, NULL); }
+    if (!from || !to) { free(from); free(to); return tv_node_throw(ctx, exc, EINVAL, syscall, NULL, NULL); }
     int r = which == 0 ? rename(from, to) : which == 1 ? link(from, to) : symlink(from, to);
     JSValueRef out = undef(ctx);
-    if (r != 0) out = bm_node_throw(ctx, exc, errno, syscall, from, to);
+    if (r != 0) out = tv_node_throw(ctx, exc, errno, syscall, from, to);
     free(from);
     free(to);
     return out;
 }
-NATIVE(n_fs_rename) { UNUSED; return bm_node_two_paths(ctx, n, a, exc, "rename", 0); }
-NATIVE(n_fs_link) { UNUSED; return bm_node_two_paths(ctx, n, a, exc, "link", 1); }
-NATIVE(n_fs_symlink) { UNUSED; return bm_node_two_paths(ctx, n, a, exc, "symlink", 2); }
+NATIVE(n_fs_rename) { UNUSED; return tv_node_two_paths(ctx, n, a, exc, "rename", 0); }
+NATIVE(n_fs_link) { UNUSED; return tv_node_two_paths(ctx, n, a, exc, "link", 1); }
+NATIVE(n_fs_symlink) { UNUSED; return tv_node_two_paths(ctx, n, a, exc, "symlink", 2); }
 
 NATIVE(n_fs_readlink) {
     UNUSED;
     char *path = arg_path(ctx, n, a, 0);
-    if (!path) return bm_node_throw(ctx, exc, EINVAL, "readlink", NULL, NULL);
+    if (!path) return tv_node_throw(ctx, exc, EINVAL, "readlink", NULL, NULL);
     char buf[PATH_MAX + 1];
     ssize_t k = readlink(path, buf, PATH_MAX);
-    if (k < 0) { int e = errno; JSValueRef r = bm_node_throw(ctx, exc, e, "readlink", path, NULL); free(path); return r; }
+    if (k < 0) { int e = errno; JSValueRef r = tv_node_throw(ctx, exc, e, "readlink", path, NULL); free(path); return r; }
     buf[k] = 0;
     free(path);
     return str(ctx, buf);
@@ -1170,9 +1170,9 @@ NATIVE(n_fs_readlink) {
 NATIVE(n_fs_realpath) {
     UNUSED;
     char *path = arg_path(ctx, n, a, 0);
-    if (!path) return bm_node_throw(ctx, exc, EINVAL, "realpath", NULL, NULL);
+    if (!path) return tv_node_throw(ctx, exc, EINVAL, "realpath", NULL, NULL);
     char buf[PATH_MAX + 1];
-    if (!realpath(path, buf)) { int e = errno; JSValueRef r = bm_node_throw(ctx, exc, e, "realpath", path, NULL); free(path); return r; }
+    if (!realpath(path, buf)) { int e = errno; JSValueRef r = tv_node_throw(ctx, exc, e, "realpath", path, NULL); free(path); return r; }
     free(path);
     return str(ctx, buf);
 }
@@ -1182,25 +1182,25 @@ NATIVE(n_fs_realpath) {
 NATIVE(n_fs_copyfile) {
     UNUSED;
     char *src = arg_path(ctx, n, a, 0), *dest = arg_path(ctx, n, a, 1);
-    if (!src || !dest) { free(src); free(dest); return bm_node_throw(ctx, exc, EINVAL, "copyfile", NULL, NULL); }
+    if (!src || !dest) { free(src); free(dest); return tv_node_throw(ctx, exc, EINVAL, "copyfile", NULL, NULL); }
     int mode = (int)arg_num(ctx, n, a, 2, 0);
     JSValueRef out = undef(ctx);
     if ((mode & 1) && access(dest, F_OK) == 0) {
-        out = bm_node_throw(ctx, exc, EEXIST, "copyfile", src, dest);
+        out = tv_node_throw(ctx, exc, EEXIST, "copyfile", src, dest);
     } else {
 #if defined(__APPLE__)
-        if (copyfile(src, dest, NULL, COPYFILE_ALL | ((mode & 2) ? COPYFILE_CLONE : 0)) != 0) out = bm_node_throw(ctx, exc, errno, "copyfile", src, dest);
+        if (copyfile(src, dest, NULL, COPYFILE_ALL | ((mode & 2) ? COPYFILE_CLONE : 0)) != 0) out = tv_node_throw(ctx, exc, errno, "copyfile", src, dest);
 #else
         int in = open(src, O_RDONLY | O_CLOEXEC);
         struct stat st;
         int o = in >= 0 && fstat(in, &st) == 0 ? open(dest, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, st.st_mode & 0777) : -1;
         if (in < 0 || o < 0) {
-            out = bm_node_throw(ctx, exc, errno, "copyfile", src, dest);
+            out = tv_node_throw(ctx, exc, errno, "copyfile", src, dest);
         } else {
             off_t left = st.st_size;
             while (left > 0) {
                 ssize_t k = sendfile(o, in, NULL, (size_t)left);
-                if (k <= 0) { if (k < 0 && errno == EINTR) continue; if (k < 0) out = bm_node_throw(ctx, exc, errno, "copyfile", src, dest); break; }
+                if (k <= 0) { if (k < 0 && errno == EINTR) continue; if (k < 0) out = tv_node_throw(ctx, exc, errno, "copyfile", src, dest); break; }
                 left -= k;
             }
         }
@@ -1216,7 +1216,7 @@ NATIVE(n_fs_copyfile) {
 NATIVE(n_fs_mkdtemp) {
     UNUSED;
     char *prefix = arg_path(ctx, n, a, 0);
-    if (!prefix) return bm_node_throw(ctx, exc, EINVAL, "mkdtemp", NULL, NULL);
+    if (!prefix) return tv_node_throw(ctx, exc, EINVAL, "mkdtemp", NULL, NULL);
     size_t pl = strlen(prefix);
     char *tmpl = malloc(pl + 7);
     memcpy(tmpl, prefix, pl);
@@ -1225,7 +1225,7 @@ NATIVE(n_fs_mkdtemp) {
     if (!mkdtemp(tmpl)) {
         char shown[PATH_MAX + 8];
         snprintf(shown, sizeof shown, "%sXXXXXX", prefix);
-        out = bm_node_throw(ctx, exc, errno, "mkdtemp", shown, NULL);
+        out = tv_node_throw(ctx, exc, errno, "mkdtemp", shown, NULL);
     } else {
         out = str(ctx, tmpl);
     }
@@ -1238,9 +1238,9 @@ NATIVE(n_fs_mkdtemp) {
 NATIVE(n_fs_statfs) {
     UNUSED;
     char *path = arg_path(ctx, n, a, 0);
-    if (!path) return bm_node_throw(ctx, exc, EINVAL, "statfs", NULL, NULL);
+    if (!path) return tv_node_throw(ctx, exc, EINVAL, "statfs", NULL, NULL);
     struct statfs s;
-    if (statfs(path, &s) != 0) { int e = errno; JSValueRef r = bm_node_throw(ctx, exc, e, "statfs", path, NULL); free(path); return r; }
+    if (statfs(path, &s) != 0) { int e = errno; JSValueRef r = tv_node_throw(ctx, exc, e, "statfs", path, NULL); free(path); return r; }
     free(path);
     JSValueRef v[7] = {num(ctx, (double)s.f_type), num(ctx, (double)s.f_bsize), num(ctx, (double)s.f_blocks), num(ctx, (double)s.f_bfree),
                        num(ctx, (double)s.f_bavail), num(ctx, (double)s.f_files), num(ctx, (double)s.f_ffree)};
@@ -1248,7 +1248,7 @@ NATIVE(n_fs_statfs) {
 }
 
 /* removes path and, if it's a directory, everything in it */
-static int bm_node_rm_tree(char *path) {
+static int tv_node_rm_tree(char *path) {
     struct stat st;
     if (lstat(path, &st) != 0) return -1;
     if (!S_ISDIR(st.st_mode)) return unlink(path);
@@ -1264,7 +1264,7 @@ static int bm_node_rm_tree(char *path) {
         memcpy(child, path, pl);
         child[pl] = '/';
         memcpy(child + pl + 1, e->d_name, nl + 1);
-        if (bm_node_rm_tree(child) != 0) rc = -1;
+        if (tv_node_rm_tree(child) != 0) rc = -1;
         free(child);
         if (rc) break;
     }
@@ -1279,13 +1279,13 @@ static int bm_node_rm_tree(char *path) {
 NATIVE(n_fs_rm) {
     UNUSED;
     char *path = arg_path(ctx, n, a, 0);
-    if (!path) return bm_node_throw(ctx, exc, EINVAL, "rm", NULL, NULL);
+    if (!path) return tv_node_throw(ctx, exc, EINVAL, "rm", NULL, NULL);
     bool recursive = n > 2 && JSValueToBoolean(ctx, a[2]);
     struct stat st;
     int rc;
     if (lstat(path, &st) != 0) rc = -1;
     else if (S_ISDIR(st.st_mode) && !recursive) { errno = EISDIR; rc = -1; }
-    else rc = recursive ? bm_node_rm_tree(path) : unlink(path);
+    else rc = recursive ? tv_node_rm_tree(path) : unlink(path);
     JSValueRef out = undef(ctx);
     if (rc != 0) {
         int e = errno;
@@ -1301,7 +1301,7 @@ NATIVE(n_fs_rm) {
             set(ctx, err, "path", str(ctx, path));
             *exc = err;
         } else {
-            out = bm_node_throw(ctx, exc, e, "rm", path, NULL);
+            out = tv_node_throw(ctx, exc, e, "rm", path, NULL);
         }
     }
     free(path);
@@ -1309,7 +1309,7 @@ NATIVE(n_fs_rm) {
 }
 
 /* whole files: readFileUtf8(path | fd, flags) and writeFileUtf8(path | fd, data, flags, mode) */
-static int bm_node_open_arg(JSContextRef ctx, size_t n, const JSValueRef a[], size_t i, int flags, int mode, bool *owned, char **path) {
+static int tv_node_open_arg(JSContextRef ctx, size_t n, const JSValueRef a[], size_t i, int flags, int mode, bool *owned, char **path) {
     *path = NULL;
     if (i < n && JSValueIsNumber(ctx, a[i])) {
         *owned = false;
@@ -1325,34 +1325,34 @@ NATIVE(n_fs_read_utf8) {
     UNUSED;
     bool owned;
     char *path;
-    int fd = bm_node_open_arg(ctx, n, a, 0, (int)arg_num(ctx, n, a, 1, O_RDONLY), 0666, &owned, &path);
-    if (fd < 0) { int e = errno; JSValueRef r = bm_node_throw(ctx, exc, e, "open", path, NULL); free(path); return r; }
-    bm_sb sb = {0};
+    int fd = tv_node_open_arg(ctx, n, a, 0, (int)arg_num(ctx, n, a, 1, O_RDONLY), 0666, &owned, &path);
+    if (fd < 0) { int e = errno; JSValueRef r = tv_node_throw(ctx, exc, e, "open", path, NULL); free(path); return r; }
+    tv_sb sb = {0};
     struct stat st;
-    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) bm_sb_grow(&sb, (size_t)st.st_size + 1);
+    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) tv_sb_grow(&sb, (size_t)st.st_size + 1);
     else if (fstat(fd, &st) == 0 && S_ISDIR(st.st_mode)) {
         if (owned) close(fd);
-        JSValueRef r = bm_node_throw(ctx, exc, EISDIR, "read", NULL, NULL);
+        JSValueRef r = tv_node_throw(ctx, exc, EISDIR, "read", NULL, NULL);
         free(path);
         return r;
     }
     for (;;) {
-        if (sb.cap - sb.len < 65536) bm_sb_grow(&sb, sb.len + 65536);
+        if (sb.cap - sb.len < 65536) tv_sb_grow(&sb, sb.len + 65536);
         ssize_t k = read(fd, sb.data + sb.len, sb.cap - sb.len);
         if (k > 0) { sb.len += (size_t)k; continue; }
         if (k == 0) break;
         if (errno == EINTR) continue;
         int e = errno;
         if (owned) close(fd);
-        bm_sb_free(&sb);
-        JSValueRef r = bm_node_throw(ctx, exc, e, "read", NULL, NULL);
+        tv_sb_free(&sb);
+        JSValueRef r = tv_node_throw(ctx, exc, e, "read", NULL, NULL);
         free(path);
         return r;
     }
     if (owned) close(fd);
     free(path);
-    JSValueRef out = bm_js_str(sb.data ? sb.data : "", sb.len);
-    bm_sb_free(&sb);
+    JSValueRef out = tv_js_str(sb.data ? sb.data : "", sb.len);
+    tv_sb_free(&sb);
     return out;
 }
 
@@ -1361,8 +1361,8 @@ NATIVE(n_fs_write_utf8) {
     if (n < 2) return undef(ctx);
     bool owned;
     char *path;
-    int fd = bm_node_open_arg(ctx, n, a, 0, (int)arg_num(ctx, n, a, 2, O_WRONLY | O_CREAT | O_TRUNC), (int)arg_num(ctx, n, a, 3, 0666), &owned, &path);
-    if (fd < 0) { int e = errno; JSValueRef r = bm_node_throw(ctx, exc, e, "open", path, NULL); free(path); return r; }
+    int fd = tv_node_open_arg(ctx, n, a, 0, (int)arg_num(ctx, n, a, 2, O_WRONLY | O_CREAT | O_TRUNC), (int)arg_num(ctx, n, a, 3, 0666), &owned, &path);
+    if (fd < 0) { int e = errno; JSValueRef r = tv_node_throw(ctx, exc, e, "open", path, NULL); free(path); return r; }
     JSStringRef s = JSValueToStringCopy(ctx, a[1], NULL);
     size_t cap = JSStringGetMaximumUTF8CStringSize(s);
     char *text = malloc(cap);
@@ -1374,7 +1374,7 @@ NATIVE(n_fs_write_utf8) {
         ssize_t w = write(fd, text + off, len - off);
         if (w < 0) {
             if (errno == EINTR) continue;
-            out = bm_node_throw(ctx, exc, errno, "write", NULL, NULL);
+            out = tv_node_throw(ctx, exc, errno, "write", NULL, NULL);
             break;
         }
         off += (size_t)w;
@@ -1405,148 +1405,148 @@ NATIVE(n_fs_module_stat) {
     return num(ctx, r);
 }
 
-void bm_node_fs_install(JSContextRef ctx, JSObjectRef native) {
+void tv_node_fs_install(JSContextRef ctx, JSObjectRef native) {
     JSObjectRef fs = JSObjectMake(ctx, NULL, NULL);
-    bm_js_def(ctx, fs, "open", n_fs_open);
-    bm_js_def(ctx, fs, "close", n_fs_close);
-    bm_js_def(ctx, fs, "read", n_fs_read);
-    bm_js_def(ctx, fs, "write", n_fs_write);
-    bm_js_def(ctx, fs, "stat", n_fs_stat);
-    bm_js_def(ctx, fs, "lstat", n_fs_lstat);
-    bm_js_def(ctx, fs, "fstat", n_fs_fstat);
-    bm_js_def(ctx, fs, "readdir", n_fs_readdir);
-    bm_js_def(ctx, fs, "mkdir", n_fs_mkdir);
-    bm_js_def(ctx, fs, "rmdir", n_fs_rmdir);
-    bm_js_def(ctx, fs, "unlink", n_fs_unlink);
-    bm_js_def(ctx, fs, "chmod", n_fs_chmod);
-    bm_js_def(ctx, fs, "chown", n_fs_chown);
-    bm_js_def(ctx, fs, "lchown", n_fs_lchown);
-    bm_js_def(ctx, fs, "access", n_fs_access);
-    bm_js_def(ctx, fs, "utimes", n_fs_utimes);
-    bm_js_def(ctx, fs, "lutimes", n_fs_lutimes);
-    bm_js_def(ctx, fs, "futimes", n_fs_futimes);
-    bm_js_def(ctx, fs, "fsync", n_fs_fsync);
-    bm_js_def(ctx, fs, "fdatasync", n_fs_fdatasync);
-    bm_js_def(ctx, fs, "ftruncate", n_fs_ftruncate);
-    bm_js_def(ctx, fs, "fchmod", n_fs_fchmod);
-    bm_js_def(ctx, fs, "fchown", n_fs_fchown);
-    bm_js_def(ctx, fs, "rename", n_fs_rename);
-    bm_js_def(ctx, fs, "link", n_fs_link);
-    bm_js_def(ctx, fs, "symlink", n_fs_symlink);
-    bm_js_def(ctx, fs, "readlink", n_fs_readlink);
-    bm_js_def(ctx, fs, "realpath", n_fs_realpath);
-    bm_js_def(ctx, fs, "copyFile", n_fs_copyfile);
-    bm_js_def(ctx, fs, "mkdtemp", n_fs_mkdtemp);
-    bm_js_def(ctx, fs, "statfs", n_fs_statfs);
-    bm_js_def(ctx, fs, "rm", n_fs_rm);
-    bm_js_def(ctx, fs, "readFileUtf8", n_fs_read_utf8);
-    bm_js_def(ctx, fs, "writeFileUtf8", n_fs_write_utf8);
-    bm_js_def(ctx, fs, "exists", n_fs_exists);
-    bm_js_def(ctx, fs, "internalModuleStat", n_fs_module_stat);
+    tv_js_def(ctx, fs, "open", n_fs_open);
+    tv_js_def(ctx, fs, "close", n_fs_close);
+    tv_js_def(ctx, fs, "read", n_fs_read);
+    tv_js_def(ctx, fs, "write", n_fs_write);
+    tv_js_def(ctx, fs, "stat", n_fs_stat);
+    tv_js_def(ctx, fs, "lstat", n_fs_lstat);
+    tv_js_def(ctx, fs, "fstat", n_fs_fstat);
+    tv_js_def(ctx, fs, "readdir", n_fs_readdir);
+    tv_js_def(ctx, fs, "mkdir", n_fs_mkdir);
+    tv_js_def(ctx, fs, "rmdir", n_fs_rmdir);
+    tv_js_def(ctx, fs, "unlink", n_fs_unlink);
+    tv_js_def(ctx, fs, "chmod", n_fs_chmod);
+    tv_js_def(ctx, fs, "chown", n_fs_chown);
+    tv_js_def(ctx, fs, "lchown", n_fs_lchown);
+    tv_js_def(ctx, fs, "access", n_fs_access);
+    tv_js_def(ctx, fs, "utimes", n_fs_utimes);
+    tv_js_def(ctx, fs, "lutimes", n_fs_lutimes);
+    tv_js_def(ctx, fs, "futimes", n_fs_futimes);
+    tv_js_def(ctx, fs, "fsync", n_fs_fsync);
+    tv_js_def(ctx, fs, "fdatasync", n_fs_fdatasync);
+    tv_js_def(ctx, fs, "ftruncate", n_fs_ftruncate);
+    tv_js_def(ctx, fs, "fchmod", n_fs_fchmod);
+    tv_js_def(ctx, fs, "fchown", n_fs_fchown);
+    tv_js_def(ctx, fs, "rename", n_fs_rename);
+    tv_js_def(ctx, fs, "link", n_fs_link);
+    tv_js_def(ctx, fs, "symlink", n_fs_symlink);
+    tv_js_def(ctx, fs, "readlink", n_fs_readlink);
+    tv_js_def(ctx, fs, "realpath", n_fs_realpath);
+    tv_js_def(ctx, fs, "copyFile", n_fs_copyfile);
+    tv_js_def(ctx, fs, "mkdtemp", n_fs_mkdtemp);
+    tv_js_def(ctx, fs, "statfs", n_fs_statfs);
+    tv_js_def(ctx, fs, "rm", n_fs_rm);
+    tv_js_def(ctx, fs, "readFileUtf8", n_fs_read_utf8);
+    tv_js_def(ctx, fs, "writeFileUtf8", n_fs_write_utf8);
+    tv_js_def(ctx, fs, "exists", n_fs_exists);
+    tv_js_def(ctx, fs, "internalModuleStat", n_fs_module_stat);
     set(ctx, native, "fs", fs);
 }
 
 /* ------------------------------------------------------------------ crypto (runtime/crypto.c, through
- * bm_crypto: there when the program links the TLS archive) */
+ * tv_crypto: there when the program links the TLS archive) */
 
-typedef struct { void *ctx; bool hmac; } bm_node_mac;
+typedef struct { void *ctx; bool hmac; } tv_node_mac;
 
-static void bm_node_mac_finalize(JSObjectRef o) {
-    bm_node_mac *m = JSObjectGetPrivate(o);
+static void tv_node_mac_finalize(JSObjectRef o) {
+    tv_node_mac *m = JSObjectGetPrivate(o);
     if (!m) return;
-    if (m->ctx && bm_crypto) (m->hmac ? bm_crypto->hmac_free : bm_crypto->hash_free)(m->ctx);
+    if (m->ctx && tv_crypto) (m->hmac ? tv_crypto->hmac_free : tv_crypto->hash_free)(m->ctx);
     free(m);
 }
 
-static JSClassRef bm_node_mac_class(void) {
+static JSClassRef tv_node_mac_class(void) {
     static JSClassRef cls;
     if (!cls) {
         JSClassDefinition def = kJSClassDefinitionEmpty;
         def.className = "CryptoHandle";
-        def.finalize = bm_node_mac_finalize;
+        def.finalize = tv_node_mac_finalize;
         cls = JSClassCreate(&def);
     }
     return cls;
 }
 
-static JSValueRef bm_node_crypto_missing(JSContextRef ctx, JSValueRef *exc) {
+static JSValueRef tv_node_crypto_missing(JSContextRef ctx, JSValueRef *exc) {
     JSValueRef msg = str(ctx, "crypto is not available in this program (it was built without the TLS library)");
     *exc = JSObjectMakeError(ctx, 1, &msg, NULL);
     return undef(ctx);
 }
 
-static bm_node_mac *bm_node_mac_of(JSContextRef ctx, size_t n, const JSValueRef a[]) {
-    if (n < 1 || !JSValueIsObjectOfClass(ctx, a[0], bm_node_mac_class())) return NULL;
+static tv_node_mac *tv_node_mac_of(JSContextRef ctx, size_t n, const JSValueRef a[]) {
+    if (n < 1 || !JSValueIsObjectOfClass(ctx, a[0], tv_node_mac_class())) return NULL;
     return JSObjectGetPrivate((JSObjectRef)a[0]);
 }
 
-static JSValueRef bm_node_mac_new(JSContextRef ctx, void *c, bool hmac) {
-    bm_node_mac *m = malloc(sizeof *m);
+static JSValueRef tv_node_mac_new(JSContextRef ctx, void *c, bool hmac) {
+    tv_node_mac *m = malloc(sizeof *m);
     m->ctx = c;
     m->hmac = hmac;
-    return JSObjectMake(ctx, bm_node_mac_class(), m);
+    return JSObjectMake(ctx, tv_node_mac_class(), m);
 }
 
 /* hashNew(name) -> handle, or null for a digest BoringSSL doesn't have */
 NATIVE(n_crypto_hash_new) {
     UNUSED;
-    if (!bm_crypto) return bm_node_crypto_missing(ctx, exc);
+    if (!tv_crypto) return tv_node_crypto_missing(ctx, exc);
     char *name = arg_cstr(ctx, n, a, 0);
-    void *c = name ? bm_crypto->hash_new(name) : NULL;
+    void *c = name ? tv_crypto->hash_new(name) : NULL;
     free(name);
-    return c ? bm_node_mac_new(ctx, c, false) : JSValueMakeNull(ctx);
+    return c ? tv_node_mac_new(ctx, c, false) : JSValueMakeNull(ctx);
 }
 
 /* hmacNew(name, key bytes) -> handle, or null */
 NATIVE(n_crypto_hmac_new) {
     UNUSED;
-    if (!bm_crypto) return bm_node_crypto_missing(ctx, exc);
+    if (!tv_crypto) return tv_node_crypto_missing(ctx, exc);
     char *name = arg_cstr(ctx, n, a, 0);
     uint8_t *k = NULL;
     size_t kl = 0;
-    if (n > 1) bm_js_bytes_view(a[1], &k, &kl);
-    void *c = name ? bm_crypto->hmac_new(name, k ? k : (const uint8_t *)"", kl) : NULL;
+    if (n > 1) tv_js_bytes_view(a[1], &k, &kl);
+    void *c = name ? tv_crypto->hmac_new(name, k ? k : (const uint8_t *)"", kl) : NULL;
     free(name);
-    return c ? bm_node_mac_new(ctx, c, true) : JSValueMakeNull(ctx);
+    return c ? tv_node_mac_new(ctx, c, true) : JSValueMakeNull(ctx);
 }
 
 /* macUpdate(handle, bytes) */
 NATIVE(n_crypto_update) {
     UNUSED;
-    bm_node_mac *m = bm_node_mac_of(ctx, n, a);
+    tv_node_mac *m = tv_node_mac_of(ctx, n, a);
     uint8_t *p;
     size_t len;
-    if (!m || !m->ctx || n < 2 || !bm_js_bytes_view(a[1], &p, &len)) return undef(ctx);
-    (m->hmac ? bm_crypto->hmac_update : bm_crypto->hash_update)(m->ctx, p, len);
+    if (!m || !m->ctx || n < 2 || !tv_js_bytes_view(a[1], &p, &len)) return undef(ctx);
+    (m->hmac ? tv_crypto->hmac_update : tv_crypto->hash_update)(m->ctx, p, len);
     return undef(ctx);
 }
 
 /* macDigest(handle) -> Uint8Array (the handle is spent) */
 NATIVE(n_crypto_digest) {
     UNUSED;
-    bm_node_mac *m = bm_node_mac_of(ctx, n, a);
+    tv_node_mac *m = tv_node_mac_of(ctx, n, a);
     if (!m || !m->ctx) return undef(ctx);
     uint8_t out[64];
-    size_t len = (m->hmac ? bm_crypto->hmac_final : bm_crypto->hash_final)(m->ctx, out);
-    (m->hmac ? bm_crypto->hmac_free : bm_crypto->hash_free)(m->ctx);
+    size_t len = (m->hmac ? tv_crypto->hmac_final : tv_crypto->hash_final)(m->ctx, out);
+    (m->hmac ? tv_crypto->hmac_free : tv_crypto->hash_free)(m->ctx);
     m->ctx = NULL;
-    return bm_js_bytes_copy(out, len);
+    return tv_js_bytes_copy(out, len);
 }
 
 /* hashCopy(handle) -> a handle with the same state */
 NATIVE(n_crypto_hash_copy) {
     UNUSED;
-    bm_node_mac *m = bm_node_mac_of(ctx, n, a);
+    tv_node_mac *m = tv_node_mac_of(ctx, n, a);
     if (!m || !m->ctx || m->hmac) return JSValueMakeNull(ctx);
-    void *c = bm_crypto->hash_copy(m->ctx);
-    return c ? bm_node_mac_new(ctx, c, false) : JSValueMakeNull(ctx);
+    void *c = tv_crypto->hash_copy(m->ctx);
+    return c ? tv_node_mac_new(ctx, c, false) : JSValueMakeNull(ctx);
 }
 
 NATIVE(n_crypto_digest_size) {
     UNUSED;
-    if (!bm_crypto) return num(ctx, -1);
+    if (!tv_crypto) return num(ctx, -1);
     char *name = arg_cstr(ctx, n, a, 0);
-    int size = name ? bm_crypto->digest_size(name) : -1;
+    int size = name ? tv_crypto->digest_size(name) : -1;
     free(name);
     return num(ctx, size);
 }
@@ -1556,15 +1556,15 @@ NATIVE(n_crypto_random_fill) {
     UNUSED;
     uint8_t *p;
     size_t len;
-    if (n < 1 || !bm_js_bytes_view(a[0], &p, &len)) return undef(ctx);
-    if (bm_crypto) bm_crypto->random(p, len);
+    if (n < 1 || !tv_js_bytes_view(a[0], &p, &len)) return undef(ctx);
+    if (tv_crypto) tv_crypto->random(p, len);
     else arc4random_buf(p, len);
     return undef(ctx);
 }
 
-static bool bm_node_bytes_arg(size_t n, const JSValueRef a[], size_t i, uint8_t **p, size_t *len) {
+static bool tv_node_bytes_arg(size_t n, const JSValueRef a[], size_t i, uint8_t **p, size_t *len) {
     static uint8_t empty;
-    if (i < n && bm_js_bytes_view(a[i], p, len)) return true;
+    if (i < n && tv_js_bytes_view(a[i], p, len)) return true;
     *p = &empty;
     *len = 0;
     return false;
@@ -1573,17 +1573,17 @@ static bool bm_node_bytes_arg(size_t n, const JSValueRef a[], size_t i, uint8_t 
 /* pbkdf2(digest, password, salt, iterations, keylen) -> Uint8Array, or null for an unknown digest */
 NATIVE(n_crypto_pbkdf2) {
     UNUSED;
-    if (!bm_crypto) return bm_node_crypto_missing(ctx, exc);
+    if (!tv_crypto) return tv_node_crypto_missing(ctx, exc);
     char *digest = arg_cstr(ctx, n, a, 0);
     uint8_t *pass, *salt;
     size_t pl, sl;
-    bm_node_bytes_arg(n, a, 1, &pass, &pl);
-    bm_node_bytes_arg(n, a, 2, &salt, &sl);
+    tv_node_bytes_arg(n, a, 1, &pass, &pl);
+    tv_node_bytes_arg(n, a, 2, &salt, &sl);
     size_t keylen = (size_t)arg_num(ctx, n, a, 4, 0);
     uint8_t *out = malloc(keylen ? keylen : 1);
-    bool ok = digest && bm_crypto->pbkdf2(digest, pass, pl, salt, sl, (uint32_t)arg_num(ctx, n, a, 3, 1), out, keylen);
+    bool ok = digest && tv_crypto->pbkdf2(digest, pass, pl, salt, sl, (uint32_t)arg_num(ctx, n, a, 3, 1), out, keylen);
     free(digest);
-    JSValueRef r = ok ? bm_js_bytes_copy(out, keylen) : JSValueMakeNull(ctx);
+    JSValueRef r = ok ? tv_js_bytes_copy(out, keylen) : JSValueMakeNull(ctx);
     free(out);
     return r;
 }
@@ -1591,16 +1591,16 @@ NATIVE(n_crypto_pbkdf2) {
 /* scrypt(password, salt, N, r, p, maxmem, keylen) -> Uint8Array, or null if the parameters fail */
 NATIVE(n_crypto_scrypt) {
     UNUSED;
-    if (!bm_crypto) return bm_node_crypto_missing(ctx, exc);
+    if (!tv_crypto) return tv_node_crypto_missing(ctx, exc);
     uint8_t *pass, *salt;
     size_t pl, sl;
-    bm_node_bytes_arg(n, a, 0, &pass, &pl);
-    bm_node_bytes_arg(n, a, 1, &salt, &sl);
+    tv_node_bytes_arg(n, a, 0, &pass, &pl);
+    tv_node_bytes_arg(n, a, 1, &salt, &sl);
     size_t keylen = (size_t)arg_num(ctx, n, a, 6, 0);
     uint8_t *out = malloc(keylen ? keylen : 1);
-    bool ok = bm_crypto->scrypt(pass, pl, salt, sl, (uint64_t)arg_num(ctx, n, a, 2, 16384), (uint64_t)arg_num(ctx, n, a, 3, 8),
+    bool ok = tv_crypto->scrypt(pass, pl, salt, sl, (uint64_t)arg_num(ctx, n, a, 2, 16384), (uint64_t)arg_num(ctx, n, a, 3, 8),
                                 (uint64_t)arg_num(ctx, n, a, 4, 1), (size_t)arg_num(ctx, n, a, 5, 32 << 20), out, keylen);
-    JSValueRef r = ok ? bm_js_bytes_copy(out, keylen) : JSValueMakeNull(ctx);
+    JSValueRef r = ok ? tv_js_bytes_copy(out, keylen) : JSValueMakeNull(ctx);
     free(out);
     return r;
 }
@@ -1608,18 +1608,18 @@ NATIVE(n_crypto_scrypt) {
 /* hkdf(digest, key, salt, info, keylen) -> Uint8Array, or null */
 NATIVE(n_crypto_hkdf) {
     UNUSED;
-    if (!bm_crypto) return bm_node_crypto_missing(ctx, exc);
+    if (!tv_crypto) return tv_node_crypto_missing(ctx, exc);
     char *digest = arg_cstr(ctx, n, a, 0);
     uint8_t *key, *salt, *info;
     size_t kl, sl, il;
-    bm_node_bytes_arg(n, a, 1, &key, &kl);
-    bm_node_bytes_arg(n, a, 2, &salt, &sl);
-    bm_node_bytes_arg(n, a, 3, &info, &il);
+    tv_node_bytes_arg(n, a, 1, &key, &kl);
+    tv_node_bytes_arg(n, a, 2, &salt, &sl);
+    tv_node_bytes_arg(n, a, 3, &info, &il);
     size_t keylen = (size_t)arg_num(ctx, n, a, 4, 0);
     uint8_t *out = malloc(keylen ? keylen : 1);
-    bool ok = digest && bm_crypto->hkdf(digest, key, kl, salt, sl, info, il, out, keylen);
+    bool ok = digest && tv_crypto->hkdf(digest, key, kl, salt, sl, info, il, out, keylen);
     free(digest);
-    JSValueRef r = ok ? bm_js_bytes_copy(out, keylen) : JSValueMakeNull(ctx);
+    JSValueRef r = ok ? tv_js_bytes_copy(out, keylen) : JSValueMakeNull(ctx);
     free(out);
     return r;
 }
@@ -1629,8 +1629,8 @@ NATIVE(n_crypto_equal) {
     UNUSED;
     uint8_t *x, *y;
     size_t xl, yl;
-    if (!bm_node_bytes_arg(n, a, 0, &x, &xl) || !bm_node_bytes_arg(n, a, 1, &y, &yl) || xl != yl) return JSValueMakeBoolean(ctx, false);
-    if (bm_crypto) return JSValueMakeBoolean(ctx, bm_crypto->equal(x, y, xl));
+    if (!tv_node_bytes_arg(n, a, 0, &x, &xl) || !tv_node_bytes_arg(n, a, 1, &y, &yl) || xl != yl) return JSValueMakeBoolean(ctx, false);
+    if (tv_crypto) return JSValueMakeBoolean(ctx, tv_crypto->equal(x, y, xl));
     unsigned char d = 0;
     for (size_t i = 0; i < xl; i++) d |= x[i] ^ y[i];
     return JSValueMakeBoolean(ctx, d == 0);
@@ -1645,105 +1645,105 @@ NATIVE(n_crypto_equal) {
 #include <pthread.h>
 #include <sys/socket.h>
 
-typedef struct bm_node_job {
-    struct bm_node_job *next;
-    void (*work)(struct bm_node_job *job);                          /* on a worker thread */
-    size_t (*done)(JSContextRef ctx, struct bm_node_job *job, JSValueRef *args);  /* on the loop: the callback's arguments (up to 4) */
-    void (*free)(struct bm_node_job *job);
+typedef struct tv_node_job {
+    struct tv_node_job *next;
+    void (*work)(struct tv_node_job *job);                          /* on a worker thread */
+    size_t (*done)(JSContextRef ctx, struct tv_node_job *job, JSValueRef *args);  /* on the loop: the callback's arguments (up to 4) */
+    void (*free)(struct tv_node_job *job);
     JSObjectRef callback;
-} bm_node_job;
+} tv_node_job;
 
-static pthread_mutex_t bm_node_work_mu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t bm_node_work_cv = PTHREAD_COND_INITIALIZER;
-static bm_node_job *bm_node_jobs, *bm_node_jobs_tail, *bm_node_done;
-static int bm_node_workers, bm_node_idle;
-static int bm_node_wake[2] = {-1, -1};
-static bm_io bm_node_work_io;
+static pthread_mutex_t tv_node_work_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t tv_node_work_cv = PTHREAD_COND_INITIALIZER;
+static tv_node_job *tv_node_jobs, *tv_node_jobs_tail, *tv_node_done;
+static int tv_node_workers, tv_node_idle;
+static int tv_node_wake[2] = {-1, -1};
+static tv_io tv_node_work_io;
 
-static void *bm_node_worker(void *arg) {
+static void *tv_node_worker(void *arg) {
     (void)arg;
-    pthread_mutex_lock(&bm_node_work_mu);
+    pthread_mutex_lock(&tv_node_work_mu);
     for (;;) {
-        while (!bm_node_jobs) {
-            bm_node_idle++;
-            pthread_cond_wait(&bm_node_work_cv, &bm_node_work_mu);
-            bm_node_idle--;
+        while (!tv_node_jobs) {
+            tv_node_idle++;
+            pthread_cond_wait(&tv_node_work_cv, &tv_node_work_mu);
+            tv_node_idle--;
         }
-        bm_node_job *job = bm_node_jobs;
-        bm_node_jobs = job->next;
-        if (!bm_node_jobs) bm_node_jobs_tail = NULL;
-        pthread_mutex_unlock(&bm_node_work_mu);
+        tv_node_job *job = tv_node_jobs;
+        tv_node_jobs = job->next;
+        if (!tv_node_jobs) tv_node_jobs_tail = NULL;
+        pthread_mutex_unlock(&tv_node_work_mu);
         job->work(job);
-        pthread_mutex_lock(&bm_node_work_mu);
-        job->next = bm_node_done;
-        bm_node_done = job;
+        pthread_mutex_lock(&tv_node_work_mu);
+        job->next = tv_node_done;
+        tv_node_done = job;
         char one = 1;
-        ssize_t w = write(bm_node_wake[1], &one, 1);
+        ssize_t w = write(tv_node_wake[1], &one, 1);
         (void)w;
     }
     return NULL;
 }
 
-static void bm_node_work_ready(bm_io *h, bool readable, bool writable, bool broken) {
+static void tv_node_work_ready(tv_io *h, bool readable, bool writable, bool broken) {
     (void)h; (void)readable; (void)writable; (void)broken;
     char buf[64];
-    while (read(bm_node_wake[0], buf, sizeof buf) > 0) {}
-    pthread_mutex_lock(&bm_node_work_mu);
-    bm_node_job *done = bm_node_done;
-    bm_node_done = NULL;
-    pthread_mutex_unlock(&bm_node_work_mu);
+    while (read(tv_node_wake[0], buf, sizeof buf) > 0) {}
+    pthread_mutex_lock(&tv_node_work_mu);
+    tv_node_job *done = tv_node_done;
+    tv_node_done = NULL;
+    pthread_mutex_unlock(&tv_node_work_mu);
     /* (oldest first) */
-    bm_node_job *ordered = NULL;
+    tv_node_job *ordered = NULL;
     while (done) {
-        bm_node_job *next = done->next;
+        tv_node_job *next = done->next;
         done->next = ordered;
         ordered = done;
         done = next;
     }
     while (ordered) {
-        bm_node_job *job = ordered;
+        tv_node_job *job = ordered;
         ordered = job->next;
-        bm_io_refs--;
+        tv_io_refs--;
         JSValueRef args[4];
-        size_t nargs = job->done(bm_js_ctx, job, args);
+        size_t nargs = job->done(tv_js_ctx, job, args);
         JSObjectRef cb = job->callback;
         if (job->free) job->free(job);
         free(job);
         JSValueRef exc = NULL;
-        JSObjectCallAsFunction(bm_js_ctx, cb, NULL, nargs, args, &exc);
-        JSValueUnprotect(bm_js_ctx, cb);
-        if (exc) bm_node_report(exc);
+        JSObjectCallAsFunction(tv_js_ctx, cb, NULL, nargs, args, &exc);
+        JSValueUnprotect(tv_js_ctx, cb);
+        if (exc) tv_node_report(exc);
     }
 }
 
-static void bm_node_queue(JSContextRef ctx, bm_node_job *job, JSValueRef callback) {
-    if (bm_node_wake[0] < 0) {
-        if (pipe(bm_node_wake) != 0) bm_trap("can't create a pipe for the work queue", NULL);
+static void tv_node_queue(JSContextRef ctx, tv_node_job *job, JSValueRef callback) {
+    if (tv_node_wake[0] < 0) {
+        if (pipe(tv_node_wake) != 0) tv_trap("can't create a pipe for the work queue", NULL);
         for (int i = 0; i < 2; i++) {
-            fcntl(bm_node_wake[i], F_SETFL, fcntl(bm_node_wake[i], F_GETFL) | O_NONBLOCK);
-            fcntl(bm_node_wake[i], F_SETFD, FD_CLOEXEC);
+            fcntl(tv_node_wake[i], F_SETFL, fcntl(tv_node_wake[i], F_GETFL) | O_NONBLOCK);
+            fcntl(tv_node_wake[i], F_SETFD, FD_CLOEXEC);
         }
-        bm_node_work_io.ready = bm_node_work_ready;
-        bm_io_add(bm_node_wake[0], &bm_node_work_io, true, false);
+        tv_node_work_io.ready = tv_node_work_ready;
+        tv_io_add(tv_node_wake[0], &tv_node_work_io, true, false);
     }
     job->callback = (JSObjectRef)callback;
     JSValueProtect(ctx, callback);
-    bm_io_refs++;
+    tv_io_refs++;
     job->next = NULL;
-    pthread_mutex_lock(&bm_node_work_mu);
-    if (bm_node_jobs_tail) bm_node_jobs_tail->next = job;
-    else bm_node_jobs = job;
-    bm_node_jobs_tail = job;
-    if (bm_node_idle == 0 && bm_node_workers < 4) {
+    pthread_mutex_lock(&tv_node_work_mu);
+    if (tv_node_jobs_tail) tv_node_jobs_tail->next = job;
+    else tv_node_jobs = job;
+    tv_node_jobs_tail = job;
+    if (tv_node_idle == 0 && tv_node_workers < 4) {
         pthread_attr_t attr;
         pthread_attr_init(&attr);
         pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
         pthread_t t;
-        if (pthread_create(&t, &attr, bm_node_worker, NULL) == 0) bm_node_workers++;
+        if (pthread_create(&t, &attr, tv_node_worker, NULL) == 0) tv_node_workers++;
         pthread_attr_destroy(&attr);
     }
-    pthread_cond_signal(&bm_node_work_cv);
-    pthread_mutex_unlock(&bm_node_work_mu);
+    pthread_cond_signal(&tv_node_work_cv);
+    pthread_mutex_unlock(&tv_node_work_mu);
 }
 
 /* ------------------------------------------------------------------ dns (Node.js's cares_wrap.cc):
@@ -1752,7 +1752,7 @@ static void bm_node_queue(JSContextRef ctx, bm_node_job *job, JSValueRef callbac
  * the queries and reads the answers. */
 
 /* libuv's error for a getaddrinfo failure */
-static int bm_node_eai(int r) {
+static int tv_node_eai(int r) {
     switch (r) {
 #ifdef EAI_ADDRFAMILY
     case EAI_ADDRFAMILY: return -3000;
@@ -1783,25 +1783,25 @@ static int bm_node_eai(int r) {
 }
 
 typedef struct {
-    bm_node_job job;
+    tv_node_job job;
     char *host;
     int family, flags, order;
     int err;
     struct addrinfo *res;
-} bm_node_gai;
+} tv_node_gai;
 
-static void bm_node_gai_work(bm_node_job *j) {
-    bm_node_gai *g = (bm_node_gai *)j;
+static void tv_node_gai_work(tv_node_job *j) {
+    tv_node_gai *g = (tv_node_gai *)j;
     struct addrinfo hints = {0};
     hints.ai_family = g->family;
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = g->flags;
     int r = getaddrinfo(g->host, NULL, &hints, &g->res);
-    g->err = r ? bm_node_eai(r) : 0;
+    g->err = r ? tv_node_eai(r) : 0;
 }
 
-static size_t bm_node_gai_done(JSContextRef ctx, bm_node_job *j, JSValueRef *args) {
-    bm_node_gai *g = (bm_node_gai *)j;
+static size_t tv_node_gai_done(JSContextRef ctx, tv_node_job *j, JSValueRef *args) {
+    tv_node_gai *g = (tv_node_gai *)j;
     args[0] = num(ctx, g->err);
     if (g->err) {
         args[1] = undef(ctx);
@@ -1826,8 +1826,8 @@ static size_t bm_node_gai_done(JSContextRef ctx, bm_node_job *j, JSValueRef *arg
     return 2;
 }
 
-static void bm_node_gai_free(bm_node_job *j) {
-    bm_node_gai *g = (bm_node_gai *)j;
+static void tv_node_gai_free(tv_node_job *j) {
+    tv_node_gai *g = (tv_node_gai *)j;
     if (g->res) freeaddrinfo(g->res);
     free(g->host);
 }
@@ -1836,35 +1836,35 @@ static void bm_node_gai_free(bm_node_job *j) {
 NATIVE(n_dns_getaddrinfo) {
     UNUSED;
     if (n < 5) return undef(ctx);
-    bm_node_gai *g = calloc(1, sizeof *g);
+    tv_node_gai *g = calloc(1, sizeof *g);
     g->host = arg_cstr(ctx, n, a, 0);
     int family = (int)arg_num(ctx, n, a, 1, 0);
     g->family = family == 4 ? AF_INET : family == 6 ? AF_INET6 : AF_UNSPEC;
     g->flags = (int)arg_num(ctx, n, a, 2, 0);
     g->order = (int)arg_num(ctx, n, a, 3, 0);
-    g->job.work = bm_node_gai_work;
-    g->job.done = bm_node_gai_done;
-    g->job.free = bm_node_gai_free;
-    bm_node_queue(ctx, &g->job, a[4]);
+    g->job.work = tv_node_gai_work;
+    g->job.done = tv_node_gai_done;
+    g->job.free = tv_node_gai_free;
+    tv_node_queue(ctx, &g->job, a[4]);
     return num(ctx, 0);
 }
 
 typedef struct {
-    bm_node_job job;
+    tv_node_job job;
     struct sockaddr_storage addr;
     socklen_t len;
     int err;
     char host[NI_MAXHOST], service[NI_MAXSERV];
-} bm_node_gni;
+} tv_node_gni;
 
-static void bm_node_gni_work(bm_node_job *j) {
-    bm_node_gni *g = (bm_node_gni *)j;
+static void tv_node_gni_work(tv_node_job *j) {
+    tv_node_gni *g = (tv_node_gni *)j;
     int r = getnameinfo((struct sockaddr *)&g->addr, g->len, g->host, sizeof g->host, g->service, sizeof g->service, NI_NAMEREQD);
-    g->err = r ? bm_node_eai(r) : 0;
+    g->err = r ? tv_node_eai(r) : 0;
 }
 
-static size_t bm_node_gni_done(JSContextRef ctx, bm_node_job *j, JSValueRef *args) {
-    bm_node_gni *g = (bm_node_gni *)j;
+static size_t tv_node_gni_done(JSContextRef ctx, tv_node_job *j, JSValueRef *args) {
+    tv_node_gni *g = (tv_node_gni *)j;
     args[0] = num(ctx, g->err);
     if (g->err) return 1;
     args[1] = str(ctx, g->host);
@@ -1878,7 +1878,7 @@ NATIVE(n_dns_getnameinfo) {
     if (n < 3) return undef(ctx);
     char *ip = arg_cstr(ctx, n, a, 0);
     int port = (int)arg_num(ctx, n, a, 1, 0);
-    bm_node_gni *g = calloc(1, sizeof *g);
+    tv_node_gni *g = calloc(1, sizeof *g);
     struct sockaddr_in *v4 = (struct sockaddr_in *)&g->addr;
     struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)&g->addr;
     if (ip && inet_pton(AF_INET, ip, &v4->sin_addr) == 1) {
@@ -1898,9 +1898,9 @@ NATIVE(n_dns_getnameinfo) {
     ((struct sockaddr *)&g->addr)->sa_len = (uint8_t)g->len;
 #endif
     free(ip);
-    g->job.work = bm_node_gni_work;
-    g->job.done = bm_node_gni_done;
-    bm_node_queue(ctx, &g->job, a[2]);
+    g->job.work = tv_node_gni_work;
+    g->job.done = tv_node_gni_done;
+    tv_node_queue(ctx, &g->job, a[2]);
     return num(ctx, 0);
 }
 
@@ -1923,13 +1923,13 @@ NATIVE(n_dns_ipv6_bytes) {
     char *ip = arg_cstr(ctx, n, a, 0);
     unsigned char buf[16];
     JSValueRef r = undef(ctx);
-    if (ip && inet_pton(AF_INET6, ip, buf) == 1) r = bm_js_bytes_copy(buf, 16);
+    if (ip && inet_pton(AF_INET6, ip, buf) == 1) r = tv_js_bytes_copy(buf, 16);
     free(ip);
     return r;
 }
 
 typedef struct {
-    bm_node_job job;
+    tv_node_job job;
     struct sockaddr_storage servers[8];
     socklen_t lens[8];
     int nservers;
@@ -1939,30 +1939,30 @@ typedef struct {
     const char *err;
     uint8_t *answer;
     size_t answer_len;
-} bm_node_dnsq;
+} tv_node_dnsq;
 
 /* (an error counts as ready, for the read or write to report: Linux raises a refused UDP query's
  * as POLLERR alone, where macOS makes the socket readable) */
-static bool bm_node_dns_wait(int fd, short ev, int ms) {
+static bool tv_node_dns_wait(int fd, short ev, int ms) {
     struct pollfd p = { fd, ev, 0 };
     return poll(&p, 1, ms) == 1 && (p.revents & (ev | POLLERR | POLLHUP));
 }
 
 /* one query over TCP (for an answer too big for UDP) */
-static bool bm_node_dns_tcp(bm_node_dnsq *q, int i) {
+static bool tv_node_dns_tcp(tv_node_dnsq *q, int i) {
     int fd = socket(q->servers[i].ss_family, SOCK_STREAM, 0);
     if (fd < 0) return false;
     fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
     bool ok = false;
     if (connect(fd, (struct sockaddr *)&q->servers[i], q->lens[i]) != 0 && errno != EINPROGRESS) goto out;
-    if (!bm_node_dns_wait(fd, POLLOUT, q->timeout_ms)) goto out;
+    if (!tv_node_dns_wait(fd, POLLOUT, q->timeout_ms)) goto out;
     uint8_t len[2] = { (uint8_t)(q->query_len >> 8), (uint8_t)q->query_len };
     if (write(fd, len, 2) != 2 || write(fd, q->query, q->query_len) != (ssize_t)q->query_len) goto out;
     size_t want = 0, got = 0;
     uint8_t head[2];
     size_t head_got = 0;
     while (head_got < 2) {
-        if (!bm_node_dns_wait(fd, POLLIN, q->timeout_ms)) goto out;
+        if (!tv_node_dns_wait(fd, POLLIN, q->timeout_ms)) goto out;
         ssize_t r = read(fd, head + head_got, 2 - head_got);
         if (r <= 0) goto out;
         head_got += (size_t)r;
@@ -1970,7 +1970,7 @@ static bool bm_node_dns_tcp(bm_node_dnsq *q, int i) {
     want = (size_t)head[0] << 8 | head[1];
     uint8_t *buf = malloc(want ? want : 1);
     while (got < want) {
-        if (!bm_node_dns_wait(fd, POLLIN, q->timeout_ms)) { free(buf); goto out; }
+        if (!tv_node_dns_wait(fd, POLLIN, q->timeout_ms)) { free(buf); goto out; }
         ssize_t r = read(fd, buf + got, want - got);
         if (r <= 0) { free(buf); goto out; }
         got += (size_t)r;
@@ -1984,8 +1984,8 @@ out:
     return ok;
 }
 
-static void bm_node_dnsq_work(bm_node_job *j) {
-    bm_node_dnsq *q = (bm_node_dnsq *)j;
+static void tv_node_dnsq_work(tv_node_job *j) {
+    tv_node_dnsq *q = (tv_node_dnsq *)j;
     q->err = "ETIMEOUT";
     bool refused = false;
     for (int t = 0; t < q->tries; t++) {
@@ -1999,7 +1999,7 @@ static void bm_node_dnsq_work(bm_node_job *j) {
             uint8_t buf[4096];
             ssize_t r = -1;
             int left = q->timeout_ms << (t < 4 ? t : 4);
-            while (bm_node_dns_wait(fd, POLLIN, left)) {
+            while (tv_node_dns_wait(fd, POLLIN, left)) {
                 r = recv(fd, buf, sizeof buf, 0);
                 if (r < 0 && errno == ECONNREFUSED) { refused = true; break; }
                 /* an answer to this query (its id) */
@@ -2013,26 +2013,26 @@ static void bm_node_dnsq_work(bm_node_job *j) {
             q->answer_len = (size_t)r;
             q->err = NULL;
             /* truncated: ask again over TCP */
-            if (buf[2] & 0x02) bm_node_dns_tcp(q, i);
+            if (buf[2] & 0x02) tv_node_dns_tcp(q, i);
             return;
         }
     }
     if (refused) q->err = "ECONNREFUSED";
 }
 
-static size_t bm_node_dnsq_done(JSContextRef ctx, bm_node_job *j, JSValueRef *args) {
-    bm_node_dnsq *q = (bm_node_dnsq *)j;
+static size_t tv_node_dnsq_done(JSContextRef ctx, tv_node_job *j, JSValueRef *args) {
+    tv_node_dnsq *q = (tv_node_dnsq *)j;
     if (q->err) {
         args[0] = str(ctx, q->err);
         return 1;
     }
     args[0] = JSValueMakeNull(ctx);
-    args[1] = bm_js_bytes_copy(q->answer, q->answer_len);
+    args[1] = tv_js_bytes_copy(q->answer, q->answer_len);
     return 2;
 }
 
-static void bm_node_dnsq_free(bm_node_job *j) {
-    bm_node_dnsq *q = (bm_node_dnsq *)j;
+static void tv_node_dnsq_free(tv_node_job *j) {
+    tv_node_dnsq *q = (tv_node_dnsq *)j;
     free(q->query);
     free(q->answer);
 }
@@ -2041,7 +2041,7 @@ static void bm_node_dnsq_free(bm_node_job *j) {
 NATIVE(n_dns_query) {
     UNUSED;
     if (n < 5 || !JSValueIsObject(ctx, a[0])) return undef(ctx);
-    bm_node_dnsq *q = calloc(1, sizeof *q);
+    tv_node_dnsq *q = calloc(1, sizeof *q);
     JSObjectRef list = (JSObjectRef)a[0];
     JSStringRef len_key = JSStringCreateWithUTF8CString("length");
     int count = (int)JSValueToNumber(ctx, JSObjectGetProperty(ctx, list, len_key, NULL), NULL);
@@ -2069,7 +2069,7 @@ NATIVE(n_dns_query) {
     }
     uint8_t *p;
     size_t len;
-    if (!bm_js_bytes_view(a[1], &p, &len)) {
+    if (!tv_js_bytes_view(a[1], &p, &len)) {
         free(q);
         return undef(ctx);
     }
@@ -2080,10 +2080,10 @@ NATIVE(n_dns_query) {
     if (q->timeout_ms <= 0) q->timeout_ms = 2000;
     q->tries = (int)arg_num(ctx, n, a, 3, 4);
     if (q->tries <= 0) q->tries = 4;
-    q->job.work = bm_node_dnsq_work;
-    q->job.done = bm_node_dnsq_done;
-    q->job.free = bm_node_dnsq_free;
-    bm_node_queue(ctx, &q->job, a[4]);
+    q->job.work = tv_node_dnsq_work;
+    q->job.done = tv_node_dnsq_done;
+    q->job.free = tv_node_dnsq_free;
+    tv_node_queue(ctx, &q->job, a[4]);
     return num(ctx, 0);
 }
 
@@ -2100,8 +2100,8 @@ NATIVE(n_heap_stats) {
     static bool looked;
     if (!looked) {
         looked = true;
-#ifdef BM_JSC_OWN
-        /* (Barm's own engine is linked in: a program exports no symbols to look up) */
+#ifdef TV_JSC_OWN
+        /* (Tov's own engine is linked in: a program exports no symbols to look up) */
         extern JSObjectRef JSGetMemoryUsageStatistics(JSContextRef);
         stats = JSGetMemoryUsageStatistics;
 #else
@@ -2124,7 +2124,7 @@ NATIVE(n_heap_stats) {
 
 /* ------------------------------------------------------------------ child processes (libuv's uv_spawn)
  *
- * bm_node_spawn starts a program as libuv does: found on the child's PATH, its stdio set up from
+ * tv_node_spawn starts a program as libuv does: found on the child's PATH, its stdio set up from
  * a spec per fd (a socketpair for a pipe, /dev/null, an inherited or given fd), in cwd, in a
  * new session if detached. spawnSync runs one to the end, feeding input and collecting output
  * with a timeout and a size limit, as Node.js's spawn_sync.cc does. */
@@ -2132,15 +2132,15 @@ NATIVE(n_heap_stats) {
 #include <spawn.h>
 #include <sys/wait.h>
 
-enum { BM_STDIO_IGNORE, BM_STDIO_PIPE, BM_STDIO_INHERIT, BM_STDIO_FD };
+enum { TV_STDIO_IGNORE, TV_STDIO_PIPE, TV_STDIO_INHERIT, TV_STDIO_FD };
 
 typedef struct {
     int type;
     int fd;          /* inherit/fd: the parent's fd; pipe: the parent's end, once made */
-} bm_node_stdio;
+} tv_node_stdio;
 
 /* the program's path on PATH (from the child's environment, else ours), or NULL */
-static char *bm_node_which(const char *file, char **env) {
+static char *tv_node_which(const char *file, char **env) {
     if (strchr(file, '/')) return strdup(file);
     const char *path = NULL;
     for (char **e = env ? env : environ; e && *e; e++)
@@ -2166,8 +2166,8 @@ static char *bm_node_which(const char *file, char **env) {
 
 /* starts file with argv/env (NULL: ours); stdio[i] pipes get the parent's end in .fd. -> pid, or
  * -errno */
-static pid_t bm_node_spawn(const char *file, char **argv, char **env, const char *cwd, bm_node_stdio *stdio, int nstdio, bool detached) {
-    char *path = bm_node_which(file, env);
+static pid_t tv_node_spawn(const char *file, char **argv, char **env, const char *cwd, tv_node_stdio *stdio, int nstdio, bool detached) {
+    char *path = tv_node_which(file, env);
     if (!path) return -ENOENT;
     int child_fds[64];
     int nfds = nstdio < 64 ? nstdio : 64;
@@ -2175,14 +2175,14 @@ static pid_t bm_node_spawn(const char *file, char **argv, char **env, const char
     pid_t pid = 0;
     int err = 0;
     for (int i = 0; i < nfds && !err; i++) {
-        if (stdio[i].type == BM_STDIO_PIPE) {
+        if (stdio[i].type == TV_STDIO_PIPE) {
             int sv[2];
             if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) { err = errno; break; }
             fcntl(sv[0], F_SETFD, FD_CLOEXEC);
             fcntl(sv[1], F_SETFD, FD_CLOEXEC);
             stdio[i].fd = sv[0];
             child_fds[i] = sv[1];
-        } else if (stdio[i].type == BM_STDIO_IGNORE) {
+        } else if (stdio[i].type == TV_STDIO_IGNORE) {
             child_fds[i] = open("/dev/null", (i == 0 ? O_RDONLY : O_RDWR) | O_CLOEXEC);
         } else {
             child_fds[i] = stdio[i].fd;
@@ -2214,17 +2214,17 @@ static pid_t bm_node_spawn(const char *file, char **argv, char **env, const char
         if (cwd) posix_spawn_file_actions_addchdir_np(&fa, cwd);
 #pragma clang diagnostic pop
         /* (what the program wrote before comes before what the child writes to the same fds) */
-        bm_out_flush();
+        tv_out_flush();
         err = posix_spawn(&pid, path, &fa, &attr, argv, env ? env : environ);
     }
     posix_spawn_file_actions_destroy(&fa);
     posix_spawnattr_destroy(&attr);
     free(path);
     for (int i = 0; i < nfds; i++) {
-        if (stdio[i].type == BM_STDIO_PIPE || stdio[i].type == BM_STDIO_IGNORE) {
+        if (stdio[i].type == TV_STDIO_PIPE || stdio[i].type == TV_STDIO_IGNORE) {
             if (child_fds[i] >= 0) close(child_fds[i]);
         }
-        if (err && stdio[i].type == BM_STDIO_PIPE && stdio[i].fd >= 0) {
+        if (err && stdio[i].type == TV_STDIO_PIPE && stdio[i].fd >= 0) {
             close(stdio[i].fd);
             stdio[i].fd = -1;
         }
@@ -2234,7 +2234,7 @@ static pid_t bm_node_spawn(const char *file, char **argv, char **env, const char
 }
 
 /* a JS array of strings as a NULL-terminated C array */
-static char **bm_node_strings(JSContextRef ctx, JSValueRef v) {
+static char **tv_node_strings(JSContextRef ctx, JSValueRef v) {
     if (!v || !JSValueIsObject(ctx, v)) return NULL;
     JSObjectRef arr = (JSObjectRef)v;
     JSStringRef len_key = JSStringCreateWithUTF8CString("length");
@@ -2249,14 +2249,14 @@ static char **bm_node_strings(JSContextRef ctx, JSValueRef v) {
     return out;
 }
 
-static void bm_node_strings_free(char **s) {
+static void tv_node_strings_free(char **s) {
     if (!s) return;
     for (char **p = s; *p; p++) free(*p);
     free(s);
 }
 
 /* stdio specs from [[type, fd], ...] */
-static int bm_node_stdio_specs(JSContextRef ctx, JSValueRef v, bm_node_stdio *out, int max) {
+static int tv_node_stdio_specs(JSContextRef ctx, JSValueRef v, tv_node_stdio *out, int max) {
     if (!JSValueIsObject(ctx, v)) return 0;
     JSObjectRef arr = (JSObjectRef)v;
     int n = 0;
@@ -2269,9 +2269,9 @@ static int bm_node_stdio_specs(JSContextRef ctx, JSValueRef v, bm_node_stdio *ou
     return n;
 }
 
-static const char *bm_node_signal_name(int sig) {
-    for (size_t i = 0; i < sizeof bm_signals / sizeof *bm_signals; i++)
-        if (bm_signals[i].sig == sig) return bm_signals[i].name;
+static const char *tv_node_signal_name(int sig) {
+    for (size_t i = 0; i < sizeof tv_signals / sizeof *tv_signals; i++)
+        if (tv_signals[i].sig == sig) return tv_signals[i].name;
     return NULL;
 }
 
@@ -2279,32 +2279,32 @@ static const char *bm_node_signal_name(int sig) {
  * signal(name, on) starts or stops delivering a signal to the handler signalHandler(fn) set, as
  * fn(name, number). The signal handler writes the signal's number to a pipe the loop watches, so
  * fn runs on the loop; as in Node.js, a watched signal doesn't keep the program running. */
-static int bm_node_sig_pipe[2] = {-1, -1};
-static bm_io bm_node_sig_io;
-static JSObjectRef bm_node_sig_fn;
-static bool bm_node_sig_on[NSIG];
-static struct sigaction bm_node_sig_before[NSIG];   /* what each watched signal did before */
+static int tv_node_sig_pipe[2] = {-1, -1};
+static tv_io tv_node_sig_io;
+static JSObjectRef tv_node_sig_fn;
+static bool tv_node_sig_on[NSIG];
+static struct sigaction tv_node_sig_before[NSIG];   /* what each watched signal did before */
 
-static void bm_node_sig_caught(int sig) {
+static void tv_node_sig_caught(int sig) {
     int saved = errno;
     unsigned char b = (unsigned char)sig;
-    (void)!write(bm_node_sig_pipe[1], &b, 1);
+    (void)!write(tv_node_sig_pipe[1], &b, 1);
     errno = saved;
 }
 
-static void bm_node_sig_ready(bm_io *h, bool readable, bool writable, bool broken) {
+static void tv_node_sig_ready(tv_io *h, bool readable, bool writable, bool broken) {
     (void)h; (void)readable; (void)writable; (void)broken;
     unsigned char buf[64];
     ssize_t got;
-    while ((got = read(bm_node_sig_pipe[0], buf, sizeof buf)) > 0) {
+    while ((got = read(tv_node_sig_pipe[0], buf, sizeof buf)) > 0) {
         for (ssize_t i = 0; i < got; i++) {
             int sig = buf[i];
-            if (!bm_node_sig_on[sig] || !bm_node_sig_fn) continue;
-            const char *name = bm_node_signal_name(sig);
-            JSValueRef args[2] = { name ? str(bm_js_ctx, name) : num(bm_js_ctx, sig), num(bm_js_ctx, sig) };
+            if (!tv_node_sig_on[sig] || !tv_node_sig_fn) continue;
+            const char *name = tv_node_signal_name(sig);
+            JSValueRef args[2] = { name ? str(tv_js_ctx, name) : num(tv_js_ctx, sig), num(tv_js_ctx, sig) };
             JSValueRef exc = NULL;
-            JSObjectCallAsFunction(bm_js_ctx, bm_node_sig_fn, NULL, 2, args, &exc);
-            if (exc) bm_node_report(exc);
+            JSObjectCallAsFunction(tv_js_ctx, tv_node_sig_fn, NULL, 2, args, &exc);
+            if (exc) tv_node_report(exc);
         }
     }
 }
@@ -2312,9 +2312,9 @@ static void bm_node_sig_ready(bm_io *h, bool readable, bool writable, bool broke
 /* signalHandler(fn) */
 NATIVE(n_signal_handler) {
     UNUSED;
-    if (bm_node_sig_fn) JSValueUnprotect(ctx, bm_node_sig_fn);
-    bm_node_sig_fn = n > 0 && JSValueIsObject(ctx, a[0]) ? (JSObjectRef)a[0] : NULL;
-    if (bm_node_sig_fn) JSValueProtect(ctx, bm_node_sig_fn);
+    if (tv_node_sig_fn) JSValueUnprotect(ctx, tv_node_sig_fn);
+    tv_node_sig_fn = n > 0 && JSValueIsObject(ctx, a[0]) ? (JSObjectRef)a[0] : NULL;
+    if (tv_node_sig_fn) JSValueProtect(ctx, tv_node_sig_fn);
     return undef(ctx);
 }
 
@@ -2324,31 +2324,31 @@ NATIVE(n_signal) {
     char *name = arg_cstr(ctx, n, a, 0);
     bool on = n > 1 && JSValueToBoolean(ctx, a[1]);
     int sig = -1;
-    for (size_t i = 0; i < sizeof bm_signals / sizeof *bm_signals; i++)
-        if (strcmp(bm_signals[i].name, name) == 0) sig = bm_signals[i].sig;
+    for (size_t i = 0; i < sizeof tv_signals / sizeof *tv_signals; i++)
+        if (strcmp(tv_signals[i].name, name) == 0) sig = tv_signals[i].sig;
     free(name);
     if (sig <= 0 || sig >= NSIG || sig == SIGKILL || sig == SIGSTOP) return num(ctx, -EINVAL);
-    if (on == bm_node_sig_on[sig]) return num(ctx, 0);
+    if (on == tv_node_sig_on[sig]) return num(ctx, 0);
     if (on) {
-        if (bm_node_sig_pipe[0] < 0) {
-            if (pipe(bm_node_sig_pipe) != 0) return num(ctx, -errno);
+        if (tv_node_sig_pipe[0] < 0) {
+            if (pipe(tv_node_sig_pipe) != 0) return num(ctx, -errno);
             for (int i = 0; i < 2; i++) {
-                fcntl(bm_node_sig_pipe[i], F_SETFL, fcntl(bm_node_sig_pipe[i], F_GETFL) | O_NONBLOCK);
-                fcntl(bm_node_sig_pipe[i], F_SETFD, FD_CLOEXEC);
+                fcntl(tv_node_sig_pipe[i], F_SETFL, fcntl(tv_node_sig_pipe[i], F_GETFL) | O_NONBLOCK);
+                fcntl(tv_node_sig_pipe[i], F_SETFD, FD_CLOEXEC);
             }
-            bm_node_sig_io.ready = bm_node_sig_ready;
-            bm_io_add(bm_node_sig_pipe[0], &bm_node_sig_io, true, false);
+            tv_node_sig_io.ready = tv_node_sig_ready;
+            tv_io_add(tv_node_sig_pipe[0], &tv_node_sig_io, true, false);
         }
         struct sigaction sa;
         memset(&sa, 0, sizeof sa);
-        sa.sa_handler = bm_node_sig_caught;
+        sa.sa_handler = tv_node_sig_caught;
         sa.sa_flags = SA_RESTART;
         sigemptyset(&sa.sa_mask);
-        if (sigaction(sig, &sa, &bm_node_sig_before[sig]) != 0) return num(ctx, -errno);
+        if (sigaction(sig, &sa, &tv_node_sig_before[sig]) != 0) return num(ctx, -errno);
     } else {
-        sigaction(sig, &bm_node_sig_before[sig], NULL);
+        sigaction(sig, &tv_node_sig_before[sig], NULL);
     }
-    bm_node_sig_on[sig] = on;
+    tv_node_sig_on[sig] = on;
     return num(ctx, 0);
 }
 
@@ -2359,11 +2359,11 @@ NATIVE(n_spawn_sync) {
     UNUSED;
     if (n < 10) return undef(ctx);
     char *file = arg_cstr(ctx, n, a, 0);
-    char **argv = bm_node_strings(ctx, a[1]);
-    char **env = JSValueIsNull(ctx, a[2]) ? NULL : bm_node_strings(ctx, a[2]);
+    char **argv = tv_node_strings(ctx, a[1]);
+    char **env = JSValueIsNull(ctx, a[2]) ? NULL : tv_node_strings(ctx, a[2]);
     char *cwd = JSValueIsNull(ctx, a[3]) || JSValueIsUndefined(ctx, a[3]) ? NULL : arg_cstr(ctx, n, a, 3);
-    bm_node_stdio stdio[16];
-    int nstdio = bm_node_stdio_specs(ctx, a[4], stdio, 16);
+    tv_node_stdio stdio[16];
+    int nstdio = tv_node_stdio_specs(ctx, a[4], stdio, 16);
     double timeout = arg_num(ctx, n, a, 6, 0);
     double max_buffer = arg_num(ctx, n, a, 7, 1024 * 1024);
     int kill_signal = (int)arg_num(ctx, n, a, 8, SIGTERM);
@@ -2372,11 +2372,11 @@ NATIVE(n_spawn_sync) {
     size_t in_len[16] = {0}, in_off[16] = {0};
     for (int i = 0; i < nstdio; i++) {
         JSValueRef v = JSObjectGetPropertyAtIndex(ctx, (JSObjectRef)a[5], (unsigned)i, NULL);
-        if (v && JSValueIsObject(ctx, v)) bm_js_bytes_view(v, &in[i], &in_len[i]);
+        if (v && JSValueIsObject(ctx, v)) tv_js_bytes_view(v, &in[i], &in_len[i]);
     }
     if (!argv) argv = calloc(2, sizeof *argv), argv[0] = strdup(file ? file : "");
-    pid_t pid = file ? bm_node_spawn(file, argv, env, cwd, stdio, nstdio, detached) : -EINVAL;
-    bm_sb out[16];
+    pid_t pid = file ? tv_node_spawn(file, argv, env, cwd, stdio, nstdio, detached) : -EINVAL;
+    tv_sb out[16];
     memset(out, 0, sizeof out);
     int err = 0;
     JSValueRef status = JSValueMakeNull(ctx), signal = JSValueMakeNull(ctx);
@@ -2385,12 +2385,12 @@ NATIVE(n_spawn_sync) {
         pid = 0;
     } else {
         for (int i = 0; i < nstdio; i++) {
-            if (stdio[i].type != BM_STDIO_PIPE) continue;
+            if (stdio[i].type != TV_STDIO_PIPE) continue;
             fcntl(stdio[i].fd, F_SETFL, fcntl(stdio[i].fd, F_GETFL) | O_NONBLOCK);
             /* (stdin with nothing to write is closed now: the child sees its end) */
             if (i == 0 && !in[0]) shutdown(stdio[i].fd, SHUT_WR);
         }
-        double deadline = timeout > 0 ? bm_performance_now() + timeout : 0;
+        double deadline = timeout > 0 ? tv_performance_now() + timeout : 0;
         double total = 0;
         bool killed = false;
         int child_status = 0;
@@ -2399,7 +2399,7 @@ NATIVE(n_spawn_sync) {
             struct pollfd pf[16];
             int map[16], np = 0;
             for (int i = 0; i < nstdio; i++) {
-                if (stdio[i].type != BM_STDIO_PIPE || stdio[i].fd < 0) continue;
+                if (stdio[i].type != TV_STDIO_PIPE || stdio[i].fd < 0) continue;
                 short ev = 0;
                 if (i == 0 && in[0] && in_off[0] < in_len[0]) ev |= POLLOUT;
                 if (i != 0) ev |= POLLIN;
@@ -2412,7 +2412,7 @@ NATIVE(n_spawn_sync) {
             if (np == 0) break;
             int wait_ms = -1;
             if (deadline) {
-                double left = deadline - bm_performance_now();
+                double left = deadline - tv_performance_now();
                 if (left <= 0) {
                     kill(pid, kill_signal);
                     killed = true;
@@ -2434,7 +2434,7 @@ NATIVE(n_spawn_sync) {
                     char buf[65536];
                     ssize_t got = read(stdio[i].fd, buf, sizeof buf);
                     if (got > 0) {
-                        bm_sb_add(&out[i], buf, (size_t)got);
+                        tv_sb_add(&out[i], buf, (size_t)got);
                         total += (double)got;
                         if (max_buffer > 0 && total > max_buffer) {
                             kill(pid, kill_signal);
@@ -2454,25 +2454,25 @@ NATIVE(n_spawn_sync) {
         if (WIFEXITED(child_status)) {
             status = num(ctx, WEXITSTATUS(child_status));
         } else if (WIFSIGNALED(child_status)) {
-            const char *name = bm_node_signal_name(WTERMSIG(child_status));
+            const char *name = tv_node_signal_name(WTERMSIG(child_status));
             signal = name ? str(ctx, name) : num(ctx, WTERMSIG(child_status));
         }
     }
     JSValueRef outputs[16];
     for (int i = 0; i < nstdio; i++) {
-        if (stdio[i].type == BM_STDIO_PIPE) {
+        if (stdio[i].type == TV_STDIO_PIPE) {
             if (stdio[i].fd >= 0) close(stdio[i].fd);
-            outputs[i] = i == 0 || pid == 0 ? JSValueMakeNull(ctx) : (JSValueRef)bm_js_bytes_copy(out[i].data ? out[i].data : "", out[i].len);
+            outputs[i] = i == 0 || pid == 0 ? JSValueMakeNull(ctx) : (JSValueRef)tv_js_bytes_copy(out[i].data ? out[i].data : "", out[i].len);
         } else {
             outputs[i] = JSValueMakeNull(ctx);
         }
-        bm_sb_free(&out[i]);
+        tv_sb_free(&out[i]);
     }
     JSValueRef items[5] = { num(ctx, pid), status, signal, num(ctx, err), pid == 0 ? JSValueMakeNull(ctx) : (JSValueRef)array(ctx, (size_t)nstdio, outputs) };
     free(file);
     free(cwd);
-    bm_node_strings_free(argv);
-    bm_node_strings_free(env);
+    tv_node_strings_free(argv);
+    tv_node_strings_free(env);
     return array(ctx, 5, items);
 }
 
@@ -2482,88 +2482,88 @@ NATIVE(n_spawn_sync) {
  * follows the writes. A handle stays alive until JS releases it, a loop turn after close, so no
  * event already collected can reach freed memory. */
 
-#define BM_UV_EOF (-4095)
+#define TV_UV_EOF (-4095)
 
-typedef struct bm_node_wreq {
-    struct bm_node_wreq *next;
+typedef struct tv_node_wreq {
+    struct tv_node_wreq *next;
     uint8_t *data;
     size_t len, off;
     JSObjectRef cb;      /* cb(status) once written (protected) */
-} bm_node_wreq;
+} tv_node_wreq;
 
 typedef struct {
-    bm_io io;
+    tv_io io;
     int fd;
     bool reading, closed, refed, counted, watching, listening, connecting;
     JSObjectRef self, onread;
     JSObjectRef onconnection, connect_cb;   /* listen: onconnection(fd | null, err); connect: cb(status) */
-    bm_node_wreq *wq, *wq_tail;
+    tv_node_wreq *wq, *wq_tail;
     JSObjectRef shutdown_cb;
     double bytes_read, bytes_written;
-} bm_node_stream;
+} tv_node_stream;
 
-static void bm_node_stream_finalize(JSObjectRef o) {
-    bm_node_stream *s = JSObjectGetPrivate(o);
+static void tv_node_stream_finalize(JSObjectRef o) {
+    tv_node_stream *s = JSObjectGetPrivate(o);
     if (!s) return;
     if (s->fd >= 0) close(s->fd);
     free(s);
 }
 
-static JSClassRef bm_node_stream_class(void) {
+static JSClassRef tv_node_stream_class(void) {
     static JSClassRef cls;
     if (!cls) {
         JSClassDefinition def = kJSClassDefinitionEmpty;
         def.className = "StreamHandle";
-        def.finalize = bm_node_stream_finalize;
+        def.finalize = tv_node_stream_finalize;
         cls = JSClassCreate(&def);
     }
     return cls;
 }
 
-static bm_node_stream *bm_node_stream_of(JSContextRef ctx, size_t n, const JSValueRef a[]) {
-    if (n < 1 || !JSValueIsObjectOfClass(ctx, a[0], bm_node_stream_class())) return NULL;
+static tv_node_stream *tv_node_stream_of(JSContextRef ctx, size_t n, const JSValueRef a[]) {
+    if (n < 1 || !JSValueIsObjectOfClass(ctx, a[0], tv_node_stream_class())) return NULL;
     return JSObjectGetPrivate((JSObjectRef)a[0]);
 }
 
-static void bm_node_stream_ready(bm_io *h, bool readable, bool writable, bool broken);
+static void tv_node_stream_ready(tv_io *h, bool readable, bool writable, bool broken);
 
 /* what the loop watches for, and whether the stream keeps the program running */
-static void bm_node_stream_update(bm_node_stream *s) {
+static void tv_node_stream_update(tv_node_stream *s) {
     bool want_read = (s->reading || s->listening) && !s->closed;
     bool want_write = !s->closed && (s->wq || s->shutdown_cb || s->connecting);
     if (s->fd >= 0 && !s->closed && (want_read || want_write || s->watching)) {
-        s->io.ready = bm_node_stream_ready;
-        bm_io_set(s->fd, &s->io, want_read, want_write);
+        s->io.ready = tv_node_stream_ready;
+        tv_io_set(s->fd, &s->io, want_read, want_write);
         s->watching = want_read || want_write;
     }
     bool active = s->refed && (want_read || want_write);
     if (active != s->counted) {
-        bm_io_refs += active ? 1 : -1;
+        tv_io_refs += active ? 1 : -1;
         s->counted = active;
     }
 }
 
-static void bm_node_call_args(JSObjectRef fn, size_t n, const JSValueRef *args) {
+static void tv_node_call_args(JSObjectRef fn, size_t n, const JSValueRef *args) {
     JSValueRef exc = NULL;
-    JSObjectCallAsFunction(bm_js_ctx, fn, NULL, n, args, &exc);
-    if (exc) bm_node_report(exc);
+    JSObjectCallAsFunction(tv_js_ctx, fn, NULL, n, args, &exc);
+    if (exc) tv_node_report(exc);
 }
 
-static void bm_node_stream_complete(bm_node_wreq *w, int status) {
+static void tv_node_stream_complete(tv_node_wreq *w, int status) {
     JSObjectRef cb = w->cb;
     free(w->data);
     free(w);
     if (cb) {
-        JSValueRef arg = JSValueMakeNumber(bm_js_ctx, status);
-        bm_node_call_args(cb, 1, &arg);
-        JSValueUnprotect(bm_js_ctx, cb);
+        JSValueRef arg = JSValueMakeNumber(tv_js_ctx, status);
+        tv_node_call_args(cb, 1, &arg);
+        JSValueUnprotect(tv_js_ctx, cb);
     }
 }
 
 /* writes what the fd takes from the queue; finishes the shutdown once it's empty */
-static void bm_node_stream_flush(bm_node_stream *s) {
+static void tv_node_stream_flush(tv_node_stream *s) {
     while (s->wq && !s->closed) {
-        bm_node_wreq *w = s->wq;
+        tv_node_wreq *w = s->wq;
         ssize_t r = write(s->fd, w->data + w->off, w->len - w->off);
         if (r < 0 && errno == EINTR) continue;
         if (r < 0 && errno == EAGAIN) break;
@@ -2571,7 +2571,7 @@ static void bm_node_stream_flush(bm_node_stream *s) {
             int err = errno;
             s->wq = w->next;
             if (!s->wq) s->wq_tail = NULL;
-            bm_node_stream_complete(w, -err);
+            tv_node_stream_complete(w, -err);
             continue;
         }
         w->off += (size_t)r;
@@ -2579,20 +2579,20 @@ static void bm_node_stream_flush(bm_node_stream *s) {
         if (w->off < w->len) break;
         s->wq = w->next;
         if (!s->wq) s->wq_tail = NULL;
-        bm_node_stream_complete(w, 0);
+        tv_node_stream_complete(w, 0);
     }
     if (!s->wq && s->shutdown_cb && !s->closed) {
         JSObjectRef cb = s->shutdown_cb;
         s->shutdown_cb = NULL;
         int st = shutdown(s->fd, SHUT_WR) == 0 || errno == ENOTSOCK ? 0 : -errno;
-        JSValueRef arg = JSValueMakeNumber(bm_js_ctx, st);
-        bm_node_call_args(cb, 1, &arg);
-        JSValueUnprotect(bm_js_ctx, cb);
+        JSValueRef arg = JSValueMakeNumber(tv_js_ctx, st);
+        tv_node_call_args(cb, 1, &arg);
+        JSValueUnprotect(tv_js_ctx, cb);
     }
 }
 
-static void bm_node_stream_ready(bm_io *h, bool readable, bool writable, bool broken) {
-    bm_node_stream *s = (bm_node_stream *)h;
+static void tv_node_stream_ready(tv_io *h, bool readable, bool writable, bool broken) {
+    tv_node_stream *s = (tv_node_stream *)h;
     if (s->closed) return;
     if (s->connecting && (writable || broken)) {
         int err = 0;
@@ -2601,10 +2601,10 @@ static void bm_node_stream_ready(bm_io *h, bool readable, bool writable, bool br
         s->connecting = false;
         JSObjectRef cb = s->connect_cb;
         s->connect_cb = NULL;
-        bm_node_stream_update(s);
-        JSValueRef arg = JSValueMakeNumber(bm_js_ctx, -err);
-        bm_node_call_args(cb, 1, &arg);
-        JSValueUnprotect(bm_js_ctx, cb);
+        tv_node_stream_update(s);
+        JSValueRef arg = JSValueMakeNumber(tv_js_ctx, -err);
+        tv_node_call_args(cb, 1, &arg);
+        JSValueUnprotect(tv_js_ctx, cb);
         return;
     }
     if (s->listening && (readable || broken)) {
@@ -2613,8 +2613,8 @@ static void bm_node_stream_ready(bm_io *h, bool readable, bool writable, bool br
             if (c < 0) {
                 if (errno == EINTR) continue;
                 if (errno != EAGAIN && errno != ECONNABORTED) {
-                    JSValueRef args[2] = { JSValueMakeNull(bm_js_ctx), JSValueMakeNumber(bm_js_ctx, -errno) };
-                    bm_node_call_args(s->onconnection, 2, args);
+                    JSValueRef args[2] = { JSValueMakeNull(tv_js_ctx), JSValueMakeNumber(tv_js_ctx, -errno) };
+                    tv_node_call_args(s->onconnection, 2, args);
                 }
                 break;
             }
@@ -2623,28 +2623,28 @@ static void bm_node_stream_ready(bm_io *h, bool readable, bool writable, bool br
             int one = 1;
             setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
 #endif
-            JSValueRef args[2] = { JSValueMakeNumber(bm_js_ctx, c), JSValueMakeNumber(bm_js_ctx, 0) };
-            bm_node_call_args(s->onconnection, 2, args);
+            JSValueRef args[2] = { JSValueMakeNumber(tv_js_ctx, c), JSValueMakeNumber(tv_js_ctx, 0) };
+            tv_node_call_args(s->onconnection, 2, args);
         }
-        if (!s->closed) bm_node_stream_update(s);
+        if (!s->closed) tv_node_stream_update(s);
         return;
     }
-    if (writable || (broken && s->wq)) bm_node_stream_flush(s);
+    if (writable || (broken && s->wq)) tv_node_stream_flush(s);
     if ((readable || broken) && s->reading && !s->closed) {
         static uint8_t buf[65536];
         ssize_t r = read(s->fd, buf, sizeof buf);
         if (r > 0) {
             s->bytes_read += (double)r;
-            JSValueRef arg = bm_js_bytes_copy(buf, (size_t)r);
-            bm_node_call_args(s->onread, 1, &arg);
+            JSValueRef arg = tv_js_bytes_copy(buf, (size_t)r);
+            tv_node_call_args(s->onread, 1, &arg);
         } else if (r == 0 || (errno != EAGAIN && errno != EINTR)) {
-            int err = r == 0 ? BM_UV_EOF : -errno;
+            int err = r == 0 ? TV_UV_EOF : -errno;
             s->reading = false;
-            JSValueRef args[2] = { JSValueMakeNull(bm_js_ctx), JSValueMakeNumber(bm_js_ctx, err) };
-            bm_node_call_args(s->onread, 2, args);
+            JSValueRef args[2] = { JSValueMakeNull(tv_js_ctx), JSValueMakeNumber(tv_js_ctx, err) };
+            tv_node_call_args(s->onread, 2, args);
         }
     }
-    if (!s->closed) bm_node_stream_update(s);
+    if (!s->closed) tv_node_stream_update(s);
 }
 
 /* open(fd) -> handle (the fd becomes non-blocking) */
@@ -2658,10 +2658,10 @@ NATIVE(n_stream_open) {
     int fd = (int)arg_num(ctx, n, a, 0, -1);
     if (fd < 0) return undef(ctx);
     fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
-    bm_node_stream *s = calloc(1, sizeof *s);
+    tv_node_stream *s = calloc(1, sizeof *s);
     s->fd = fd;
     s->refed = true;
-    JSObjectRef o = JSObjectMake(ctx, bm_node_stream_class(), s);
+    JSObjectRef o = JSObjectMake(ctx, tv_node_stream_class(), s);
     s->self = o;
     JSValueProtect(ctx, o);
     return o;
@@ -2670,22 +2670,22 @@ NATIVE(n_stream_open) {
 /* readStart(handle, onread) */
 NATIVE(n_stream_read_start) {
     UNUSED;
-    bm_node_stream *s = bm_node_stream_of(ctx, n, a);
+    tv_node_stream *s = tv_node_stream_of(ctx, n, a);
     if (!s || s->closed || n < 2) return num(ctx, -EINVAL);
     if (s->onread) JSValueUnprotect(ctx, s->onread);
     s->onread = (JSObjectRef)a[1];
     JSValueProtect(ctx, a[1]);
     s->reading = true;
-    bm_node_stream_update(s);
+    tv_node_stream_update(s);
     return num(ctx, 0);
 }
 
 NATIVE(n_stream_read_stop) {
     UNUSED;
-    bm_node_stream *s = bm_node_stream_of(ctx, n, a);
+    tv_node_stream *s = tv_node_stream_of(ctx, n, a);
     if (!s || s->closed) return num(ctx, 0);
     s->reading = false;
-    bm_node_stream_update(s);
+    tv_node_stream_update(s);
     return num(ctx, 0);
 }
 
@@ -2695,7 +2695,7 @@ NATIVE(n_stream_read_stop) {
 
 NATIVE(n_stream_write) {
     UNUSED;
-    bm_node_stream *s = bm_node_stream_of(ctx, n, a);
+    tv_node_stream *s = tv_node_stream_of(ctx, n, a);
     if (!s || n < 3 || !JSValueIsObject(ctx, a[1])) return undef(ctx);
     if (s->closed) {
         JSValueRef items[3] = { num(ctx, -EBADF), num(ctx, 0), JSValueMakeBoolean(ctx, false) };
@@ -2712,22 +2712,22 @@ NATIVE(n_stream_write) {
         uint8_t *p;
         size_t len;
         JSValueRef v = JSObjectGetPropertyAtIndex(ctx, list, i, NULL);
-        if (!bm_js_bytes_view(v, &p, &len) || len == 0) continue;
+        if (!tv_js_bytes_view(v, &p, &len) || len == 0) continue;
         iov[niov].iov_base = p;
         iov[niov].iov_len = len;
         niov++;
         total += len;
     }
     /* (more than 64 chunks: the rest are joined into the last) */
-    bm_sb extra = {0};
+    tv_sb extra = {0};
     for (unsigned i = 64; i < count; i++) {
         uint8_t *p;
         size_t len;
         JSValueRef v = JSObjectGetPropertyAtIndex(ctx, list, i, NULL);
-        if (bm_js_bytes_view(v, &p, &len) && len) bm_sb_add(&extra, (const char *)p, len);
+        if (tv_js_bytes_view(v, &p, &len) && len) tv_sb_add(&extra, (const char *)p, len);
     }
     if (extra.len) {
-        bm_sb_add(&extra, "", 0);
+        tv_sb_add(&extra, "", 0);
         total += extra.len;
     }
     size_t written = 0;
@@ -2758,7 +2758,7 @@ NATIVE(n_stream_write) {
     s->bytes_written += (double)written;
     bool async = written < total && !err;
     if (async) {
-        bm_node_wreq *w = calloc(1, sizeof *w);
+        tv_node_wreq *w = calloc(1, sizeof *w);
         w->len = total - written;
         w->data = malloc(w->len);
         size_t off = 0;
@@ -2772,9 +2772,9 @@ NATIVE(n_stream_write) {
         if (s->wq_tail) s->wq_tail->next = w;
         else s->wq = w;
         s->wq_tail = w;
-        bm_node_stream_update(s);
+        tv_node_stream_update(s);
     }
-    bm_sb_free(&extra);
+    tv_sb_free(&extra);
     JSValueRef items[3] = { num(ctx, err), num(ctx, (double)written), JSValueMakeBoolean(ctx, async) };
     return array(ctx, 3, items);
 }
@@ -2782,33 +2782,33 @@ NATIVE(n_stream_write) {
 /* shutdown(handle, cb): cb(status) once queued writes are out and the write side is closed */
 NATIVE(n_stream_shutdown) {
     UNUSED;
-    bm_node_stream *s = bm_node_stream_of(ctx, n, a);
+    tv_node_stream *s = tv_node_stream_of(ctx, n, a);
     if (!s || s->closed || n < 2) return num(ctx, -ENOTCONN);
     if (s->shutdown_cb) return num(ctx, -EALREADY);
     s->shutdown_cb = (JSObjectRef)a[1];
     JSValueProtect(ctx, a[1]);
-    bm_node_stream_update(s);
+    tv_node_stream_update(s);
     return num(ctx, 0);
 }
 
 /* close(handle): stops it and closes the fd (queued writes fail with ECANCELED) */
 NATIVE(n_stream_close) {
     UNUSED;
-    bm_node_stream *s = bm_node_stream_of(ctx, n, a);
+    tv_node_stream *s = tv_node_stream_of(ctx, n, a);
     if (!s || s->closed) return undef(ctx);
     s->reading = false;
-    bm_node_stream_update(s);
+    tv_node_stream_update(s);
     s->closed = true;
     if (s->counted) {
-        bm_io_refs--;
+        tv_io_refs--;
         s->counted = false;
     }
     if (s->fd >= 0) close(s->fd);
     s->fd = -1;
     while (s->wq) {
-        bm_node_wreq *w = s->wq;
+        tv_node_wreq *w = s->wq;
         s->wq = w->next;
-        bm_node_stream_complete(w, -ECANCELED);
+        tv_node_stream_complete(w, -ECANCELED);
     }
     s->wq_tail = NULL;
     if (s->shutdown_cb) JSValueUnprotect(ctx, s->shutdown_cb);
@@ -2824,7 +2824,7 @@ NATIVE(n_stream_close) {
         s->connect_cb = NULL;
         s->connecting = false;
         JSValueRef arg = JSValueMakeNumber(ctx, -ECANCELED);
-        bm_node_call_args(cb, 1, &arg);
+        tv_node_call_args(cb, 1, &arg);
         JSValueUnprotect(ctx, cb);
     }
     return undef(ctx);
@@ -2837,7 +2837,7 @@ NATIVE(n_stream_close) {
 #include <sys/un.h>
 
 /* an address from an ip (4 or 6) or a unix path: its length, 0 if it isn't one */
-static socklen_t bm_node_sockaddr(const char *where, int port, int family, struct sockaddr_storage *ss) {
+static socklen_t tv_node_sockaddr(const char *where, int port, int family, struct sockaddr_storage *ss) {
     memset(ss, 0, sizeof *ss);
     if (family == 0) {
         struct sockaddr_un *un = (struct sockaddr_un *)ss;
@@ -2889,7 +2889,7 @@ NATIVE(n_net_bind) {
     char *where = arg_cstr(ctx, n, a, 1);
     int family = (int)arg_num(ctx, n, a, 3, 4);
     struct sockaddr_storage ss;
-    socklen_t len = where ? bm_node_sockaddr(where, (int)arg_num(ctx, n, a, 2, 0), family, &ss) : 0;
+    socklen_t len = where ? tv_node_sockaddr(where, (int)arg_num(ctx, n, a, 2, 0), family, &ss) : 0;
     free(where);
     if (!len) return num(ctx, -EINVAL);
     if (family != 0) {
@@ -2906,25 +2906,25 @@ NATIVE(n_net_bind) {
 /* listen(handle, backlog, onconnection(fd | null, err)) -> 0 or -errno */
 NATIVE(n_net_listen) {
     UNUSED;
-    bm_node_stream *s = bm_node_stream_of(ctx, n, a);
+    tv_node_stream *s = tv_node_stream_of(ctx, n, a);
     if (!s || s->closed || n < 3) return num(ctx, -EINVAL);
     if (listen(s->fd, (int)arg_num(ctx, n, a, 1, 511)) != 0) return num(ctx, -errno);
     if (s->onconnection) JSValueUnprotect(ctx, s->onconnection);
     s->onconnection = (JSObjectRef)a[2];
     JSValueProtect(ctx, a[2]);
     s->listening = true;
-    bm_node_stream_update(s);
+    tv_node_stream_update(s);
     return num(ctx, 0);
 }
 
 /* connect(handle, address, port, family, cb(status)) -> 0 or -errno (cb later) */
 NATIVE(n_net_connect) {
     UNUSED;
-    bm_node_stream *s = bm_node_stream_of(ctx, n, a);
+    tv_node_stream *s = tv_node_stream_of(ctx, n, a);
     if (!s || s->closed || n < 5) return num(ctx, -EINVAL);
     char *where = arg_cstr(ctx, n, a, 1);
     struct sockaddr_storage ss;
-    socklen_t len = where ? bm_node_sockaddr(where, (int)arg_num(ctx, n, a, 2, 0), (int)arg_num(ctx, n, a, 3, 4), &ss) : 0;
+    socklen_t len = where ? tv_node_sockaddr(where, (int)arg_num(ctx, n, a, 2, 0), (int)arg_num(ctx, n, a, 3, 4), &ss) : 0;
     free(where);
     if (!len) return num(ctx, -EINVAL);
     int r;
@@ -2935,7 +2935,7 @@ NATIVE(n_net_connect) {
     s->connect_cb = (JSObjectRef)a[4];
     JSValueProtect(ctx, a[4]);
     s->connecting = true;
-    bm_node_stream_update(s);
+    tv_node_stream_update(s);
     return num(ctx, 0);
 }
 
@@ -3001,7 +3001,7 @@ NATIVE(n_net_option) {
 /* release(handle): JS is done with it (after close) */
 NATIVE(n_stream_release) {
     UNUSED;
-    bm_node_stream *s = bm_node_stream_of(ctx, n, a);
+    tv_node_stream *s = tv_node_stream_of(ctx, n, a);
     if (s && s->self) {
         JSValueUnprotect(ctx, s->self);
         s->self = NULL;
@@ -3012,20 +3012,20 @@ NATIVE(n_stream_release) {
 /* ref(handle, bool) */
 NATIVE(n_stream_ref) {
     UNUSED;
-    bm_node_stream *s = bm_node_stream_of(ctx, n, a);
+    tv_node_stream *s = tv_node_stream_of(ctx, n, a);
     if (!s) return undef(ctx);
     s->refed = n > 1 && JSValueToBoolean(ctx, a[1]);
-    if (!s->closed) bm_node_stream_update(s);
+    if (!s->closed) tv_node_stream_update(s);
     return undef(ctx);
 }
 
 /* info(handle) -> [fd, bytesRead, bytesWritten, write queue size] */
 NATIVE(n_stream_info) {
     UNUSED;
-    bm_node_stream *s = bm_node_stream_of(ctx, n, a);
+    tv_node_stream *s = tv_node_stream_of(ctx, n, a);
     if (!s) return undef(ctx);
     double queued = 0;
-    for (bm_node_wreq *w = s->wq; w; w = w->next) queued += (double)(w->len - w->off);
+    for (tv_node_wreq *w = s->wq; w; w = w->next) queued += (double)(w->len - w->off);
     JSValueRef items[4] = { num(ctx, s->fd), num(ctx, s->bytes_read), num(ctx, s->bytes_written), num(ctx, queued) };
     return array(ctx, 4, items);
 }
@@ -3033,24 +3033,24 @@ NATIVE(n_stream_info) {
 /* ------------------------------------------------------------------ processes (process_wrap) */
 
 typedef struct {
-    bm_io io;
+    tv_io io;
     pid_t pid;
     int pidfd;
     bool exited, refed, counted;
     JSObjectRef onexit;      /* onexit(exitCode, signal) (protected until it exits) */
-} bm_node_proc;
+} tv_node_proc;
 
-static void bm_node_proc_count(bm_node_proc *p) {
+static void tv_node_proc_count(tv_node_proc *p) {
     bool active = p->refed && !p->exited;
     if (active != p->counted) {
-        bm_io_refs += active ? 1 : -1;
+        tv_io_refs += active ? 1 : -1;
         p->counted = active;
     }
 }
 
-static void bm_node_proc_ready(bm_io *h, bool readable, bool writable, bool broken) {
+static void tv_node_proc_ready(tv_io *h, bool readable, bool writable, bool broken) {
     (void)readable; (void)writable; (void)broken;
-    bm_node_proc *p = (bm_node_proc *)h;
+    tv_node_proc *p = (tv_node_proc *)h;
     if (p->exited) return;
     int st = 0;
     pid_t r;
@@ -3059,26 +3059,26 @@ static void bm_node_proc_ready(bm_io *h, bool readable, bool writable, bool brok
     p->exited = true;
     if (p->pidfd >= 0) close(p->pidfd);
     p->pidfd = -1;
-    bm_node_proc_count(p);
+    tv_node_proc_count(p);
     int code = WIFEXITED(st) ? WEXITSTATUS(st) : 0;
     int sig = WIFSIGNALED(st) ? WTERMSIG(st) : 0;
     JSObjectRef cb = p->onexit;
     p->onexit = NULL;
-    JSValueRef args[2] = { JSValueMakeNumber(bm_js_ctx, code), JSValueMakeNumber(bm_js_ctx, sig) };
-    bm_node_call_args(cb, 2, args);
-    JSValueUnprotect(bm_js_ctx, cb);
+    JSValueRef args[2] = { JSValueMakeNumber(tv_js_ctx, code), JSValueMakeNumber(tv_js_ctx, sig) };
+    tv_node_call_args(cb, 2, args);
+    JSValueUnprotect(tv_js_ctx, cb);
 }
 
-static void bm_node_proc_finalize(JSObjectRef o) {
+static void tv_node_proc_finalize(JSObjectRef o) {
     free(JSObjectGetPrivate(o));
 }
 
-static JSClassRef bm_node_proc_class(void) {
+static JSClassRef tv_node_proc_class(void) {
     static JSClassRef cls;
     if (!cls) {
         JSClassDefinition def = kJSClassDefinitionEmpty;
         def.className = "ProcessHandle";
-        def.finalize = bm_node_proc_finalize;
+        def.finalize = tv_node_proc_finalize;
         cls = JSClassCreate(&def);
     }
     return cls;
@@ -3090,34 +3090,34 @@ NATIVE(n_spawn) {
     UNUSED;
     if (n < 7) return undef(ctx);
     char *file = arg_cstr(ctx, n, a, 0);
-    char **argv = bm_node_strings(ctx, a[1]);
-    char **env = JSValueIsNull(ctx, a[2]) ? NULL : bm_node_strings(ctx, a[2]);
+    char **argv = tv_node_strings(ctx, a[1]);
+    char **env = JSValueIsNull(ctx, a[2]) ? NULL : tv_node_strings(ctx, a[2]);
     char *cwd = JSValueIsNull(ctx, a[3]) || JSValueIsUndefined(ctx, a[3]) ? NULL : arg_cstr(ctx, n, a, 3);
-    bm_node_stdio stdio[16];
-    int nstdio = bm_node_stdio_specs(ctx, a[4], stdio, 16);
+    tv_node_stdio stdio[16];
+    int nstdio = tv_node_stdio_specs(ctx, a[4], stdio, 16);
     if (!argv) argv = calloc(2, sizeof *argv), argv[0] = strdup(file ? file : "");
-    pid_t pid = file ? bm_node_spawn(file, argv, env, cwd, stdio, nstdio, JSValueToBoolean(ctx, a[5])) : -EINVAL;
+    pid_t pid = file ? tv_node_spawn(file, argv, env, cwd, stdio, nstdio, JSValueToBoolean(ctx, a[5])) : -EINVAL;
     free(file);
     free(cwd);
-    bm_node_strings_free(argv);
-    bm_node_strings_free(env);
+    tv_node_strings_free(argv);
+    tv_node_strings_free(env);
     JSValueRef fds[16];
-    for (int i = 0; i < nstdio; i++) fds[i] = num(ctx, pid > 0 && stdio[i].type == BM_STDIO_PIPE ? stdio[i].fd : -1);
+    for (int i = 0; i < nstdio; i++) fds[i] = num(ctx, pid > 0 && stdio[i].type == TV_STDIO_PIPE ? stdio[i].fd : -1);
     JSValueRef handle = JSValueMakeNull(ctx);
     if (pid > 0) {
-        bm_node_proc *p = calloc(1, sizeof *p);
-        p->io.ready = bm_node_proc_ready;
+        tv_node_proc *p = calloc(1, sizeof *p);
+        p->io.ready = tv_node_proc_ready;
         p->pid = pid;
         p->pidfd = -1;
         p->refed = true;
         p->onexit = (JSObjectRef)a[6];
         JSValueProtect(ctx, a[6]);
-        JSObjectRef o = JSObjectMake(ctx, bm_node_proc_class(), p);
+        JSObjectRef o = JSObjectMake(ctx, tv_node_proc_class(), p);
         handle = o;
         /* (the handle lives while the child does) */
         JSValueProtect(ctx, o);
-        if (!bm_io_proc(pid, &p->io, &p->pidfd)) bm_node_proc_ready(&p->io, false, false, false);
-        bm_node_proc_count(p);
+        if (!tv_io_proc(pid, &p->io, &p->pidfd)) tv_node_proc_ready(&p->io, false, false, false);
+        tv_node_proc_count(p);
     }
     JSValueRef items[3] = { num(ctx, pid), handle, array(ctx, (size_t)nstdio, fds) };
     return array(ctx, 3, items);
@@ -3126,8 +3126,8 @@ NATIVE(n_spawn) {
 /* kill(handle, signal) -> 0 or -errno */
 NATIVE(n_proc_kill) {
     UNUSED;
-    if (n < 1 || !JSValueIsObjectOfClass(ctx, a[0], bm_node_proc_class())) return num(ctx, -EINVAL);
-    bm_node_proc *p = JSObjectGetPrivate((JSObjectRef)a[0]);
+    if (n < 1 || !JSValueIsObjectOfClass(ctx, a[0], tv_node_proc_class())) return num(ctx, -EINVAL);
+    tv_node_proc *p = JSObjectGetPrivate((JSObjectRef)a[0]);
     if (!p || p->exited) return num(ctx, -ESRCH);
     return num(ctx, kill(p->pid, (int)arg_num(ctx, n, a, 1, SIGTERM)) == 0 ? 0 : -errno);
 }
@@ -3135,56 +3135,56 @@ NATIVE(n_proc_kill) {
 /* procRef(handle, bool); procRelease(handle): JS is done with it */
 NATIVE(n_proc_ref) {
     UNUSED;
-    if (n < 1 || !JSValueIsObjectOfClass(ctx, a[0], bm_node_proc_class())) return undef(ctx);
-    bm_node_proc *p = JSObjectGetPrivate((JSObjectRef)a[0]);
+    if (n < 1 || !JSValueIsObjectOfClass(ctx, a[0], tv_node_proc_class())) return undef(ctx);
+    tv_node_proc *p = JSObjectGetPrivate((JSObjectRef)a[0]);
     p->refed = n > 1 && JSValueToBoolean(ctx, a[1]);
-    bm_node_proc_count(p);
+    tv_node_proc_count(p);
     return undef(ctx);
 }
 
 NATIVE(n_proc_release) {
     UNUSED;
-    if (n < 1 || !JSValueIsObjectOfClass(ctx, a[0], bm_node_proc_class())) return undef(ctx);
-    bm_node_proc *p = JSObjectGetPrivate((JSObjectRef)a[0]);
+    if (n < 1 || !JSValueIsObjectOfClass(ctx, a[0], tv_node_proc_class())) return undef(ctx);
+    tv_node_proc *p = JSObjectGetPrivate((JSObjectRef)a[0]);
     /* (a child still running keeps its handle until it exits) */
     if (p->exited) JSValueUnprotect(ctx, a[0]);
     return undef(ctx);
 }
 
-/* ------------------------------------------------------------------ fetch (Barm's HTTP client,
- * barm.c, for the fetch() global's Request and Response in internal/barm/fetch.js): a request is
+/* ------------------------------------------------------------------ fetch (Tov's HTTP client,
+ * tov.c, for the fetch() global's Request and Response in internal/tov/fetch.js): a request is
  * a handle whose finalizer frees it; each wait calls back from the loop once its promise settles */
 
-static void bm_node_fetch_finalize(JSObjectRef o) {
-    bm_int *id = JSObjectGetPrivate(o);
+static void tv_node_fetch_finalize(JSObjectRef o) {
+    tv_int *id = JSObjectGetPrivate(o);
     if (!id) return;
-    bm_native_fetchFree(*id);
+    tv_native_fetchFree(*id);
     free(id);
 }
 
-static JSClassRef bm_node_fetch_class(void) {
+static JSClassRef tv_node_fetch_class(void) {
     static JSClassRef cls;
     if (!cls) {
         JSClassDefinition def = kJSClassDefinitionEmpty;
         def.className = "FetchRequest";
-        def.finalize = bm_node_fetch_finalize;
+        def.finalize = tv_node_fetch_finalize;
         cls = JSClassCreate(&def);
     }
     return cls;
 }
 
-static bm_int bm_node_fetch_id(JSContextRef ctx, size_t n, const JSValueRef a[]) {
-    if (n < 1 || !JSValueIsObjectOfClass(ctx, a[0], bm_node_fetch_class())) return 0;
-    bm_int *id = JSObjectGetPrivate((JSObjectRef)a[0]);
+static tv_int tv_node_fetch_id(JSContextRef ctx, size_t n, const JSValueRef a[]) {
+    if (n < 1 || !JSValueIsObjectOfClass(ctx, a[0], tv_node_fetch_class())) return 0;
+    tv_int *id = JSObjectGetPrivate((JSObjectRef)a[0]);
     return id ? *id : 0;
 }
 
-static bm_str bm_node_arg_str(JSContextRef ctx, size_t n, const JSValueRef a[], size_t i) {
+static tv_str tv_node_arg_str(JSContextRef ctx, size_t n, const JSValueRef a[], size_t i) {
     uint8_t *p;
     size_t len;
-    if (i < n && JSValueIsObject(ctx, a[i]) && bm_js_bytes_view(a[i], &p, &len)) return bm_str_from((const char *)p, len);
+    if (i < n && JSValueIsObject(ctx, a[i]) && tv_js_bytes_view(a[i], &p, &len)) return tv_str_from((const char *)p, len);
     char *s = i < n && !JSValueIsNull(ctx, a[i]) && !JSValueIsUndefined(ctx, a[i]) ? arg_cstr(ctx, n, a, i) : NULL;
-    bm_str r = s ? bm_str_from(s, strlen(s)) : BM_EMPTY_STR;
+    tv_str r = s ? tv_str_from(s, strlen(s)) : TV_EMPTY_STR;
     free(s);
     return r;
 }
@@ -3192,112 +3192,112 @@ static bm_str bm_node_arg_str(JSContextRef ctx, size_t n, const JSValueRef a[], 
 /* fetchStart(method, url, wire headers, body bytes|string|null, redirect, flags, ca, unix, proxy) -> handle */
 NATIVE(n_fetch_start) {
     UNUSED;
-    bm_str args[9];
-    for (size_t i = 0; i < 9; i++) args[i] = i == 4 || i == 5 ? BM_EMPTY_STR : bm_node_arg_str(ctx, n, a, i);
-    bm_int id = bm_native_fetchStart(args[0], args[1], args[2], args[3], (bm_int)arg_num(ctx, n, a, 4, 0), (bm_int)arg_num(ctx, n, a, 5, 1),
+    tv_str args[9];
+    for (size_t i = 0; i < 9; i++) args[i] = i == 4 || i == 5 ? TV_EMPTY_STR : tv_node_arg_str(ctx, n, a, i);
+    tv_int id = tv_native_fetchStart(args[0], args[1], args[2], args[3], (tv_int)arg_num(ctx, n, a, 4, 0), (tv_int)arg_num(ctx, n, a, 5, 1),
                                      args[6], args[7], args[8]);
-    for (size_t i = 0; i < 9; i++) bm_str_release(args[i]);
-    bm_int *box = malloc(sizeof *box);
+    for (size_t i = 0; i < 9; i++) tv_str_release(args[i]);
+    tv_int *box = malloc(sizeof *box);
     *box = id;
-    return JSObjectMake(ctx, bm_node_fetch_class(), box);
+    return JSObjectMake(ctx, tv_node_fetch_class(), box);
 }
 
 /* a promise's int result to a JS callback */
 typedef struct {
-    bm_promise *p;
+    tv_promise *p;
     JSObjectRef cb;
-} bm_node_fetch_wait;
+} tv_node_fetch_wait;
 
-static void bm_node_fetch_settled(void *a, void *b) {
+static void tv_node_fetch_settled(void *a, void *b) {
     (void)b;
-    bm_node_fetch_wait *w = a;
-    double v = w->p->state == BM_FULFILLED ? (double)*(bm_int *)bm_promise_value(w->p) : -1;
-    bm_promise_release(w->p);
-    bm_io_refs--;
+    tv_node_fetch_wait *w = a;
+    double v = w->p->state == TV_FULFILLED ? (double)*(tv_int *)tv_promise_value(w->p) : -1;
+    tv_promise_release(w->p);
+    tv_io_refs--;
     JSObjectRef cb = w->cb;
     free(w);
-    JSValueRef arg = JSValueMakeNumber(bm_js_ctx, v);
-    bm_node_call_args(cb, 1, &arg);
-    JSValueUnprotect(bm_js_ctx, cb);
+    JSValueRef arg = JSValueMakeNumber(tv_js_ctx, v);
+    tv_node_call_args(cb, 1, &arg);
+    JSValueUnprotect(tv_js_ctx, cb);
 }
 
-static JSValueRef bm_node_fetch_on(JSContextRef ctx, bm_promise *p, JSValueRef cb) {
-    bm_node_fetch_wait *w = malloc(sizeof *w);
+static JSValueRef tv_node_fetch_on(JSContextRef ctx, tv_promise *p, JSValueRef cb) {
+    tv_node_fetch_wait *w = malloc(sizeof *w);
     w->p = p;
     w->cb = (JSObjectRef)cb;
     JSValueProtect(ctx, cb);
     /* (pending JS callbacks keep the program running) */
-    bm_io_refs++;
-    bm_promise_on(p, bm_node_fetch_settled, w, NULL);
+    tv_io_refs++;
+    tv_promise_on(p, tv_node_fetch_settled, w, NULL);
     return undef(ctx);
 }
 
 /* fetchWait(handle, cb(0 head in | -1 failed | -2 aborted)) */
 NATIVE(n_fetch_wait) {
     UNUSED;
-    bm_int id = bm_node_fetch_id(ctx, n, a);
+    tv_int id = tv_node_fetch_id(ctx, n, a);
     if (!id || n < 2) return undef(ctx);
-    return bm_node_fetch_on(ctx, bm_native_fetchWait(id), a[1]);
+    return tv_node_fetch_on(ctx, tv_native_fetchWait(id), a[1]);
 }
 
 /* fetchBodyWait(handle, cb(0 | -1 | -2)): the whole body is in */
 NATIVE(n_fetch_body_wait) {
     UNUSED;
-    bm_int id = bm_node_fetch_id(ctx, n, a);
+    tv_int id = tv_node_fetch_id(ctx, n, a);
     if (!id || n < 2) return undef(ctx);
-    return bm_node_fetch_on(ctx, bm_native_fetchBodyWait(id), a[1]);
+    return tv_node_fetch_on(ctx, tv_native_fetchBodyWait(id), a[1]);
 }
 
 /* fetchRead(handle, cb(bytes waiting > 0 | 0 the end | < 0 failed)) */
 NATIVE(n_fetch_read) {
     UNUSED;
-    bm_int id = bm_node_fetch_id(ctx, n, a);
+    tv_int id = tv_node_fetch_id(ctx, n, a);
     if (!id || n < 2) return undef(ctx);
-    return bm_node_fetch_on(ctx, bm_native_fetchRead(id), a[1]);
+    return tv_node_fetch_on(ctx, tv_native_fetchRead(id), a[1]);
 }
 
 /* fetchTake(handle) -> the bytes that have arrived */
 NATIVE(n_fetch_take) {
     UNUSED;
-    bm_int id = bm_node_fetch_id(ctx, n, a);
+    tv_int id = tv_node_fetch_id(ctx, n, a);
     size_t len = 0;
-    const char *p = id ? bm_native_fetchData(id, &len) : NULL;
+    const char *p = id ? tv_native_fetchData(id, &len) : NULL;
     /* (one copy, straight into the engine's array) */
-    JSValueRef r = bm_js_bytes_copy(p ? p : "", len);
-    if (id) bm_native_fetchTaken(id);
+    JSValueRef r = tv_js_bytes_copy(p ? p : "", len);
+    if (id) tv_native_fetchTaken(id);
     return r;
 }
 
 /* fetchBody(handle) -> the whole body (moved out) */
 NATIVE(n_fetch_body) {
     UNUSED;
-    bm_int id = bm_node_fetch_id(ctx, n, a);
-    if (!id) return bm_js_bytes_copy("", 0);
-    bm_str body = bm_native_fetchBody(id);
-    JSValueRef r = bm_js_bytes_copy(body.p->data, (size_t)body.p->len);
-    bm_str_release(body);
+    tv_int id = tv_node_fetch_id(ctx, n, a);
+    if (!id) return tv_js_bytes_copy("", 0);
+    tv_str body = tv_native_fetchBody(id);
+    JSValueRef r = tv_js_bytes_copy(body.p->data, (size_t)body.p->len);
+    tv_str_release(body);
     return r;
 }
 
-static JSValueRef bm_node_str_value(JSContextRef ctx, bm_str s) {
+static JSValueRef tv_node_str_value(JSContextRef ctx, tv_str s) {
     JSStringRef js = JSStringCreateWithUTF8CString(s.p->data);
     JSValueRef v = JSValueMakeString(ctx, js);
     JSStringRelease(js);
-    bm_str_release(s);
+    tv_str_release(s);
     return v;
 }
 
 /* fetchInfo(handle) -> [status, statusText, wire headers, url, redirected] */
 NATIVE(n_fetch_info) {
     UNUSED;
-    bm_int id = bm_node_fetch_id(ctx, n, a);
+    tv_int id = tv_node_fetch_id(ctx, n, a);
     if (!id) return undef(ctx);
     JSValueRef items[5] = {
-        num(ctx, (double)bm_native_fetchStatus(id)),
-        bm_node_str_value(ctx, bm_native_fetchStatusText(id)),
-        bm_node_str_value(ctx, bm_native_fetchHeaders(id)),
-        bm_node_str_value(ctx, bm_native_fetchUrl(id)),
-        JSValueMakeBoolean(ctx, bm_native_fetchRedirected(id)),
+        num(ctx, (double)tv_native_fetchStatus(id)),
+        tv_node_str_value(ctx, tv_native_fetchStatusText(id)),
+        tv_node_str_value(ctx, tv_native_fetchHeaders(id)),
+        tv_node_str_value(ctx, tv_native_fetchUrl(id)),
+        JSValueMakeBoolean(ctx, tv_native_fetchRedirected(id)),
     };
     return array(ctx, 5, items);
 }
@@ -3305,23 +3305,23 @@ NATIVE(n_fetch_info) {
 /* fetchError(handle) -> [code, message] */
 NATIVE(n_fetch_error) {
     UNUSED;
-    bm_int id = bm_node_fetch_id(ctx, n, a);
+    tv_int id = tv_node_fetch_id(ctx, n, a);
     if (!id) return undef(ctx);
-    JSValueRef items[2] = { bm_node_str_value(ctx, bm_native_fetchErrorCode(id)), bm_node_str_value(ctx, bm_native_fetchErrorMessage(id)) };
+    JSValueRef items[2] = { tv_node_str_value(ctx, tv_native_fetchErrorCode(id)), tv_node_str_value(ctx, tv_native_fetchErrorMessage(id)) };
     return array(ctx, 2, items);
 }
 
 NATIVE(n_fetch_abort) {
     UNUSED;
-    bm_int id = bm_node_fetch_id(ctx, n, a);
-    if (id) bm_native_fetchAbort(id);
+    tv_int id = tv_node_fetch_id(ctx, n, a);
+    if (id) tv_native_fetchAbort(id);
     return undef(ctx);
 }
 
-/* tls: whether the program links Barm's TLS client (https works) */
+/* tls: whether the program links Tov's TLS client (https works) */
 NATIVE(n_fetch_tls) {
     UNUSED;
-    return JSValueMakeBoolean(ctx, bm_tls_impl != NULL);
+    return JSValueMakeBoolean(ctx, tv_tls_impl != NULL);
 }
 
 /* (JavaScriptCore's, exported though not in its headers) */
@@ -3330,42 +3330,42 @@ extern void JSReportExtraMemoryCost(JSContextRef ctx, size_t size) __attribute__
 /* Response bytes arriving: memory the engine's objects hold, which it should count towards its
  * next collection (a response read partway and dropped holds its buffer and connection until
  * then) */
-static void bm_node_fetch_bytes(size_t n) {
+static void tv_node_fetch_bytes(size_t n) {
     /* (in 256 KB steps: the engine's accounting is slow per call) */
     static size_t pending;
     pending += n;
     if (pending < (256 << 10)) return;
-    if (JSReportExtraMemoryCost && bm_js_ctx) JSReportExtraMemoryCost(bm_js_ctx, pending);
+    if (JSReportExtraMemoryCost && tv_js_ctx) JSReportExtraMemoryCost(tv_js_ctx, pending);
     pending = 0;
 }
 
-static void bm_node_fetch_install(JSContextRef ctx, JSObjectRef native) {
-    bm_fetch_on_bytes = bm_node_fetch_bytes;
+static void tv_node_fetch_install(JSContextRef ctx, JSObjectRef native) {
+    tv_fetch_on_bytes = tv_node_fetch_bytes;
     JSObjectRef f = JSObjectMake(ctx, NULL, NULL);
-    bm_js_def(ctx, f, "start", n_fetch_start);
-    bm_js_def(ctx, f, "wait", n_fetch_wait);
-    bm_js_def(ctx, f, "bodyWait", n_fetch_body_wait);
-    bm_js_def(ctx, f, "read", n_fetch_read);
-    bm_js_def(ctx, f, "take", n_fetch_take);
-    bm_js_def(ctx, f, "body", n_fetch_body);
-    bm_js_def(ctx, f, "info", n_fetch_info);
-    bm_js_def(ctx, f, "error", n_fetch_error);
-    bm_js_def(ctx, f, "abort", n_fetch_abort);
-    bm_js_def(ctx, f, "tls", n_fetch_tls);
+    tv_js_def(ctx, f, "start", n_fetch_start);
+    tv_js_def(ctx, f, "wait", n_fetch_wait);
+    tv_js_def(ctx, f, "bodyWait", n_fetch_body_wait);
+    tv_js_def(ctx, f, "read", n_fetch_read);
+    tv_js_def(ctx, f, "take", n_fetch_take);
+    tv_js_def(ctx, f, "body", n_fetch_body);
+    tv_js_def(ctx, f, "info", n_fetch_info);
+    tv_js_def(ctx, f, "error", n_fetch_error);
+    tv_js_def(ctx, f, "abort", n_fetch_abort);
+    tv_js_def(ctx, f, "tls", n_fetch_tls);
     set(ctx, native, "fetch", f);
 }
 
-/* ------------------------------------------------------------------ http servers on Barm's native
- * server (internal/barm/http_server.js): it parses requests and manages connections; each request
+/* ------------------------------------------------------------------ http servers on Tov's native
+ * server (internal/tov/http_server.js): it parses requests and manages connections; each request
  * is deferred and handed to JavaScript, whose ServerResponse writes the response bytes raw. */
 
 typedef struct {
-    bm_env base;
+    tv_env base;
     JSObjectRef on_request;
-} bm_node_http_env;
+} tv_node_http_env;
 
 /* bytes as a JS string, one char per byte (latin1: header bytes survive as they are) */
-static JSValueRef bm_node_latin1(JSContextRef ctx, const char *p, size_t n) {
+static JSValueRef tv_node_latin1(JSContextRef ctx, const char *p, size_t n) {
     JSChar stack[512];
     JSChar *buf = n <= 512 ? stack : malloc(n * sizeof(JSChar));
     for (size_t i = 0; i < n; i++) buf[i] = (unsigned char)p[i];
@@ -3376,19 +3376,19 @@ static JSValueRef bm_node_latin1(JSContextRef ctx, const char *p, size_t n) {
     return v;
 }
 
-static void bm_node_http_request(bm_env *env, bm_str method, bm_str target, bm_str headers, bm_str body) {
-    bm_node_http_env *e = (bm_node_http_env *)env;
-    JSContextRef ctx = bm_js_ctx;
-    bm_int id = bm_native_httpDefer();
+static void tv_node_http_request(tv_env *env, tv_str method, tv_str target, tv_str headers, tv_str body) {
+    tv_node_http_env *e = (tv_node_http_env *)env;
+    JSContextRef ctx = tv_js_ctx;
+    tv_int id = tv_native_httpDefer();
     JSValueRef args[6] = {
         JSValueMakeNumber(ctx, (double)id),
-        bm_node_latin1(ctx, method.p->data, (size_t)method.p->len),
-        bm_node_latin1(ctx, target.p->data, (size_t)target.p->len),
-        bm_node_latin1(ctx, headers.p->data, (size_t)headers.p->len),
-        body.p->len ? (JSValueRef)bm_js_bytes_copy(body.p->data, (size_t)body.p->len) : JSValueMakeNull(ctx),
-        JSValueMakeBoolean(ctx, bm_http_v10),
+        tv_node_latin1(ctx, method.p->data, (size_t)method.p->len),
+        tv_node_latin1(ctx, target.p->data, (size_t)target.p->len),
+        tv_node_latin1(ctx, headers.p->data, (size_t)headers.p->len),
+        body.p->len ? (JSValueRef)tv_js_bytes_copy(body.p->data, (size_t)body.p->len) : JSValueMakeNull(ctx),
+        JSValueMakeBoolean(ctx, tv_http_v10),
     };
-    bm_node_call_args(e->on_request, 6, args);
+    tv_node_call_args(e->on_request, 6, args);
 }
 
 /* httpListen(port, host, nodeErrors, onRequest(id, method, target, wire headers, body|null, http10)) -> server id, or an
@@ -3396,28 +3396,28 @@ static void bm_node_http_request(bm_env *env, bm_str method, bm_str target, bm_s
 NATIVE(n_http_listen) {
     UNUSED;
     if (n < 4 || !JSValueIsObject(ctx, a[3])) return undef(ctx);
-    bm_node_http_env *e = bm_alloc(sizeof *e);
+    tv_node_http_env *e = tv_alloc(sizeof *e);
     memset(e, 0, sizeof *e);
     e->base.rc = 1;
     e->on_request = (JSObjectRef)a[3];
     JSValueProtect(ctx, a[3]);
     char *host = arg_cstr(ctx, n, a, 1);
-    bm_str h = host ? bm_str_from(host, strlen(host)) : BM_EMPTY_STR;
+    tv_str h = host ? tv_str_from(host, strlen(host)) : TV_EMPTY_STR;
     free(host);
-    bm_fn fn = { (void *)bm_node_http_request, &e->base };
-    bm_int id = bm_native_httpListen((bm_int)arg_num(ctx, n, a, 0, 0), h, fn);
-    bm_str_release(h);
-    if (id >= 0 && JSValueToBoolean(ctx, a[2])) bm_native_httpNodeErrors(id);
+    tv_fn fn = { (void *)tv_node_http_request, &e->base };
+    tv_int id = tv_native_httpListen((tv_int)arg_num(ctx, n, a, 0, 0), h, fn);
+    tv_str_release(h);
+    if (id >= 0 && JSValueToBoolean(ctx, a[2])) tv_native_httpNodeErrors(id);
     if (id < 0) {
-        bm_str err = bm_native_takeError();
-        JSValueRef msg = bm_node_str_value(ctx, err);
+        tv_str err = tv_native_takeError();
+        JSValueRef msg = tv_node_str_value(ctx, err);
         return msg;
     }
     return num(ctx, (double)id);
 }
 
 /* a JS string's bytes: latin1 (a byte per char) or UTF-8; the caller frees them */
-static char *bm_node_string_bytes(JSContextRef ctx, JSValueRef v, bool latin1, size_t *len) {
+static char *tv_node_string_bytes(JSContextRef ctx, JSValueRef v, bool latin1, size_t *len) {
     JSStringRef js = JSValueToStringCopy(ctx, v, NULL);
     if (!js) {
         *len = 0;
@@ -3456,17 +3456,17 @@ static char *bm_node_string_bytes(JSContextRef ctx, JSValueRef v, bool latin1, s
 /* httpWrite(id, bytes|string|null, end: 0 more | 1 done | 2 done and close, latin1) */
 NATIVE(n_http_write) {
     UNUSED;
-    bm_int id = (bm_int)arg_num(ctx, n, a, 0, 0);
+    tv_int id = (tv_int)arg_num(ctx, n, a, 0, 0);
     uint8_t *p = NULL;
     size_t len = 0;
     char *owned = NULL;
     if (n > 1 && JSValueIsString(ctx, a[1])) {
-        owned = bm_node_string_bytes(ctx, a[1], n > 3 && JSValueToBoolean(ctx, a[3]), &len);
+        owned = tv_node_string_bytes(ctx, a[1], n > 3 && JSValueToBoolean(ctx, a[3]), &len);
         p = (uint8_t *)owned;
     } else if (n > 1 && JSValueIsObject(ctx, a[1])) {
-        bm_js_bytes_view(a[1], &p, &len);
+        tv_js_bytes_view(a[1], &p, &len);
     }
-    bm_native_httpWriteRaw(id, (const char *)p, len, (int)arg_num(ctx, n, a, 2, 0));
+    tv_native_httpWriteRaw(id, (const char *)p, len, (int)arg_num(ctx, n, a, 2, 0));
     free(owned);
     return undef(ctx);
 }
@@ -3474,93 +3474,93 @@ NATIVE(n_http_write) {
 /* httpBuffered(id) -> bytes of the response the socket hasn't taken yet (-1: the client has gone) */
 NATIVE(n_http_buffered) {
     UNUSED;
-    return num(ctx, (double)bm_native_httpBuffered((bm_int)arg_num(ctx, n, a, 0, 0)));
+    return num(ctx, (double)tv_native_httpBuffered((tv_int)arg_num(ctx, n, a, 0, 0)));
 }
 
 /* httpOnGone(fn): fn(id) for each deferred request whose client goes away before it's answered */
-static JSObjectRef bm_node_http_gone_fn;
-static void bm_node_http_gone(bm_int id) {
-    if (!bm_node_http_gone_fn) return;
-    JSValueRef arg = JSValueMakeNumber(bm_js_ctx, (double)id);
-    bm_node_call_args(bm_node_http_gone_fn, 1, &arg);
+static JSObjectRef tv_node_http_gone_fn;
+static void tv_node_http_gone(tv_int id) {
+    if (!tv_node_http_gone_fn) return;
+    JSValueRef arg = JSValueMakeNumber(tv_js_ctx, (double)id);
+    tv_node_call_args(tv_node_http_gone_fn, 1, &arg);
 }
 
 NATIVE(n_http_on_gone) {
     UNUSED;
-    if (bm_node_http_gone_fn) JSValueUnprotect(ctx, bm_node_http_gone_fn);
-    bm_node_http_gone_fn = n > 0 && JSValueIsObject(ctx, a[0]) ? (JSObjectRef)a[0] : NULL;
-    if (bm_node_http_gone_fn) JSValueProtect(ctx, bm_node_http_gone_fn);
-    bm_http_on_gone = bm_node_http_gone_fn ? bm_node_http_gone : NULL;
+    if (tv_node_http_gone_fn) JSValueUnprotect(ctx, tv_node_http_gone_fn);
+    tv_node_http_gone_fn = n > 0 && JSValueIsObject(ctx, a[0]) ? (JSObjectRef)a[0] : NULL;
+    if (tv_node_http_gone_fn) JSValueProtect(ctx, tv_node_http_gone_fn);
+    tv_http_on_gone = tv_node_http_gone_fn ? tv_node_http_gone : NULL;
     return undef(ctx);
 }
 
 /* httpFd(id) -> the connection's fd (-1 if it's gone) */
 NATIVE(n_http_fd) {
     UNUSED;
-    return num(ctx, bm_native_httpFd((bm_int)arg_num(ctx, n, a, 0, 0)));
+    return num(ctx, tv_native_httpFd((tv_int)arg_num(ctx, n, a, 0, 0)));
 }
 
 /* httpTakeover(id) -> [fd, the bytes after the request] or null */
 NATIVE(n_http_takeover) {
     UNUSED;
-    bm_sb rest = {0};
-    int fd = bm_native_httpTakeover((bm_int)arg_num(ctx, n, a, 0, 0), &rest);
+    tv_sb rest = {0};
+    int fd = tv_native_httpTakeover((tv_int)arg_num(ctx, n, a, 0, 0), &rest);
     if (fd < 0) {
-        bm_sb_free(&rest);
+        tv_sb_free(&rest);
         return JSValueMakeNull(ctx);
     }
-    JSValueRef items[2] = { num(ctx, fd), bm_js_bytes_copy(rest.data ? rest.data : "", rest.len) };
-    bm_sb_free(&rest);
+    JSValueRef items[2] = { num(ctx, fd), tv_js_bytes_copy(rest.data ? rest.data : "", rest.len) };
+    tv_sb_free(&rest);
     return array(ctx, 2, items);
 }
 
 NATIVE(n_http_port) {
     UNUSED;
-    return num(ctx, (double)bm_native_httpPort((bm_int)arg_num(ctx, n, a, 0, 0)));
+    return num(ctx, (double)tv_native_httpPort((tv_int)arg_num(ctx, n, a, 0, 0)));
 }
 
 NATIVE(n_http_stop) {
     UNUSED;
-    bm_native_httpStop((bm_int)arg_num(ctx, n, a, 0, 0), n > 1 && JSValueToBoolean(ctx, a[1]));
+    tv_native_httpStop((tv_int)arg_num(ctx, n, a, 0, 0), n > 1 && JSValueToBoolean(ctx, a[1]));
     return undef(ctx);
 }
 
-static void bm_node_http_install(JSContextRef ctx, JSObjectRef native) {
+static void tv_node_http_install(JSContextRef ctx, JSObjectRef native) {
     JSObjectRef h = JSObjectMake(ctx, NULL, NULL);
-    bm_js_def(ctx, h, "listen", n_http_listen);
-    bm_js_def(ctx, h, "write", n_http_write);
-    bm_js_def(ctx, h, "fd", n_http_fd);
-    bm_js_def(ctx, h, "onGone", n_http_on_gone);
-    bm_js_def(ctx, h, "buffered", n_http_buffered);
-    bm_js_def(ctx, h, "takeover", n_http_takeover);
-    bm_js_def(ctx, h, "port", n_http_port);
-    bm_js_def(ctx, h, "stop", n_http_stop);
+    tv_js_def(ctx, h, "listen", n_http_listen);
+    tv_js_def(ctx, h, "write", n_http_write);
+    tv_js_def(ctx, h, "fd", n_http_fd);
+    tv_js_def(ctx, h, "onGone", n_http_on_gone);
+    tv_js_def(ctx, h, "buffered", n_http_buffered);
+    tv_js_def(ctx, h, "takeover", n_http_takeover);
+    tv_js_def(ctx, h, "port", n_http_port);
+    tv_js_def(ctx, h, "stop", n_http_stop);
     set(ctx, native, "http", h);
 }
 
-static void bm_node_streams_install(JSContextRef ctx, JSObjectRef native) {
+static void tv_node_streams_install(JSContextRef ctx, JSObjectRef native) {
     JSObjectRef st = JSObjectMake(ctx, NULL, NULL);
-    bm_js_def(ctx, st, "open", n_stream_open);
-    bm_js_def(ctx, st, "readStart", n_stream_read_start);
-    bm_js_def(ctx, st, "readStop", n_stream_read_stop);
-    bm_js_def(ctx, st, "write", n_stream_write);
-    bm_js_def(ctx, st, "shutdown", n_stream_shutdown);
-    bm_js_def(ctx, st, "close", n_stream_close);
-    bm_js_def(ctx, st, "release", n_stream_release);
-    bm_js_def(ctx, st, "ref", n_stream_ref);
-    bm_js_def(ctx, st, "info", n_stream_info);
-    bm_js_def(ctx, st, "socket", n_net_socket);
-    bm_js_def(ctx, st, "bind", n_net_bind);
-    bm_js_def(ctx, st, "listen", n_net_listen);
-    bm_js_def(ctx, st, "connect", n_net_connect);
-    bm_js_def(ctx, st, "name", n_net_name);
-    bm_js_def(ctx, st, "option", n_net_option);
+    tv_js_def(ctx, st, "open", n_stream_open);
+    tv_js_def(ctx, st, "readStart", n_stream_read_start);
+    tv_js_def(ctx, st, "readStop", n_stream_read_stop);
+    tv_js_def(ctx, st, "write", n_stream_write);
+    tv_js_def(ctx, st, "shutdown", n_stream_shutdown);
+    tv_js_def(ctx, st, "close", n_stream_close);
+    tv_js_def(ctx, st, "release", n_stream_release);
+    tv_js_def(ctx, st, "ref", n_stream_ref);
+    tv_js_def(ctx, st, "info", n_stream_info);
+    tv_js_def(ctx, st, "socket", n_net_socket);
+    tv_js_def(ctx, st, "bind", n_net_bind);
+    tv_js_def(ctx, st, "listen", n_net_listen);
+    tv_js_def(ctx, st, "connect", n_net_connect);
+    tv_js_def(ctx, st, "name", n_net_name);
+    tv_js_def(ctx, st, "option", n_net_option);
     set(ctx, native, "stream", st);
     JSObjectRef pr = JSObjectMake(ctx, NULL, NULL);
-    bm_js_def(ctx, pr, "spawn", n_spawn);
-    bm_js_def(ctx, pr, "kill", n_proc_kill);
-    bm_js_def(ctx, pr, "ref", n_proc_ref);
-    bm_js_def(ctx, pr, "release", n_proc_release);
+    tv_js_def(ctx, pr, "spawn", n_spawn);
+    tv_js_def(ctx, pr, "kill", n_proc_kill);
+    tv_js_def(ctx, pr, "ref", n_proc_ref);
+    tv_js_def(ctx, pr, "release", n_proc_release);
     set(ctx, native, "process", pr);
 }
 
@@ -3571,45 +3571,45 @@ static void bm_node_streams_install(JSContextRef ctx, JSObjectRef native) {
  * forwards lookups and assignments to the sandbox object first, as Node.js's contextified
  * global does; the sandbox is held on the global under a symbol key. */
 
-static JSValueRef bm_vm_key;      /* the symbol the sandbox is held under */
+static JSValueRef tv_vm_key;      /* the symbol the sandbox is held under */
 
 /* (reading the key comes back through the global's callbacks: those calls find nothing here and
  * fall through to the property itself) */
-static JSObjectRef bm_vm_sandbox(JSContextRef ctx, JSObjectRef global) {
+static JSObjectRef tv_vm_sandbox(JSContextRef ctx, JSObjectRef global) {
     static bool busy;
-    if (!bm_vm_key || busy) return NULL;
+    if (!tv_vm_key || busy) return NULL;
     busy = true;
-    JSValueRef v = JSObjectGetPropertyForKey(ctx, global, bm_vm_key, NULL);
+    JSValueRef v = JSObjectGetPropertyForKey(ctx, global, tv_vm_key, NULL);
     busy = false;
     return v && JSValueIsObject(ctx, v) ? (JSObjectRef)v : NULL;
 }
 
-static JSValueRef bm_vm_get(JSContextRef ctx, JSObjectRef object, JSStringRef name, JSValueRef *exc) {
-    JSObjectRef sandbox = bm_vm_sandbox(ctx, object);
+static JSValueRef tv_vm_get(JSContextRef ctx, JSObjectRef object, JSStringRef name, JSValueRef *exc) {
+    JSObjectRef sandbox = tv_vm_sandbox(ctx, object);
     if (!sandbox || !JSObjectHasProperty(ctx, sandbox, name)) return NULL;
     return JSObjectGetProperty(ctx, sandbox, name, exc);
 }
 
-static bool bm_vm_has(JSContextRef ctx, JSObjectRef object, JSStringRef name) {
-    JSObjectRef sandbox = bm_vm_sandbox(ctx, object);
+static bool tv_vm_has(JSContextRef ctx, JSObjectRef object, JSStringRef name) {
+    JSObjectRef sandbox = tv_vm_sandbox(ctx, object);
     return sandbox && JSObjectHasProperty(ctx, sandbox, name);
 }
 
-static bool bm_vm_set(JSContextRef ctx, JSObjectRef object, JSStringRef name, JSValueRef value, JSValueRef *exc) {
-    JSObjectRef sandbox = bm_vm_sandbox(ctx, object);
+static bool tv_vm_set(JSContextRef ctx, JSObjectRef object, JSStringRef name, JSValueRef value, JSValueRef *exc) {
+    JSObjectRef sandbox = tv_vm_sandbox(ctx, object);
     if (!sandbox) return false;
     JSObjectSetProperty(ctx, sandbox, name, value, kJSPropertyAttributeNone, exc);
     return true;
 }
 
-static bool bm_vm_delete(JSContextRef ctx, JSObjectRef object, JSStringRef name, JSValueRef *exc) {
-    JSObjectRef sandbox = bm_vm_sandbox(ctx, object);
+static bool tv_vm_delete(JSContextRef ctx, JSObjectRef object, JSStringRef name, JSValueRef *exc) {
+    JSObjectRef sandbox = tv_vm_sandbox(ctx, object);
     if (sandbox) JSObjectDeleteProperty(ctx, sandbox, name, exc);
     return false;
 }
 
-static void bm_vm_names(JSContextRef ctx, JSObjectRef object, JSPropertyNameAccumulatorRef names) {
-    JSObjectRef sandbox = bm_vm_sandbox(ctx, object);
+static void tv_vm_names(JSContextRef ctx, JSObjectRef object, JSPropertyNameAccumulatorRef names) {
+    JSObjectRef sandbox = tv_vm_sandbox(ctx, object);
     if (!sandbox) return;
     JSPropertyNameArrayRef keys = JSObjectCopyPropertyNames(ctx, sandbox);
     size_t count = JSPropertyNameArrayGetCount(keys);
@@ -3617,24 +3617,24 @@ static void bm_vm_names(JSContextRef ctx, JSObjectRef object, JSPropertyNameAccu
     JSPropertyNameArrayRelease(keys);
 }
 
-static void bm_vm_context_finalize(JSObjectRef o) {
+static void tv_vm_context_finalize(JSObjectRef o) {
     JSGlobalContextRef c = JSObjectGetPrivate(o);
     if (c) JSGlobalContextRelease(c);
 }
 
-static JSClassRef bm_vm_context_class(void) {
+static JSClassRef tv_vm_context_class(void) {
     static JSClassRef cls;
     if (!cls) {
         JSClassDefinition def = kJSClassDefinitionEmpty;
         def.className = "VMContext";
-        def.finalize = bm_vm_context_finalize;
+        def.finalize = tv_vm_context_finalize;
         cls = JSClassCreate(&def);
     }
     return cls;
 }
 
-static JSContextRef bm_vm_target(JSContextRef ctx, size_t n, const JSValueRef a[], size_t i) {
-    if (i < n && JSValueIsObjectOfClass(ctx, a[i], bm_vm_context_class())) {
+static JSContextRef tv_vm_target(JSContextRef ctx, size_t n, const JSValueRef a[], size_t i) {
+    if (i < n && JSValueIsObjectOfClass(ctx, a[i], tv_vm_context_class())) {
         JSGlobalContextRef c = JSObjectGetPrivate((JSObjectRef)a[i]);
         if (c) return c;
     }
@@ -3649,28 +3649,28 @@ NATIVE(n_vm_make_context) {
     if (!global_class) {
         JSClassDefinition def = kJSClassDefinitionEmpty;
         def.className = "Object";
-        def.getProperty = bm_vm_get;
-        def.hasProperty = bm_vm_has;
-        def.setProperty = bm_vm_set;
-        def.deleteProperty = bm_vm_delete;
-        def.getPropertyNames = bm_vm_names;
+        def.getProperty = tv_vm_get;
+        def.hasProperty = tv_vm_has;
+        def.setProperty = tv_vm_set;
+        def.deleteProperty = tv_vm_delete;
+        def.getPropertyNames = tv_vm_names;
         global_class = JSClassCreate(&def);
     }
-    if (!bm_vm_key) {
+    if (!tv_vm_key) {
         JSStringRef d = JSStringCreateWithUTF8CString("vm sandbox");
-        bm_vm_key = JSValueMakeSymbol(ctx, d);
+        tv_vm_key = JSValueMakeSymbol(ctx, d);
         JSStringRelease(d);
-        JSValueProtect(ctx, bm_vm_key);
+        JSValueProtect(ctx, tv_vm_key);
     }
     JSGlobalContextRef c = JSGlobalContextCreateInGroup(JSContextGetGroup(ctx), global_class);
-    JSObjectSetPropertyForKey(c, JSContextGetGlobalObject(c), bm_vm_key, a[0], kJSPropertyAttributeDontEnum, NULL);
-    return JSObjectMake(ctx, bm_vm_context_class(), c);
+    JSObjectSetPropertyForKey(c, JSContextGetGlobalObject(c), tv_vm_key, a[0], kJSPropertyAttributeDontEnum, NULL);
+    return JSObjectMake(ctx, tv_vm_context_class(), c);
 }
 
 /* the context's global object */
 NATIVE(n_vm_global) {
     UNUSED;
-    return JSContextGetGlobalObject(bm_vm_target(ctx, n, a, 0));
+    return JSContextGetGlobalObject(tv_vm_target(ctx, n, a, 0));
 }
 
 /* check(code, filename, line) -> null, or the SyntaxError */
@@ -3692,7 +3692,7 @@ NATIVE(n_vm_run) {
     JSStringRef code = JSValueToStringCopy(ctx, n > 0 ? a[0] : undef(ctx), exc);
     if (!code) return undef(ctx);
     JSStringRef url = n > 1 ? JSValueToStringCopy(ctx, a[1], NULL) : NULL;
-    JSContextRef target = bm_vm_target(ctx, n, a, 3);
+    JSContextRef target = tv_vm_target(ctx, n, a, 3);
     JSValueRef r = JSEvaluateScript(target, code, NULL, url, (int)arg_num(ctx, n, a, 2, 1), exc);
     JSStringRelease(code);
     if (url) JSStringRelease(url);
@@ -3703,7 +3703,7 @@ NATIVE(n_vm_run) {
 NATIVE(n_vm_fn) {
     UNUSED;
     if (n < 2) return undef(ctx);
-    JSContextRef target = bm_vm_target(ctx, n, a, 4);
+    JSContextRef target = tv_vm_target(ctx, n, a, 4);
     JSStringRef names[64];
     unsigned count = 0;
     if (JSValueIsObject(ctx, a[0])) {
@@ -3724,53 +3724,53 @@ NATIVE(n_vm_fn) {
     return f ? (JSValueRef)f : undef(ctx);
 }
 
-static void bm_node_vm_install(JSContextRef ctx, JSObjectRef native) {
+static void tv_node_vm_install(JSContextRef ctx, JSObjectRef native) {
     JSObjectRef v = JSObjectMake(ctx, NULL, NULL);
-    bm_js_def(ctx, v, "makeContext", n_vm_make_context);
-    bm_js_def(ctx, v, "global", n_vm_global);
-    bm_js_def(ctx, v, "check", n_vm_check);
-    bm_js_def(ctx, v, "run", n_vm_run);
-    bm_js_def(ctx, v, "fn", n_vm_fn);
+    tv_js_def(ctx, v, "makeContext", n_vm_make_context);
+    tv_js_def(ctx, v, "global", n_vm_global);
+    tv_js_def(ctx, v, "check", n_vm_check);
+    tv_js_def(ctx, v, "run", n_vm_run);
+    tv_js_def(ctx, v, "fn", n_vm_fn);
     set(ctx, native, "vm", v);
 }
 
-static void bm_node_dns_install(JSContextRef ctx, JSObjectRef native) {
+static void tv_node_dns_install(JSContextRef ctx, JSObjectRef native) {
     JSObjectRef d = JSObjectMake(ctx, NULL, NULL);
-    bm_js_def(ctx, d, "getaddrinfo", n_dns_getaddrinfo);
-    bm_js_def(ctx, d, "getnameinfo", n_dns_getnameinfo);
-    bm_js_def(ctx, d, "canonicalizeIP", n_dns_canonicalize);
-    bm_js_def(ctx, d, "ipv6Bytes", n_dns_ipv6_bytes);
-    bm_js_def(ctx, d, "query", n_dns_query);
+    tv_js_def(ctx, d, "getaddrinfo", n_dns_getaddrinfo);
+    tv_js_def(ctx, d, "getnameinfo", n_dns_getnameinfo);
+    tv_js_def(ctx, d, "canonicalizeIP", n_dns_canonicalize);
+    tv_js_def(ctx, d, "ipv6Bytes", n_dns_ipv6_bytes);
+    tv_js_def(ctx, d, "query", n_dns_query);
     set(ctx, native, "dns", d);
-    bm_js_def(ctx, native, "heapStats", n_heap_stats);
+    tv_js_def(ctx, native, "heapStats", n_heap_stats);
 }
 
 /* ------------------------------------------------------------------ zlib (runtime/compress.c, through
- * bm_zs: there when the program's bundle has zlib) */
+ * tv_zs: there when the program's bundle has zlib) */
 
-static void bm_node_zs_finalize(JSObjectRef o) {
-    bm_zstream *z = JSObjectGetPrivate(o);
-    if (z && bm_zs) bm_zs->close(z);
+static void tv_node_zs_finalize(JSObjectRef o) {
+    tv_zstream *z = JSObjectGetPrivate(o);
+    if (z && tv_zs) tv_zs->close(z);
 }
 
-static JSClassRef bm_node_zs_class(void) {
+static JSClassRef tv_node_zs_class(void) {
     static JSClassRef cls;
     if (!cls) {
         JSClassDefinition def = kJSClassDefinitionEmpty;
         def.className = "ZlibHandle";
-        def.finalize = bm_node_zs_finalize;
+        def.finalize = tv_node_zs_finalize;
         cls = JSClassCreate(&def);
     }
     return cls;
 }
 
-static bm_zstream *bm_node_zs_of(JSContextRef ctx, size_t n, const JSValueRef a[]) {
-    if (n < 1 || !JSValueIsObjectOfClass(ctx, a[0], bm_node_zs_class())) return NULL;
+static tv_zstream *tv_node_zs_of(JSContextRef ctx, size_t n, const JSValueRef a[]) {
+    if (n < 1 || !JSValueIsObjectOfClass(ctx, a[0], tv_node_zs_class())) return NULL;
     return JSObjectGetPrivate((JSObjectRef)a[0]);
 }
 
 /* an error as [message, code, errno], or null for none */
-static JSValueRef bm_node_zs_error(JSContextRef ctx, bm_zs_error e) {
+static JSValueRef tv_node_zs_error(JSContextRef ctx, tv_zs_error e) {
     if (!e.message) return JSValueMakeNull(ctx);
     JSValueRef items[3] = { str(ctx, e.message), str(ctx, e.code ? e.code : ""), num(ctx, e.err) };
     return array(ctx, 3, items);
@@ -3779,33 +3779,33 @@ static JSValueRef bm_node_zs_error(JSContextRef ctx, bm_zs_error e) {
 /* open(mode) -> handle */
 NATIVE(n_zlib_open) {
     UNUSED;
-    if (!bm_zs) {
+    if (!tv_zs) {
         JSValueRef msg = str(ctx, "zlib is not available in this program (it was built without the codecs)");
         *exc = JSObjectMakeError(ctx, 1, &msg, NULL);
         return undef(ctx);
     }
-    bm_zstream *z = bm_zs->open((int)arg_num(ctx, n, a, 0, 0));
-    return JSObjectMake(ctx, bm_node_zs_class(), z);
+    tv_zstream *z = tv_zs->open((int)arg_num(ctx, n, a, 0, 0));
+    return JSObjectMake(ctx, tv_node_zs_class(), z);
 }
 
 /* initZlib(handle, windowBits, level, memLevel, strategy, dictionary?) */
 NATIVE(n_zlib_init_zlib) {
     UNUSED;
-    bm_zstream *z = bm_node_zs_of(ctx, n, a);
+    tv_zstream *z = tv_node_zs_of(ctx, n, a);
     if (!z) return undef(ctx);
     uint8_t *dict = NULL;
     size_t dl = 0;
-    if (n > 5) bm_js_bytes_view(a[5], &dict, &dl);
-    bm_zs->init_zlib(z, (int)arg_num(ctx, n, a, 1, 15), (int)arg_num(ctx, n, a, 2, -1), (int)arg_num(ctx, n, a, 3, 8), (int)arg_num(ctx, n, a, 4, 0),
+    if (n > 5) tv_js_bytes_view(a[5], &dict, &dl);
+    tv_zs->init_zlib(z, (int)arg_num(ctx, n, a, 1, 15), (int)arg_num(ctx, n, a, 2, -1), (int)arg_num(ctx, n, a, 3, 8), (int)arg_num(ctx, n, a, 4, 0),
                      dict, dict ? dl : 0);
     return undef(ctx);
 }
 
 /* (a Uint32Array's values) */
-static uint32_t *bm_node_u32s(JSValueRef v, size_t *count) {
+static uint32_t *tv_node_u32s(JSValueRef v, size_t *count) {
     uint8_t *p;
     size_t len;
-    if (!bm_js_bytes_view(v, &p, &len)) {
+    if (!tv_js_bytes_view(v, &p, &len)) {
         *count = 0;
         return NULL;
     }
@@ -3816,40 +3816,40 @@ static uint32_t *bm_node_u32s(JSValueRef v, size_t *count) {
 /* initBrotli(handle, params Uint32Array, dictionary?) -> error or null */
 NATIVE(n_zlib_init_brotli) {
     UNUSED;
-    bm_zstream *z = bm_node_zs_of(ctx, n, a);
+    tv_zstream *z = tv_node_zs_of(ctx, n, a);
     if (!z || n < 2) return undef(ctx);
     size_t count;
-    uint32_t *params = bm_node_u32s(a[1], &count);
+    uint32_t *params = tv_node_u32s(a[1], &count);
     uint8_t *dict = NULL;
     size_t dl = 0;
-    if (n > 2) bm_js_bytes_view(a[2], &dict, &dl);
-    return bm_node_zs_error(ctx, bm_zs->init_brotli(z, params, count, dict, dict ? dl : 0));
+    if (n > 2) tv_js_bytes_view(a[2], &dict, &dl);
+    return tv_node_zs_error(ctx, tv_zs->init_brotli(z, params, count, dict, dict ? dl : 0));
 }
 
 /* initZstd(handle, params Uint32Array, pledgedSrcSize (-1: unknown), dictionary?) -> error or null */
 NATIVE(n_zlib_init_zstd) {
     UNUSED;
-    bm_zstream *z = bm_node_zs_of(ctx, n, a);
+    tv_zstream *z = tv_node_zs_of(ctx, n, a);
     if (!z || n < 2) return undef(ctx);
     size_t count;
-    uint32_t *params = bm_node_u32s(a[1], &count);
+    uint32_t *params = tv_node_u32s(a[1], &count);
     double pledged = arg_num(ctx, n, a, 2, -1);
     uint8_t *dict = NULL;
     size_t dl = 0;
-    if (n > 3) bm_js_bytes_view(a[3], &dict, &dl);
-    return bm_node_zs_error(ctx, bm_zs->init_zstd(z, params, count, pledged < 0 ? UINT64_MAX : (uint64_t)pledged, dict, dict ? dl : 0));
+    if (n > 3) tv_js_bytes_view(a[3], &dict, &dl);
+    return tv_node_zs_error(ctx, tv_zs->init_zstd(z, params, count, pledged < 0 ? UINT64_MAX : (uint64_t)pledged, dict, dict ? dl : 0));
 }
 
 /* write(handle, flush, in|null, inOff, inLen, out, outOff, outLen, state Uint32Array) -> error or
  * null; state gets [avail out, avail in] */
 NATIVE(n_zlib_write) {
     UNUSED;
-    bm_zstream *z = bm_node_zs_of(ctx, n, a);
+    tv_zstream *z = tv_node_zs_of(ctx, n, a);
     if (!z || n < 9) return undef(ctx);
     uint8_t *in = NULL, *out, *state;
     size_t in_cap = 0, out_cap, state_len;
-    if (!JSValueIsNull(ctx, a[2])) bm_js_bytes_view(a[2], &in, &in_cap);
-    if (!bm_js_bytes_view(a[5], &out, &out_cap) || !bm_js_bytes_view(a[8], &state, &state_len) || state_len < 8) return undef(ctx);
+    if (!JSValueIsNull(ctx, a[2])) tv_js_bytes_view(a[2], &in, &in_cap);
+    if (!tv_js_bytes_view(a[5], &out, &out_cap) || !tv_js_bytes_view(a[8], &state, &state_len) || state_len < 8) return undef(ctx);
     size_t in_off = in ? (size_t)arg_num(ctx, n, a, 3, 0) : 0, in_len = in ? (size_t)arg_num(ctx, n, a, 4, 0) : 0;
     size_t out_off = (size_t)arg_num(ctx, n, a, 6, 0), out_len = (size_t)arg_num(ctx, n, a, 7, 0);
     if (in_off > in_cap || in_len > in_cap - in_off || out_off > out_cap || out_len > out_cap - out_off) {
@@ -3858,36 +3858,36 @@ NATIVE(n_zlib_write) {
         return undef(ctx);
     }
     uint32_t avail_in, avail_out;
-    bm_zs->write(z, (int)arg_num(ctx, n, a, 1, 0), in ? in + in_off : NULL, (uint32_t)in_len, out + out_off, (uint32_t)out_len, &avail_in, &avail_out);
+    tv_zs->write(z, (int)arg_num(ctx, n, a, 1, 0), in ? in + in_off : NULL, (uint32_t)in_len, out + out_off, (uint32_t)out_len, &avail_in, &avail_out);
     uint32_t *st = (uint32_t *)state;
     st[0] = avail_out;
     st[1] = avail_in;
-    return bm_node_zs_error(ctx, bm_zs->check(z));
+    return tv_node_zs_error(ctx, tv_zs->check(z));
 }
 
 /* params(handle, level, strategy) -> error or null */
 NATIVE(n_zlib_params) {
     UNUSED;
-    bm_zstream *z = bm_node_zs_of(ctx, n, a);
+    tv_zstream *z = tv_node_zs_of(ctx, n, a);
     if (!z) return undef(ctx);
-    return bm_node_zs_error(ctx, bm_zs->params(z, (int)arg_num(ctx, n, a, 1, 0), (int)arg_num(ctx, n, a, 2, 0)));
+    return tv_node_zs_error(ctx, tv_zs->params(z, (int)arg_num(ctx, n, a, 1, 0), (int)arg_num(ctx, n, a, 2, 0)));
 }
 
 /* reset(handle) -> error or null */
 NATIVE(n_zlib_reset) {
     UNUSED;
-    bm_zstream *z = bm_node_zs_of(ctx, n, a);
+    tv_zstream *z = tv_node_zs_of(ctx, n, a);
     if (!z) return undef(ctx);
-    return bm_node_zs_error(ctx, bm_zs->reset(z));
+    return tv_node_zs_error(ctx, tv_zs->reset(z));
 }
 
 /* close(handle): frees the stream now */
 NATIVE(n_zlib_close) {
     UNUSED;
-    bm_zstream *z = bm_node_zs_of(ctx, n, a);
+    tv_zstream *z = tv_node_zs_of(ctx, n, a);
     if (!z) return undef(ctx);
     JSObjectSetPrivate((JSObjectRef)a[0], NULL);
-    bm_zs->close(z);
+    tv_zs->close(z);
     return undef(ctx);
 }
 
@@ -3895,103 +3895,103 @@ NATIVE(n_zlib_close) {
 NATIVE(n_zlib_crc32) {
     UNUSED;
     uint32_t value = (uint32_t)arg_num(ctx, n, a, 1, 0);
-    if (!bm_zs || n < 1) return num(ctx, value);
+    if (!tv_zs || n < 1) return num(ctx, value);
     uint8_t *p;
     size_t len;
-    if (bm_js_bytes_view(a[0], &p, &len)) return num(ctx, bm_zs->crc32(value, p, len));
+    if (tv_js_bytes_view(a[0], &p, &len)) return num(ctx, tv_zs->crc32(value, p, len));
     char *s = arg_cstr(ctx, n, a, 0);
-    uint32_t r = s ? bm_zs->crc32(value, (const uint8_t *)s, strlen(s)) : value;
+    uint32_t r = s ? tv_zs->crc32(value, (const uint8_t *)s, strlen(s)) : value;
     free(s);
     return num(ctx, r);
 }
 
-static void bm_node_zlib_install(JSContextRef ctx, JSObjectRef native) {
+static void tv_node_zlib_install(JSContextRef ctx, JSObjectRef native) {
     JSObjectRef z = JSObjectMake(ctx, NULL, NULL);
-    set(ctx, z, "available", JSValueMakeBoolean(ctx, bm_zs != NULL));
-    bm_js_def(ctx, z, "open", n_zlib_open);
-    bm_js_def(ctx, z, "initZlib", n_zlib_init_zlib);
-    bm_js_def(ctx, z, "initBrotli", n_zlib_init_brotli);
-    bm_js_def(ctx, z, "initZstd", n_zlib_init_zstd);
-    bm_js_def(ctx, z, "write", n_zlib_write);
-    bm_js_def(ctx, z, "params", n_zlib_params);
-    bm_js_def(ctx, z, "reset", n_zlib_reset);
-    bm_js_def(ctx, z, "close", n_zlib_close);
-    bm_js_def(ctx, z, "crc32", n_zlib_crc32);
+    set(ctx, z, "available", JSValueMakeBoolean(ctx, tv_zs != NULL));
+    tv_js_def(ctx, z, "open", n_zlib_open);
+    tv_js_def(ctx, z, "initZlib", n_zlib_init_zlib);
+    tv_js_def(ctx, z, "initBrotli", n_zlib_init_brotli);
+    tv_js_def(ctx, z, "initZstd", n_zlib_init_zstd);
+    tv_js_def(ctx, z, "write", n_zlib_write);
+    tv_js_def(ctx, z, "params", n_zlib_params);
+    tv_js_def(ctx, z, "reset", n_zlib_reset);
+    tv_js_def(ctx, z, "close", n_zlib_close);
+    tv_js_def(ctx, z, "crc32", n_zlib_crc32);
     set(ctx, native, "zlib", z);
 }
 
-static void bm_node_crypto_install(JSContextRef ctx, JSObjectRef native) {
+static void tv_node_crypto_install(JSContextRef ctx, JSObjectRef native) {
     JSObjectRef c = JSObjectMake(ctx, NULL, NULL);
-    set(ctx, c, "available", JSValueMakeBoolean(ctx, bm_crypto != NULL));
-    bm_js_def(ctx, c, "digestSize", n_crypto_digest_size);
-    bm_js_def(ctx, c, "hashNew", n_crypto_hash_new);
-    bm_js_def(ctx, c, "hmacNew", n_crypto_hmac_new);
-    bm_js_def(ctx, c, "update", n_crypto_update);
-    bm_js_def(ctx, c, "digest", n_crypto_digest);
-    bm_js_def(ctx, c, "hashCopy", n_crypto_hash_copy);
-    bm_js_def(ctx, c, "randomFill", n_crypto_random_fill);
-    bm_js_def(ctx, c, "pbkdf2", n_crypto_pbkdf2);
-    bm_js_def(ctx, c, "scrypt", n_crypto_scrypt);
-    bm_js_def(ctx, c, "hkdf", n_crypto_hkdf);
-    bm_js_def(ctx, c, "timingSafeEqual", n_crypto_equal);
+    set(ctx, c, "available", JSValueMakeBoolean(ctx, tv_crypto != NULL));
+    tv_js_def(ctx, c, "digestSize", n_crypto_digest_size);
+    tv_js_def(ctx, c, "hashNew", n_crypto_hash_new);
+    tv_js_def(ctx, c, "hmacNew", n_crypto_hmac_new);
+    tv_js_def(ctx, c, "update", n_crypto_update);
+    tv_js_def(ctx, c, "digest", n_crypto_digest);
+    tv_js_def(ctx, c, "hashCopy", n_crypto_hash_copy);
+    tv_js_def(ctx, c, "randomFill", n_crypto_random_fill);
+    tv_js_def(ctx, c, "pbkdf2", n_crypto_pbkdf2);
+    tv_js_def(ctx, c, "scrypt", n_crypto_scrypt);
+    tv_js_def(ctx, c, "hkdf", n_crypto_hkdf);
+    tv_js_def(ctx, c, "timingSafeEqual", n_crypto_equal);
     set(ctx, native, "crypto", c);
 }
 
 /* ------------------------------------------------------------------ install */
 
 
-void bm_node_install(JSContextRef ctx, JSObjectRef native) {
-    bm_js_def(ctx, native, "info", n_info);
-    bm_js_def(ctx, native, "cwd", n_cwd);
-    bm_js_def(ctx, native, "chdir", n_chdir);
-    bm_js_def(ctx, native, "exit", n_exit);
-    bm_js_def(ctx, native, "umask", n_umask);
-    bm_js_def(ctx, native, "hrtime", n_hrtime);
-    bm_js_def(ctx, native, "write", n_write);
-    bm_js_def(ctx, native, "isatty", n_isatty);
-    bm_js_def(ctx, native, "windowSize", n_window_size);
-    bm_js_def(ctx, native, "memoryUsage", n_memory_usage);
-    bm_js_def(ctx, native, "cpuUsage", n_cpu_usage);
-    bm_js_def(ctx, native, "ids", n_ids);
-    bm_js_def(ctx, native, "kill", n_kill);
-    bm_js_def(ctx, native, "nowMs", n_now_ms);
-    bm_js_def(ctx, native, "typedArrayType", n_typed_array_type);
-    bm_js_def(ctx, native, "env", n_env);
-    bm_js_def(ctx, native, "signal", n_signal);
-    bm_js_def(ctx, native, "signalHandler", n_signal_handler);
-    bm_js_def(ctx, native, "setRawMode", n_set_raw_mode);
+void tv_node_install(JSContextRef ctx, JSObjectRef native) {
+    tv_js_def(ctx, native, "info", n_info);
+    tv_js_def(ctx, native, "cwd", n_cwd);
+    tv_js_def(ctx, native, "chdir", n_chdir);
+    tv_js_def(ctx, native, "exit", n_exit);
+    tv_js_def(ctx, native, "umask", n_umask);
+    tv_js_def(ctx, native, "hrtime", n_hrtime);
+    tv_js_def(ctx, native, "write", n_write);
+    tv_js_def(ctx, native, "isatty", n_isatty);
+    tv_js_def(ctx, native, "windowSize", n_window_size);
+    tv_js_def(ctx, native, "memoryUsage", n_memory_usage);
+    tv_js_def(ctx, native, "cpuUsage", n_cpu_usage);
+    tv_js_def(ctx, native, "ids", n_ids);
+    tv_js_def(ctx, native, "kill", n_kill);
+    tv_js_def(ctx, native, "nowMs", n_now_ms);
+    tv_js_def(ctx, native, "typedArrayType", n_typed_array_type);
+    tv_js_def(ctx, native, "env", n_env);
+    tv_js_def(ctx, native, "signal", n_signal);
+    tv_js_def(ctx, native, "signalHandler", n_signal_handler);
+    tv_js_def(ctx, native, "setRawMode", n_set_raw_mode);
 
-    bm_js_def(ctx, native, "now", n_now);
-    bm_js_def(ctx, native, "timerSetup", n_timer_setup);
-    bm_js_def(ctx, native, "timerSchedule", n_timer_schedule);
-    bm_js_def(ctx, native, "timerRef", n_timer_ref);
-    bm_js_def(ctx, native, "requestCheck", n_request_check);
+    tv_js_def(ctx, native, "now", n_now);
+    tv_js_def(ctx, native, "timerSetup", n_timer_setup);
+    tv_js_def(ctx, native, "timerSchedule", n_timer_schedule);
+    tv_js_def(ctx, native, "timerRef", n_timer_ref);
+    tv_js_def(ctx, native, "requestCheck", n_request_check);
 
     JSObjectRef os = JSObjectMake(ctx, NULL, NULL);
-    bm_js_def(ctx, os, "getOSInformation", n_os_info);
-    bm_js_def(ctx, os, "getHostname", n_os_hostname);
-    bm_js_def(ctx, os, "getHomeDirectory", n_os_homedir);
-    bm_js_def(ctx, os, "getUptime", n_os_uptime);
-    bm_js_def(ctx, os, "getTotalMem", n_os_totalmem);
-    bm_js_def(ctx, os, "getFreeMem", n_os_freemem);
-    bm_js_def(ctx, os, "getLoadAvg", n_os_loadavg);
-    bm_js_def(ctx, os, "getCPUs", n_os_cpus);
-    bm_js_def(ctx, os, "getInterfaceAddresses", n_os_interfaces);
-    bm_js_def(ctx, os, "getUserInfo", n_os_userinfo);
-    bm_js_def(ctx, os, "getPriority", n_os_getpriority);
-    bm_js_def(ctx, os, "setPriority", n_os_setpriority);
-    bm_js_def(ctx, os, "getAvailableParallelism", n_os_parallelism);
+    tv_js_def(ctx, os, "getOSInformation", n_os_info);
+    tv_js_def(ctx, os, "getHostname", n_os_hostname);
+    tv_js_def(ctx, os, "getHomeDirectory", n_os_homedir);
+    tv_js_def(ctx, os, "getUptime", n_os_uptime);
+    tv_js_def(ctx, os, "getTotalMem", n_os_totalmem);
+    tv_js_def(ctx, os, "getFreeMem", n_os_freemem);
+    tv_js_def(ctx, os, "getLoadAvg", n_os_loadavg);
+    tv_js_def(ctx, os, "getCPUs", n_os_cpus);
+    tv_js_def(ctx, os, "getInterfaceAddresses", n_os_interfaces);
+    tv_js_def(ctx, os, "getUserInfo", n_os_userinfo);
+    tv_js_def(ctx, os, "getPriority", n_os_getpriority);
+    tv_js_def(ctx, os, "setPriority", n_os_setpriority);
+    tv_js_def(ctx, os, "getAvailableParallelism", n_os_parallelism);
     set(ctx, native, "os", os);
 
-    bm_node_fs_install(ctx, native);
-    bm_node_crypto_install(ctx, native);
-    bm_node_zlib_install(ctx, native);
-    bm_node_dns_install(ctx, native);
-    bm_node_vm_install(ctx, native);
-    bm_js_def(ctx, native, "spawnSync", n_spawn_sync);
-    bm_js_def(ctx, native, "setFatalHandler", n_set_fatal_handler);
-    bm_js_def(ctx, native, "fatal", n_fatal);
-    bm_node_streams_install(ctx, native);
-    bm_node_fetch_install(ctx, native);
-    bm_node_http_install(ctx, native);
+    tv_node_fs_install(ctx, native);
+    tv_node_crypto_install(ctx, native);
+    tv_node_zlib_install(ctx, native);
+    tv_node_dns_install(ctx, native);
+    tv_node_vm_install(ctx, native);
+    tv_js_def(ctx, native, "spawnSync", n_spawn_sync);
+    tv_js_def(ctx, native, "setFatalHandler", n_set_fatal_handler);
+    tv_js_def(ctx, native, "fatal", n_fatal);
+    tv_node_streams_install(ctx, native);
+    tv_node_fetch_install(ctx, native);
+    tv_node_http_install(ctx, native);
 }

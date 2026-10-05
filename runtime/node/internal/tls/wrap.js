@@ -95,7 +95,7 @@ const {
   validateString,
   validateUint32,
 } = require('internal/validators');
-// (Barm: loaded when a peer's certificate is asked for, so tls loads without crypto's keys)
+// (Tov: loaded when a peer's certificate is asked for, so tls loads without crypto's keys)
 let x509;
 const InternalX509Certificate = function(cert) {
   x509 ??= require('internal/crypto/x509');

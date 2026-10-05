@@ -1,18 +1,18 @@
-error[V0120] shared_copies.barm:6:3: this changes `b`, but `a` is a separate copy (TypeScript would change both)
+error[V0120] shared_copies.tov:6:3: this changes `b`, but `a` is a separate copy (TypeScript would change both)
     6 |   b.push(3)
-  why: `b` was initialized from `a`: Barm arrays, records and maps are values, so assignment copies
+  why: `b` was initialized from `a`: Tov arrays, records and maps are values, so assignment copies
   if you meant a copy: say so explicitly: `b = a.slice()` (arrays) or build a new value
   if you meant one value: modify `a` directly instead of going through `b`
 
-error[V0120] shared_copies.barm:13:3: this changes `p`, but `q` is a separate copy (TypeScript would change both)
+error[V0120] shared_copies.tov:13:3: this changes `p`, but `q` is a separate copy (TypeScript would change both)
    13 |   p.x = 10
-  why: `q` was initialized from `p`: Barm arrays, records and maps are values, so assignment copies
+  why: `q` was initialized from `p`: Tov arrays, records and maps are values, so assignment copies
   if you meant a copy: say so explicitly: `q = p.slice()` (arrays) or build a new value
   if you meant one value: modify `p` directly instead of going through `q`
 
-error[V0120] shared_copies.barm:39:9: this changes `a`, but `b` is a separate copy (TypeScript would change both)
+error[V0120] shared_copies.tov:39:9: this changes `a`, but `b` is a separate copy (TypeScript would change both)
    39 |   fill(&a)
-  why: `b` was initialized from `a`: Barm arrays, records and maps are values, so assignment copies
+  why: `b` was initialized from `a`: Tov arrays, records and maps are values, so assignment copies
   if you meant a copy: say so explicitly: `b = a.slice()` (arrays) or build a new value
   if you meant one value: modify `a` directly instead of going through `b`
 

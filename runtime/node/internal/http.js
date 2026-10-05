@@ -17,7 +17,7 @@ const {
   CHAR_LOWERCASE_E,
 } = require('internal/constants');
 
-// (Barm: loaded when a proxy URL is parsed)
+// (Tov: loaded when a proxy URL is parsed)
 let URL;
 const { Buffer } = require('buffer');
 const { isIPv4 } = require('internal/net');

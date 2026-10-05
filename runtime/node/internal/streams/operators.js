@@ -15,7 +15,7 @@ const {
   Symbol,
 } = primordials;
 
-// (Barm: loaded when an operator runs, so `stream` doesn't load AbortController, EventTarget,
+// (Tov: loaded when an operator runs, so `stream` doesn't load AbortController, EventTarget,
 // webidl, util and inspect)
 const abortController = () => require('internal/abort_controller');
 
@@ -32,7 +32,7 @@ const {
   validateObject,
   validateFunction,
 } = require('internal/validators');
-// (Barm: internal/event_target loads when an operator first watches a signal)
+// (Tov: internal/event_target loads when an operator first watches a signal)
 const eventTarget = () => require('internal/event_target');
 const { finished } = require('internal/streams/end-of-stream');
 

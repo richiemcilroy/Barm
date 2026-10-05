@@ -1,6 +1,6 @@
 #!/bin/sh
-# Runs the HTTP benchmark on Linux (epoll) in Docker: Barm, Rust (axum) and Bun.
-# The Barm server is emitted as C and compiled in the container; the Rust server is
+# Runs the HTTP benchmark on Linux (epoll) in Docker: Tov, Rust (axum) and Bun.
+# The Tov server is emitted as C and compiled in the container; the Rust server is
 # cross-compiled with zig; Bun comes from the oven/bun image.
 #   bench/http/linux.sh [run.py args...]
 set -eu
@@ -9,7 +9,7 @@ root=$(cd "$here/../.." && pwd)
 bin="$here/out/linux"
 mkdir -p "$bin"
 cargo build --release -q --manifest-path "$root/Cargo.toml"
-"$root/target/release/barm" build "$here/server.barm.ts" --emit-c "$bin/barm-server.c" -o "$here/out/barm-server" > /dev/null
+"$root/target/release/tov" build "$here/server.tov.ts" --emit-c "$bin/tov-server.c" -o "$here/out/tov-server" > /dev/null
 linker="$bin/zig-linker"
 cat > "$linker" <<'PY'
 #!/usr/bin/env python3
@@ -21,9 +21,9 @@ chmod +x "$linker"
 CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="$linker" cargo build --release -q --offline --target aarch64-unknown-linux-gnu --manifest-path "$here/rust/Cargo.toml"
 cp "$here/rust/target/aarch64-unknown-linux-gnu/release/server" "$bin/rust-server"
 [ -x "$bin/bun" ] || docker run --rm -v "$bin:/out" oven/bun:1.4.0 cp /usr/local/bin/bun /out/bun
-docker run --rm -v "$root:/barm" -w /barm/bench/http -e BIN_DIR=/barm/bench/http/out/linux gcc:14 sh -c '
+docker run --rm -v "$root:/tov" -w /tov/bench/http -e BIN_DIR=/tov/bench/http/out/linux gcc:14 sh -c '
   set -e
   gcc -O2 -o $BIN_DIR/load load.c -lpthread
-  gcc -std=gnu11 -O2 -w -ffp-contract=off -o $BIN_DIR/barm-server $BIN_DIR/barm-server.c -lm -lpthread
-  python3 run.py --no-build --only barm,rust,rust-tpc,rust-nodelay,bun "$@"
+  gcc -std=gnu11 -O2 -w -ffp-contract=off -o $BIN_DIR/tov-server $BIN_DIR/tov-server.c -lm -lpthread
+  python3 run.py --no-build --only tov,rust,rust-tpc,rust-nodelay,bun "$@"
 ' sh "$@"

@@ -2882,7 +2882,7 @@ function readableByteStreamControllerFillHeadPullIntoDescriptor(
   desc.bytesFilled += size;
 }
 
-// (Barm: a chunk a native source just made for this stream alone, being enqueued: see
+// (Tov: a chunk a native source just made for this stream alone, being enqueued: see
 // enqueueFresh)
 let freshChunk;
 
@@ -2927,7 +2927,7 @@ function readableByteStreamControllerEnqueue(controller, chunk) {
   if (closeRequested || stream[kState].state !== 'readable')
     return;
 
-  // (Barm: a chunk a native source just made for this stream alone needn't be transferred)
+  // (Tov: a chunk a native source just made for this stream alone needn't be transferred)
   const transferredBuffer = fresh ? buffer : ArrayBufferPrototypeTransfer(buffer);
 
   if (pendingPullIntos.length) {
@@ -3457,7 +3457,7 @@ function setupReadableByteStreamControllerFromSource(
 
 module.exports = {
   ReadableStream,
-  _barmEnqueueFresh: enqueueFresh,
+  _tovEnqueueFresh: enqueueFresh,
   ReadableStreamDefaultReader,
   ReadableStreamBYOBReader,
   ReadableStreamBYOBRequest,

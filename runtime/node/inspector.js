@@ -1,6 +1,6 @@
 'use strict';
 
-// inspector (Barm's own): Barm programs have no V8 inspector to connect to. The module loads, a
+// inspector (Tov's own): Tov programs have no V8 inspector to connect to. The module loads, a
 // Session can be made, and connecting or posting to one fails as with Node.js built without the
 // inspector (ERR_INSPECTOR_NOT_AVAILABLE).
 

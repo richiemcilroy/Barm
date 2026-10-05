@@ -21,7 +21,7 @@
     199998,
     200003
    ],
-   "server": "barm",
+   "server": "tov",
    "route": "json",
    "workers": 1,
    "conns": 128,

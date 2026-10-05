@@ -1,13 +1,13 @@
 'use strict';
 
 // internalBinding('stream_wrap'): libuv streams as Node.js's src/stream_wrap.cc and
-// stream_base.cc expose them, over Barm's native stream handles
-// (globalThis.__barm_native.stream, in runtime/node.c). LibuvStreamWrap is the base of Pipe
+// stream_base.cc expose them, over Tov's native stream handles
+// (globalThis.__tov_native.stream, in runtime/node.c). LibuvStreamWrap is the base of Pipe
 // (pipe_wrap) and, later, TCP: reads arrive in onread(arrayBuffer) with streamBaseState saying
 // how many bytes (or the error); writes report their bytes and whether they finished now
 // through streamBaseState, and call req.oncomplete when they finish later.
 
-const native = globalThis.__barm_native?.stream;
+const native = globalThis.__tov_native?.stream;
 
 const kReadBytesOrError = 0;
 const kArrayBufferOffset = 1;
@@ -47,9 +47,9 @@ class LibuvStreamWrap {
   }
 
   // (for subclasses: the stream is this fd from now on)
-  _barmOpen(fd) {
+  _tovOpen(fd) {
     this[kNative] = native.open(fd);
-    if (this._barmUnref) native.ref(this[kNative], false);
+    if (this._tovUnref) native.ref(this[kNative], false);
     return 0;
   }
 
@@ -163,17 +163,17 @@ class LibuvStreamWrap {
   }
 
   ref() {
-    this._barmUnref = false;
+    this._tovUnref = false;
     if (this[kNative]) native.ref(this[kNative], true);
   }
 
   unref() {
-    this._barmUnref = true;
+    this._tovUnref = true;
     if (this[kNative]) native.ref(this[kNative], false);
   }
 
   hasRef() {
-    return !this._barmUnref;
+    return !this._tovUnref;
   }
 
   getAsyncId() {
@@ -191,15 +191,15 @@ class LibuvStreamWrap {
 // address's family (4, 6, or 0 for a unix path)
 class SocketWrap extends LibuvStreamWrap {
   // (the family a new socket is made in: subclasses)
-  _barmSocket(family) {
+  _tovSocket(family) {
     if (this[kNative]) return 0;
     const fd = native.socket(family);
     if (fd < 0) return fd;
-    return this._barmOpen(fd);
+    return this._tovOpen(fd);
   }
 
-  _barmBind(address, port, family, ipv6Only) {
-    const err = this._barmSocket(family);
+  _tovBind(address, port, family, ipv6Only) {
+    const err = this._tovSocket(family);
     return err || native.bind(this.fd, address, port, family, ipv6Only);
   }
 
@@ -212,14 +212,14 @@ class SocketWrap extends LibuvStreamWrap {
           return;
         }
         const client = new this.constructor(0);
-        client._barmOpen(fd);
+        client._tovOpen(fd);
         this.onconnection(0, client);
       });
     });
   }
 
-  _barmConnect(req, address, port, family) {
-    const err = this._barmSocket(family);
+  _tovConnect(req, address, port, family) {
+    const err = this._tovSocket(family);
     if (err) return err;
     return native.connect(this[kNative], address, port, family, (status) => {
       complete(() => req.oncomplete(status, this, req, true, true));

@@ -1763,7 +1763,7 @@ function getStackString(ctx, error) {
   return ErrorPrototypeToString(error);
 }
 
-// (Barm: JavaScriptCore's stacks are frames alone, "fn@file:line:col" a line; shown as V8's are,
+// (Tov: JavaScriptCore's stacks are frames alone, "fn@file:line:col" a line; shown as V8's are,
 // "Name: message" then "    at fn (file:line:col)", as Node.js shows them)
 const JSC_FRAME = /^(?:([^@\n]*)@)?(.+)$/;
 function v8Stack(error, stack) {

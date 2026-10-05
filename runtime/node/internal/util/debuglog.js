@@ -21,7 +21,7 @@ const {
   CHAR_LOWERCASE_E: kTraceEnd,
   CHAR_LOWERCASE_N: kTraceInstant,
 } = require('internal/constants');
-// (Barm: internal/util/inspect, 100KB, loads when something is first formatted)
+// (Tov: internal/util/inspect, 100KB, loads when something is first formatted)
 const inspect = (...args) => require('internal/util/inspect').inspect(...args);
 const format = (...args) => require('internal/util/inspect').format(...args);
 const formatWithOptions = (...args) => require('internal/util/inspect').formatWithOptions(...args);
@@ -92,7 +92,7 @@ function debuglogImpl(enabled, set) {
 function debuglog(set, cb) {
   function init() {
     set = StringPrototypeToUpperCase(set);
-    // (Barm: initialized on first use, from NODE_DEBUG, when startup hasn't done it)
+    // (Tov: initialized on first use, from NODE_DEBUG, when startup hasn't done it)
     if (testEnabled === undefined) initializeDebugEnv(process.env.NODE_DEBUG);
     enabled = testEnabled(set);
   }

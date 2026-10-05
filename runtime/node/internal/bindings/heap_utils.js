@@ -5,7 +5,7 @@
 
 function unsupported(name) {
   return function () {
-    const e = new Error(`v8.${name}() is not supported by Barm (JavaScriptCore has no V8 heap snapshots)`);
+    const e = new Error(`v8.${name}() is not supported by Tov (JavaScriptCore has no V8 heap snapshots)`);
     e.code = 'ERR_METHOD_NOT_IMPLEMENTED';
     throw e;
   };
