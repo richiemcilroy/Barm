@@ -70,6 +70,8 @@ function serialize(url) {
 const FAST = /^([A-Za-z]+):\/\/([A-Za-z0-9.-]+)(?::([0-9]{1,5}))?(\/[!$%&'()*+,\-./0-9:;=@A-Z[\]_a-z|~]*)?(\?[!$%&()*+,\-./0-9:;=?@A-Z[\\\]^_`a-z{|}~]*)?(#[!#$%&'()*+,\-./0-9:;=?@A-Z[\\\]^_a-z{|}~]*)?$/;
 const DEFAULT_PORTS = { __proto__: null, http: 80, https: 443, ws: 80, wss: 443 };
 const IPV4 = /^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}$/;
+const NUMBERISH = /^(0x|[0-9])/;
+const NUMBER = /^(0x[0-9a-f]*|[0-9]+)$/;
 const DOT_SEGMENT = /\/(\.|%2e){1,2}(\/|$)/i;
 
 function fastParse(input) {
@@ -84,7 +86,7 @@ function fastParse(input) {
   const labels = host.split('.');
   let last = labels[labels.length - 1];
   if (last === '' && labels.length > 1) last = labels[labels.length - 2];
-  if (last === '' || /^(0x|[0-9])/.test(last) && /^(0x[0-9a-f]*|[0-9]+)$/.test(last)) {
+  if (last === '' || NUMBERISH.test(last) && NUMBER.test(last)) {
     if (!IPV4.test(host)) return undefined;
   }
   if (host.includes('xn--')) return undefined;
