@@ -10,6 +10,7 @@
 #include "CodeCache.h"
 #include "Completion.h"
 #include "InitializeThreading.h"
+#include "IntlCache.h"
 #include "JSCInlines.h"
 #include "JSGenericTypedArrayViewInlines.h"
 #include "JSTypedArrays.h"
@@ -155,9 +156,15 @@ bool TVSetOptions(const char* options)
     return Options::setOptions(options);
 }
 
-void TVTimeZoneDidChange()
+void TVTimeZoneDidChange(JSContextRef ctx)
 {
     WTF::timeZoneDidChange();
+    if (!ctx)
+        return;
+    VM& vm = toJS(ctx)->vm();
+    JSLockHolder locker(vm);
+    vm.intlCache().clearForTimeZoneChange();
+    vm.dateCache.clearForTimeZoneChange();
 }
 
 void TVSetStickyLock(JSContextRef ctx)
