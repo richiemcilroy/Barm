@@ -35,7 +35,15 @@ let inspect;
 
 const TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 const BAD_VALUE = /[\0\r\n]/;
-const trimValue = (v) => v.replace(/^[\t\n\r ]+|[\t\n\r ]+$/g, '');
+// (HTTP whitespace off both ends; the value itself when there's none, as there usually isn't)
+const isHttpSpace = (c) => c === 32 || c === 9 || c === 10 || c === 13;
+function trimValue(v) {
+  let s = 0;
+  let e = v.length;
+  while (s < e && isHttpSpace(v.charCodeAt(s))) s++;
+  while (e > s && isHttpSpace(v.charCodeAt(e - 1))) e--;
+  return s === 0 && e === v.length ? v : v.slice(s, e);
+}
 
 function checkName(name, where) {
   if (!TOKEN.test(name)) throw new TypeError(`Headers.${where}: "${name}" is an invalid header name.`);
@@ -169,11 +177,16 @@ function headersWire(h) {
 
 function headersFromWire(wire, guard) {
   const h = new Headers();
-  for (const line of wire.split('\r\n')) {
-    const c = line.indexOf(':');
-    if (c <= 0) continue;
-    const name = line.slice(0, c);
-    const value = trimValue(line.slice(c + 1));
+  // (line by line, without splitting the block)
+  for (let i = 0, n = wire.length; i < n;) {
+    let e = wire.indexOf('\r\n', i);
+    if (e < 0) e = n;
+    const c = wire.indexOf(':', i);
+    const start = i;
+    i = e + 2;
+    if (c <= start || c >= e) continue;
+    const name = wire.slice(start, c);
+    const value = trimValue(wire.slice(c + 1, e));
     const k = name.toLowerCase();
     const entry = h[kHeaders].get(k);
     if (entry) entry[1].push(value);
@@ -500,6 +513,9 @@ function normalizeMethod(m) {
   return NORMAL_METHODS.has(upper) ? upper : m;
 }
 
+let urlBinding;
+const REQUEST_OPTIONS = ['mode', 'credentials', 'cache', 'referrer', 'referrerPolicy', 'integrity', 'keepalive', 'duplex'];
+
 class Request {
   constructor(input, init = {}) {
     if (init !== null && typeof init !== 'object') throw new TypeError("Request constructor: Expected init to be an object.");
@@ -509,14 +525,26 @@ class Request {
       state = { ...input[kState] };
       if (init.body === undefined && input[kBody].used) throw new TypeError('Cannot construct a Request with a Request object that has already been used.');
     } else {
-      let url;
-      try {
-        url = new URL(`${input}`);
-      } catch (e) {
-        throw new TypeError(`Failed to parse URL from ${input}`, { cause: e });
+      // (the URL Standard's parse, without making a URL object: the href and its parts' offsets)
+      urlBinding ??= require('internal/bindings/url');
+      const href = typeof input === 'string' || !(input instanceof URL) ? urlBinding.parse(`${input}`, undefined, false) : input.href;
+      if (href === undefined) {
+        let cause;
+        try {
+          new URL(`${input}`);
+        } catch (e) {
+          cause = e;
+        }
+        throw new TypeError(`Failed to parse URL from ${input}`, { cause });
       }
-      if (url.username || url.password) throw new TypeError(`Request cannot be constructed from a URL that includes credentials: ${input}`);
-      state = { url: url.href, method: 'GET', redirect: 'follow', signal: null, mode: 'cors', credentials: 'same-origin', cache: 'default',
+      if (typeof input === 'string' || !(input instanceof URL)) {
+        const c = urlBinding.urlComponents;
+        // (a username: text between "//" and its end; a password: a ":" after it)
+        if (c[1] > c[0] + 2 || c[2] > c[1]) throw new TypeError(`Request cannot be constructed from a URL that includes credentials: ${input}`);
+      } else if (input.username || input.password) {
+        throw new TypeError(`Request cannot be constructed from a URL that includes credentials: ${input}`);
+      }
+      state = { url: href, method: 'GET', redirect: 'follow', signal: null, mode: 'cors', credentials: 'same-origin', cache: 'default',
         referrer: 'about:client', referrerPolicy: '', integrity: '', keepalive: false, duplex: 'half' };
     }
     if (init.method !== undefined) state.method = normalizeMethod(init.method);
@@ -524,7 +552,8 @@ class Request {
       if (!['follow', 'error', 'manual'].includes(init.redirect)) throw new TypeError(`Request constructor: ${init.redirect} is not an accepted type. Expected one of follow, error, manual.`);
       state.redirect = init.redirect;
     }
-    for (const k of ['mode', 'credentials', 'cache', 'referrer', 'referrerPolicy', 'integrity', 'keepalive', 'duplex']) {
+    for (let i = 0; i < REQUEST_OPTIONS.length; i++) {
+      const k = REQUEST_OPTIONS[i];
       if (init[k] !== undefined) state[k] = init[k];
     }
     if (init.signal !== undefined) state.signal = init.signal;
@@ -707,12 +736,14 @@ async function fetch(input, init = undefined) {
   if (signal?.aborted) throw abortReason(signal);
   if (!native) throw new TypeError('fetch failed', { cause: new Error('fetch is not available outside Barm\'s runtime') });
   const s = request[kState];
-  const url = new URL(s.url);
-  if (url.protocol === 'data:') return dataResponse(url);
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+  // (the href is already a parsed URL's: its scheme is what comes before the first ':')
+  const href = s.url;
+  const https = href.startsWith('https:');
+  if (!https && !href.startsWith('http:')) {
+    if (href.startsWith('data:')) return dataResponse(new URL(href));
     throw new TypeError('fetch failed', { cause: new Error('unknown scheme') });
   }
-  if (url.protocol === 'https:' && !native.tls()) {
+  if (https && !native.tls()) {
     throw new TypeError('fetch failed', { cause: new Error('https needs Barm\'s TLS client, which this program wasn\'t built with') });
   }
   const headers = request[kHeaders];
