@@ -4,7 +4,11 @@
 
 #include "js.h"
 
+#ifdef __APPLE__
 #include <JavaScriptCore/JavaScriptCore.h>
+#else
+#include <JavaScriptCore/JavaScript.h>
+#endif
 #ifdef __APPLE__
 #include <CoreFoundation/CoreFoundation.h>
 #endif
@@ -596,6 +600,37 @@ static uint64_t bm_js_host_due(uint64_t now_ms) {
 static void bm_js_host_run(void) {
     CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, false);
 }
+#else
+/* WebKitGTK's JavaScriptCore runs its timers and the work its threads hand back (the same:
+ * collections, FinalizationRegistry callbacks, WebAssembly compiled off the main thread) on a
+ * GLib main context, which runs only when the event loop runs it: the thread-default context
+ * when the engine starts, so one of the program's own (bm_js_glib, made then; without one the
+ * engine makes one no one runs, the thread not being GLib's main thread to it). */
+#include <glib.h>
+
+static GMainContext *bm_js_glib;
+
+static uint64_t bm_js_host_due(uint64_t now_ms) {
+    GMainContext *c = bm_js_glib;
+    if (!g_main_context_acquire(c)) return 0;
+    gint priority, timeout;
+    gboolean ready = g_main_context_prepare(c, &priority);
+    GPollFD fds[16];
+    gint n = g_main_context_query(c, priority, &timeout, fds, 16);
+    if (n > 16) n = 16;
+    /* (a cycle is finished before the next starts; what's ready is dispatched by bm_js_host_run) */
+    for (gint i = 0; i < n; i++) fds[i].revents = 0;
+    g_main_context_check(c, priority, fds, n);
+    g_main_context_release(c);
+    if (ready || timeout == 0) return now_ms ? now_ms : 1;
+    if (timeout < 0) return 0;
+    return now_ms + (uint64_t)timeout;
+}
+
+static void bm_js_host_run(void) {
+    /* (what's ready now, not what running it makes ready: that's the next turn's) */
+    for (int i = 0; i < 64 && g_main_context_iteration(bm_js_glib, FALSE); i++) {}
+}
 #endif
 
 /* (JavaScriptCore's, exported though not in its headers) */
@@ -682,6 +717,10 @@ JSContextRef bm_js(void) {
         set[i] = !getenv(options[i][0]);
         if (set[i]) setenv(options[i][0], options[i][1], 0);
     }
+#ifndef __APPLE__
+    bm_js_glib = g_main_context_new();
+    g_main_context_push_thread_default(bm_js_glib);
+#endif
     JSGlobalContextRef ctx = JSGlobalContextCreate(NULL);
     for (int i = 0; i < noptions; i++)
         if (set[i]) unsetenv(options[i][0]);
@@ -689,10 +728,8 @@ JSContextRef bm_js(void) {
     bm_js_ctx = ctx;
     if (getenv("BARM_JS_PROFILE") && JSContextGroupEnableSamplingProfiler && JSContextGroupEnableSamplingProfiler(JSContextGetGroup(ctx)))
         atexit(bm_js_profile_write);
-#ifdef __APPLE__
     bm_loop_host_due = bm_js_host_due;
     bm_loop_host_run = bm_js_host_run;
-#endif
     bm_loop_idle = bm_js_idle;
     /* values made without the engine (js.h): only if it encodes them as expected */
     bm_js_encoded = bm_js_bits(JSValueMakeNumber(ctx, 1.5)) == 0x3ffa000000000000ull && bm_js_bits(JSValueMakeNumber(ctx, -1)) == 0xfffe0000ffffffffull

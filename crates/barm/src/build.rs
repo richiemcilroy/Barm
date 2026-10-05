@@ -237,9 +237,6 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     let mut native = false;
     // npm packages: bundled into a blob the program embeds (see runtime/js.c)
     if !npm.is_empty() {
-        if !cfg!(target_vendor = "apple") {
-            return Err(BuildError::Message("npm packages need macOS for now (Barm runs them on the system's JavaScriptCore)".into()));
-        }
         let b = crate::npm::bundle(&npm_root, &npm).map_err(|e| BuildError::Message(format!("can't bundle the npm packages: {e}")))?;
         if std::env::var_os("BARM_TRACE").is_some() {
             for w in &b.warnings {
@@ -265,7 +262,11 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         }
         native = b.native;
         let p = path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
-        c_src.push_str(&format!("__asm__(\".section __TEXT,__const\\n.globl _bm_js_blob\\n.p2align 3\\n_bm_js_blob:\\n.incbin \\\"{p}\\\"\\n.byte 0\\n.text\\n\");\n"));
+        if cfg!(target_vendor = "apple") {
+            c_src.push_str(&format!("__asm__(\".section __TEXT,__const\\n.globl _bm_js_blob\\n.p2align 3\\n_bm_js_blob:\\n.incbin \\\"{p}\\\"\\n.byte 0\\n.text\\n\");\n"));
+        } else {
+            c_src.push_str(&format!("__asm__(\".section .rodata.bm_js_blob,\\\"a\\\"\\n.globl bm_js_blob\\n.p2align 3\\nbm_js_blob:\\n.incbin \\\"{p}\\\"\\n.byte 0\\n.text\\n\");\n"));
+        }
     }
     let t2 = Instant::now();
     if let Some(p) = &opts.emit_c {
@@ -300,7 +301,11 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     // A program that fetches links TLS (its code calls bm_tls_install).
     let tls = uses_tls.then(|| TlsArchive::new(&cc, sysroot.as_deref(), &extra));
     // A program importing npm packages links the JavaScript bridge (compiled once per compiler).
-    let js_key = if npm.is_empty() { String::new() } else { hash_hex(&[JS_C.as_bytes(), NODE_C.as_bytes(), NAPI_C.as_bytes(), codegen::JS_H.as_bytes(), codegen::RUNTIME_H.as_bytes(), cc.as_bytes(), flag_text.as_bytes(), JIT_ENTITLEMENTS.as_bytes()]) };
+    let jsc = if npm.is_empty() { None } else { Some(jsc_flags()?) };
+    let js_key = match &jsc {
+        None => String::new(),
+        Some(j) => hash_hex(&[JS_C.as_bytes(), NODE_C.as_bytes(), NAPI_C.as_bytes(), codegen::JS_H.as_bytes(), codegen::RUNTIME_H.as_bytes(), cc.as_bytes(), flag_text.as_bytes(), JIT_ENTITLEMENTS.as_bytes(), j.cflags.join(" ").as_bytes(), j.libs.join(" ").as_bytes()]),
+    };
     // Link flags (see below) are part of what a cached binary was built with.
     let tls_key = tls.as_ref().map(|t| t.key.clone()).unwrap_or_default();
     let key = hash_hex(&[c_src.as_bytes(), rt_key.as_bytes(), LINK_FLAGS.as_bytes(), tls_key.as_bytes(), js_key.as_bytes()]);
@@ -359,8 +364,10 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         cmd.args(extra.split_whitespace()).arg("-o").arg(&tmp).arg(&obj);
     }
     cmd.arg(&rt_obj);
-    if !js_key.is_empty() {
-        let objs = js_objects(&cc, &flags_base(&flags, &pch), &c_dir, &js_key)?;
+    if let Some(jsc) = &jsc {
+        let mut js_flags = flags_base(&flags, &pch);
+        js_flags.extend(jsc.cflags.iter().cloned());
+        let objs = js_objects(&cc, &js_flags, &c_dir, &js_key)?;
         cmd.arg(&objs[0]).arg(&objs[1]);
         if native {
             // native addons find Node-API in the program (they're linked against no library)
@@ -371,7 +378,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
                 cmd.arg("-rdynamic");
             }
         }
-        cmd.args(["-framework", "JavaScriptCore", "-framework", "CoreFoundation", "-lobjc"]);
+        cmd.args(&jsc.libs);
     }
     if let Some(t) = &tls {
         cmd.arg(t.build(&cc, &c_dir)?);
@@ -403,7 +410,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     let linked = run_cc(cmd, &ld, &c_path);
     let _ = std::fs::remove_file(&obj);
     linked?;
-    if !js_key.is_empty() {
+    if jsc.is_some() && cfg!(target_vendor = "apple") {
         sign_for_jit(&tmp, &c_dir)?;
     }
     std::fs::rename(&tmp, &binary).map_err(|e| BuildError::Message(format!("can't move the binary into the cache: {e}")))?;
@@ -446,6 +453,30 @@ fn js_objects(cc: &str, flags: &[String], c_dir: &Path, key: &str) -> Result<Vec
     }
     let _ = std::fs::remove_dir(&dir);
     Ok(objs)
+}
+
+/// How programs importing npm packages compile and link against JavaScriptCore: on macOS the
+/// system's framework; elsewhere WebKitGTK's library (pkg-config's javascriptcoregtk-4.1, or 6.0).
+struct JscFlags {
+    cflags: Vec<String>,
+    libs: Vec<String>,
+}
+
+fn jsc_flags() -> Result<JscFlags, BuildError> {
+    if cfg!(target_vendor = "apple") {
+        return Ok(JscFlags { cflags: Vec::new(), libs: ["-framework", "JavaScriptCore", "-framework", "CoreFoundation", "-lobjc"].map(String::from).to_vec() });
+    }
+    let pkg = |package: &str, what: &str| -> Option<Vec<String>> {
+        let out = Command::new("pkg-config").arg(what).arg(package).output().ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).split_whitespace().map(String::from).collect())
+    };
+    for package in ["javascriptcoregtk-4.1", "javascriptcoregtk-6.0"] {
+        if let (Some(cflags), Some(mut libs)) = (pkg(package, "--cflags"), pkg(package, "--libs")) {
+            libs.push("-ldl".into());
+            return Ok(JscFlags { cflags, libs });
+        }
+    }
+    Err(BuildError::Message("npm packages need JavaScriptCore: install WebKitGTK's (on Debian and Ubuntu, libjavascriptcoregtk-4.1-dev; pkg-config finds it)".into()))
 }
 
 /// Ad-hoc signs a binary with the JIT entitlement (see JIT_ENTITLEMENTS).
