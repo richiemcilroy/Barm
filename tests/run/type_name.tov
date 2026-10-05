@@ -1,0 +1,25 @@
+// `type` is a keyword only where a type declaration starts; elsewhere it's a name, as in TypeScript.
+
+type Asset = { body: string, type: string }
+export type Kind = "file" | "dir"
+
+function asset(body: string, type: string): Asset {
+  return { body, type }
+}
+
+function describe(a: Asset): string {
+  const type = a.type
+  let label = type
+  if (type === "text/html") {
+    label = "a page"
+  }
+  return `${a.body} is ${label}`
+}
+
+function main() {
+  const type = "image/svg+xml"
+  const k: Kind = "file"
+  console.log(describe(asset("logo", type)))
+  console.log(describe(asset("index", "text/html")))
+  console.log(asset("x", k).type)
+}
