@@ -80,7 +80,7 @@ open(sys.argv[1], "wb").write(b)' "$llint"
     # uses of WTF and bmalloc (which hold alternatives for other platforms), keeping what the
     # interpreters, outside it, call (else they're the engine's own, and unused, to the optimizer)
     nm -u "$llint" | sed 's/^/-Wl,-u,/' > "$out.tmp/llint-uses"
-    clang -r -nostdlib -flto=thin -O3 -Wl,-keep_private_externs @"$out.tmp/llint-uses" -Wl,-force_load,"$out.tmp/libJavaScriptCore.a" $jit "$build/lib/libWTF.a" "$build/lib/libbmalloc.a" \
+    clang -r -nostdlib -flto=thin -O3 -Wl,-mllvm,-import-instr-limit=20 -Wl,-keep_private_externs @"$out.tmp/llint-uses" -Wl,-force_load,"$out.tmp/libJavaScriptCore.a" $jit "$build/lib/libWTF.a" "$build/lib/libbmalloc.a" \
         -Wl,-cache_path_lto,"$cache/lto-cache-$os-$arch" -o "$out.tmp/engine.o"
     libtool -static -o "$out.tmp/lib/libtovjsc.a" "$out.tmp/engine.o" "$llint" 2> /dev/null
     rm "$llint" "$out.tmp/llint-uses" "$out.tmp/libJavaScriptCore.a" "$out.tmp/engine.o"
