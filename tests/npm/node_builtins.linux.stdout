@@ -1,0 +1,20 @@
+read "héllo\nmore" 11 true false
+stat 11 true false number true
+readdir a.txt,d e/,x.json
+error ENOENT -2 open ENOENT: no such file or directory, open 'DIR/nope'
+rename+copy b.txt,c.txt,d
+fd read 3 él
+json 1
+callback  "héllo\nmore"
+filehandle 10 number
+promises promised 8
+rm false
+stream "héllo\nmore"
+writestream one two
+process linux number true string string
+os linux Linux true true string true true
+timer true
+immediate ok
+ping 7
+n=42
+{ a: [ 1, 2 ], b: 'x' }
