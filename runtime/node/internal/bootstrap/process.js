@@ -61,7 +61,27 @@ process.execArgv = info.execArgv ?? [];
 process.argv0 = info.argv[0] ?? 'tov';
 process.execPath = info.execPath;
 // (~50 µs of strings: made when first read)
-lazyProperty('env', () => (native.env ? native.env() : info.env));
+lazyProperty('env', () => {
+  const env = native.env ? native.env() : info.env;
+  // (assigning TZ changes the time zone at once, as in Node.js; it's listed once it has a value)
+  if (native.setTZ) {
+    let tz = env.TZ;
+    const define = () => Object.defineProperty(env, 'TZ', {
+      __proto__: null,
+      enumerable: tz !== undefined,
+      configurable: true,
+      get: () => tz,
+      set(v) {
+        const listed = tz !== undefined;
+        tz = `${v}`;
+        native.setTZ(tz);
+        if (!listed) define();
+      },
+    });
+    define();
+  }
+  return env;
+});
 process.pid = info.pid;
 process.ppid = info.ppid;
 process.exitCode = undefined;

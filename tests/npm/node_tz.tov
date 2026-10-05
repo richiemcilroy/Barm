@@ -1,0 +1,6 @@
+import run from "node-tz"
+
+function main() {
+  // process.env.TZ assignments, seen by Date and Intl at once
+  try run()
+}
