@@ -36,6 +36,11 @@ JS_EXPORT double BMRunLoopSecondsUntilWork(void);
 JS_EXPORT void BMRunLoopCycle(void);
 JS_EXPORT void BMRunLoopSetWakeUp(void (*wake)(void));
 
+/* A new Uint8Array of `len` bytes, uninitialized, its bytes at *bytes for the caller to fill
+ * before anything else runs; NULL if out of memory. Unlike JSObjectGetTypedArrayBytesPtr's, its
+ * buffer isn't pinned (a stream can transfer it), and a small one has none until asked for. */
+JS_EXPORT JSObjectRef BMMakeUint8Array(JSContextRef ctx, size_t len, void **bytes);
+
 /* Sets the engine's options ("name=value name=value ...", as JSC_name=value in the
  * environment), before the first context is made; false if one isn't an option. */
 JS_EXPORT bool BMSetOptions(const char *options);

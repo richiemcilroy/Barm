@@ -2882,7 +2882,22 @@ function readableByteStreamControllerFillHeadPullIntoDescriptor(
   desc.bytesFilled += size;
 }
 
-const kFreshChunk = Symbol.for('nodejs.barm.freshChunk');
+// (Barm: a chunk a native source just made for this stream alone, being enqueued: see
+// enqueueFresh)
+let freshChunk;
+
+// Enqueues a chunk a native source (fetch's body) just made for this stream alone. It needn't
+// be transferred, nor viewed afresh: a waiting reader gets the chunk itself, never asked for its
+// buffer (which the engine makes, a second allocation as big as the chunk, the first time it's
+// asked).
+function enqueueFresh(controller, chunk) {
+  freshChunk = chunk;
+  try {
+    controller.enqueue(chunk);
+  } finally {
+    freshChunk = undefined;
+  }
+}
 
 function readableByteStreamControllerEnqueue(controller, chunk) {
   const {
@@ -2892,6 +2907,19 @@ function readableByteStreamControllerEnqueue(controller, chunk) {
     stream,
   } = controller[kState];
 
+  const fresh = chunk === freshChunk;
+  if (fresh &&
+      !closeRequested &&
+      stream[kState].state === 'readable' &&
+      !pendingPullIntos.length &&
+      !queue.length &&
+      readableStreamHasDefaultReader(stream) &&
+      readableStreamGetNumReadRequests(stream)) {
+    readableStreamFulfillReadRequest(stream, chunk, false);
+    readableByteStreamControllerCallPullIfNeeded(controller);
+    return;
+  }
+
   const buffer = ArrayBufferViewGetBuffer(chunk);
   const byteOffset = ArrayBufferViewGetByteOffset(chunk);
   const byteLength = ArrayBufferViewGetByteLength(chunk);
@@ -2899,9 +2927,8 @@ function readableByteStreamControllerEnqueue(controller, chunk) {
   if (closeRequested || stream[kState].state !== 'readable')
     return;
 
-  // (Barm: a chunk a native source just made for this stream alone needn't be transferred:
-  // JavaScriptCore copies a buffer it handed native code a pointer to)
-  const transferredBuffer = chunk[kFreshChunk] === true ? buffer : ArrayBufferPrototypeTransfer(buffer);
+  // (Barm: a chunk a native source just made for this stream alone needn't be transferred)
+  const transferredBuffer = fresh ? buffer : ArrayBufferPrototypeTransfer(buffer);
 
   if (pendingPullIntos.length) {
     const firstPendingPullInto = pendingPullIntos[0];
@@ -3430,6 +3457,7 @@ function setupReadableByteStreamControllerFromSource(
 
 module.exports = {
   ReadableStream,
+  _barmEnqueueFresh: enqueueFresh,
   ReadableStreamDefaultReader,
   ReadableStreamBYOBReader,
   ReadableStreamBYOBRequest,

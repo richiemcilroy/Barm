@@ -15,13 +15,19 @@ const kGuard = Symbol('kGuard');
 const kBody = Symbol('kBody');
 const kState = Symbol('kState');
 const kDisturbed = Symbol.for('nodejs.stream.disturbed');
-const kFreshChunk = Symbol.for('nodejs.barm.freshChunk');   // (see internal/webstreams/readablestream)
 
 let ReadableStreamClass;
+let enqueueFreshChunk;
 function ReadableStream() {
-  ReadableStreamClass ??= require('internal/webstreams/readablestream').ReadableStream;
+  if (!ReadableStreamClass) {
+    const streams = require('internal/webstreams/readablestream');
+    ReadableStreamClass = streams.ReadableStream;
+    enqueueFreshChunk = streams._barmEnqueueFresh;
+  }
   return ReadableStreamClass;
 }
+// (a body's chunk, made for its stream alone: see internal/webstreams/readablestream)
+const enqueueFresh = (controller, chunk) => enqueueFreshChunk(controller, chunk);
 
 let BlobClass;
 function Blob() {
@@ -392,9 +398,7 @@ function fetchedStream(handle, signal, done = noop) {
       return new Promise((resolve, reject) => {
         native.read(handle, (n) => {
           if (n > 0) {
-            const chunk = native.take(handle);
-            chunk[kFreshChunk] = true;
-            controller.enqueue(chunk);
+            enqueueFresh(controller, native.take(handle));
             resolve();
           } else if (n === 0) {
             done();

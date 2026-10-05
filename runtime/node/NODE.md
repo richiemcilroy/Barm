@@ -44,7 +44,7 @@ Per-context files also get `privateSymbols` and `perIsolateSymbols`.
 
 - `internal/util/types.js`: `isKeyObject` and `isCryptoKey` answer false without loading `internal/crypto/keys` (Barm's crypto has neither yet).
 - `internal/primordials.js`: defines `Symbol.dispose` and `Symbol.asyncDispose` when the engine lacks them (JavaScriptCore does), as Node.js once did.
-- `internal/webstreams/readablestream.js`: a byte stream's enqueue keeps a chunk's buffer instead of transferring it when the chunk carries `Symbol.for('nodejs.barm.freshChunk')` (fetch bodies' chunks, made by native code for the stream alone): JavaScriptCore copies a buffer whose bytes native code has had a pointer to.
+- `internal/webstreams/readablestream.js`: `_barmEnqueueFresh(controller, chunk)` enqueues a chunk native code just made for the stream alone (fetch bodies'): a waiting default reader gets the chunk itself, not a new view of its buffer (asking a typed array for its buffer makes one, a second allocation as big as the chunk), and a queued one keeps its buffer instead of transferring it.
 - `internal/perf/performance.js`: `performance.now()` checks its receiver inline and calls `validateThisInternalField` only to throw (the validator's stack-frame wrapper costs more than the clock).
 - `internal/url.js`: blob URLs get their UUIDs from `internal/barm/random` rather than `internal/crypto/random`, so `URL` doesn't bring `crypto` into every bundle. `installObjectURLMethods()` runs as the module loads (Node.js's bootstrap calls it), and the `blob` binding loads with the first blob URL.
 - `internal/tls/wrap.js`: `internal/crypto/x509` loads when a peer certificate is asked for, so `tls` and `https` load without Node.js's key objects.

@@ -1307,6 +1307,15 @@ static void bm_js_free_bytes(void *bytes, void *ctx) { (void)ctx; free(bytes); }
  * scavenges: a malloc'd copy freed only when collected would fragment the system allocator) */
 JSObjectRef bm_js_bytes_copy(const void *ptr, size_t len) {
     JSContextRef ctx = bm_js();
+#ifdef BM_JSC_OWN
+    /* (BarmAPI's: the C API's pins the array's buffer once its bytes are asked for, so it can't
+     * be transferred) */
+    void *bytes;
+    JSObjectRef own = BMMakeUint8Array(ctx, len, &bytes);
+    if (!own) bm_trap("out of memory", "js");
+    if (len) memcpy(bytes, ptr, len);
+    return own;
+#endif
     JSObjectRef a = JSObjectMakeTypedArray(ctx, kJSTypedArrayTypeUint8Array, len, NULL);
     if (!a) bm_trap("out of memory", "js");
     if (len) memcpy(JSObjectGetTypedArrayBytesPtr(ctx, a, NULL), ptr, len);
