@@ -2,6 +2,9 @@
  * promises across the boundary. Linked only by programs that import npm packages, with
  * runtime/node.c (the Node.js natives) and the system JavaScriptCore framework. */
 
+#ifndef __APPLE__
+#define _GNU_SOURCE 1   /* (glibc's posix_spawn extensions: POSIX_SPAWN_SETSID, addclosefrom_np) */
+#endif
 #include "js.h"
 
 /* The engine: Barm's own JavaScriptCore (BM_JSC_OWN: scripts/jsc, linked into the program), or
