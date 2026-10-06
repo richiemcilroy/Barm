@@ -69,11 +69,22 @@ def setup(cap):
 
 def serve_media():
     proc = subprocess.Popen(["node", os.path.join(HERE, "origin.mjs"), OUT, str(MEDIA_PORT)])
-    for _ in range(200):
-        if not port_free(MEDIA_PORT):
-            return proc
-        time.sleep(0.02)
-    raise RuntimeError("the media origin didn't start")
+    # The port opens with the first worker; until they've all started, connections can be refused
+    # (and a refused fetch fails a probe, or ends a Bun server). Ready once 200 requests in a row,
+    # each on a new connection, are answered.
+    deadline = time.time() + 20
+    ok = 0
+    while ok < 200:
+        if time.time() > deadline:
+            raise RuntimeError("the media origin didn't start")
+        try:
+            req = urllib.request.Request(VIDEO, headers={"Range": "bytes=0-0", "Connection": "close"})
+            OPENER.open(req, timeout=1).read()
+            ok += 1
+        except Exception:
+            ok = 0
+            time.sleep(0.05)
+    return proc
 
 
 RUNTIMES = {
