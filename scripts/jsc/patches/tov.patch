@@ -54,10 +54,22 @@ index 26e825ac..db9b9aa3 100644
      static std::once_flag onceFlag;
      std::call_once(onceFlag, [] {
 diff --git a/Source/JavaScriptCore/runtime/JSLock.cpp b/Source/JavaScriptCore/runtime/JSLock.cpp
-index 0fa9323d..09084cae 100644
+index 0fa9323d..705df868 100644
 --- a/Source/JavaScriptCore/runtime/JSLock.cpp
 +++ b/Source/JavaScriptCore/runtime/JSLock.cpp
-@@ -287,8 +287,15 @@ void JSLock::unlock(intptr_t unlockCount) WTF_IGNORES_THREAD_SAFETY_ANALYSIS
+@@ -91,6 +91,11 @@ void JSLock::lock()
+ void JSLock::lock(intptr_t lockCount) WTF_IGNORES_THREAD_SAFETY_ANALYSIS
+ {
+     ASSERT(lockCount > 0);
++    // (Tov: the sticky lock's owner takes it again for nothing: no failed tryLock first)
++    if (m_sticky && m_hasOwnerThread.load(std::memory_order_relaxed) && m_ownerThread.get() == &Thread::currentSingleton()) [[likely]] {
++        m_lockCount += lockCount;
++        return;
++    }
+ #if USE(WEB_THREAD)
+     if (m_isWebThreadAware) {
+         ASSERT(WebCoreWebThreadIsEnabled && WebCoreWebThreadIsEnabled());
+@@ -287,8 +292,15 @@ void JSLock::unlock(intptr_t unlockCount) WTF_IGNORES_THREAD_SAFETY_ANALYSIS
  
      // Maintain m_lockCount while calling willReleaseLock() so that its callees know that
      // they still have the lock.
@@ -74,7 +86,7 @@ index 0fa9323d..09084cae 100644
  
      m_lockCount -= unlockCount;
  
-@@ -299,6 +306,21 @@ void JSLock::unlock(intptr_t unlockCount) WTF_IGNORES_THREAD_SAFETY_ANALYSIS
+@@ -299,9 +311,25 @@ void JSLock::unlock(intptr_t unlockCount) WTF_IGNORES_THREAD_SAFETY_ANALYSIS
  }
  
  void JSLock::willReleaseLock()
@@ -95,8 +107,13 @@ index 0fa9323d..09084cae 100644
 +void JSLock::willReleaseLockVisibly()
  {
      {
-         RefPtr protectedVM { m_vm };
-@@ -318,6 +340,15 @@ void JSLock::willReleaseLock()
+-        RefPtr protectedVM { m_vm };
++        // (the VM can't go while its lock is held: no reference taken, two atomics a call)
++        VM* protectedVM = m_vm;
+         if (protectedVM) {
+             static bool useLegacyDrain = false;
+ #if PLATFORM(COCOA)
+@@ -318,6 +346,15 @@ void JSLock::willReleaseLock()
                  protectedVM->clearLastException();
  
              protectedVM->heap.releaseDelayedReleasedObjects();
@@ -112,7 +129,7 @@ index 0fa9323d..09084cae 100644
              protectedVM->setStackPointerAtVMEntry(nullptr);
  
              if (m_shouldReleaseHeapAccess)
-@@ -347,6 +378,12 @@ unsigned JSLock::dropAllLocks(DropAllLocks* dropper)
+@@ -347,6 +384,12 @@ unsigned JSLock::dropAllLocks(DropAllLocks* dropper)
      if (!currentThreadIsHoldingLock())
          return 0;
  

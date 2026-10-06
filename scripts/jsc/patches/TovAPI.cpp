@@ -202,3 +202,26 @@ JSValueRef TVGetProperty(JSContextRef ctx, JSValueRef value, void* name, JSValue
     }
     return toRef(globalObject, result);
 }
+
+JSValueRef TVCall(JSContextRef ctx, JSObjectRef function, JSObjectRef thisObject, size_t argumentCount, const JSValueRef arguments[], JSValueRef* exception)
+{
+    JSGlobalObject* globalObject = toJS(ctx);
+    VM& vm = globalObject->vm();
+    JSLockHolder locker(vm);
+    auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
+    JSObject* callee = toJS(function);
+    auto callData = JSC::getCallData(callee);
+    if (callData.type == CallData::Type::None) [[unlikely]]
+        return JSObjectCallAsFunction(ctx, function, thisObject, argumentCount, arguments, exception);
+    MarkedArgumentBuffer args;
+    for (size_t i = 0; i < argumentCount; i++)
+        args.append(toJS(globalObject, arguments[i]));
+    JSValue result = JSC::call(globalObject, callee, callData, thisObject ? JSValue(toJS(thisObject)) : JSValue(globalObject->globalThis()), args);
+    if (Exception* thrown = scope.exception()) [[unlikely]] {
+        if (exception)
+            *exception = toRef(globalObject, thrown->value());
+        scope.clearException();
+        return nullptr;
+    }
+    return toRef(globalObject, result);
+}

@@ -40,6 +40,14 @@
 #include <mach-o/dyld.h>
 #endif
 
+/* A call Tov makes most (a fused expression, a method, a record's maker): Tov's own engine has a
+ * leaner one (TVCall) than the C API's. */
+#ifdef TV_JSC_OWN
+#define TV_JS_CALL TVCall
+#else
+#define TV_JS_CALL JSObjectCallAsFunction
+#endif
+
 JSGlobalContextRef tv_js_ctx;
 bool tv_js_encoded;
 /* runtime/napi.c (native addons), in programs whose bundle holds one: it sets this */
@@ -1294,7 +1302,7 @@ JSValueRef tv_js_call(JSValueRef fn, JSValueRef self, size_t n, const JSValueRef
         /* (a primitive `this` is boxed, as for sloppy-mode callees) */
         this_obj = JSValueToObject(ctx, self, NULL);
     }
-    JSValueRef r = JSObjectCallAsFunction(ctx, (JSObjectRef)fn, this_obj, n, args, exc);
+    JSValueRef r = TV_JS_CALL(ctx, (JSObjectRef)fn, this_obj, n, args, exc);
     return *exc ? NULL : r;
 }
 
@@ -1309,7 +1317,7 @@ JSValueRef tv_js_invoke(JSValueRef obj, JSStringRef key, size_t n, const JSValue
         tv_str_release(k);
         return tv_js_type_error(ctx, msg, exc);
     }
-    JSValueRef r = JSObjectCallAsFunction(ctx, (JSObjectRef)fn, JSValueToObject(ctx, obj, NULL), n, args, exc);
+    JSValueRef r = TV_JS_CALL(ctx, (JSObjectRef)fn, JSValueToObject(ctx, obj, NULL), n, args, exc);
     return *exc ? NULL : r;
 }
 
@@ -1809,7 +1817,7 @@ JSValueRef tv_js_name_get(JSValueRef obj, tv_js_name *k, JSValueRef *exc) {
         k->get = tv_js_make_fn("o", 0, &b);
         if (!k->get) return tv_js_get(obj, tv_js_name_str(k), exc);
     }
-    JSValueRef r = JSObjectCallAsFunction(ctx, k->get, NULL, 1, &obj, exc);
+    JSValueRef r = TV_JS_CALL(ctx, k->get, NULL, 1, &obj, exc);
     return *exc ? NULL : r;
 }
 
@@ -1833,7 +1841,7 @@ JSValueRef tv_js_name_call(JSValueRef obj, tv_js_name *k, size_t n, const JSValu
     JSValueRef all[5];
     all[0] = obj;
     for (size_t i = 0; i < n; i++) all[i + 1] = args[i];
-    JSValueRef r = JSObjectCallAsFunction(ctx, k->call[n], NULL, n + 1, all, exc);
+    JSValueRef r = TV_JS_CALL(ctx, k->call[n], NULL, n + 1, all, exc);
     return *exc ? NULL : r;
 }
 
@@ -1866,7 +1874,7 @@ JSValueRef tv_js_shape_make(tv_js_shape *s, const JSValueRef *values) {
         tv_sb_push_cstr(&b, " return o;");
         s->make = tv_js_make_fn(NULL, s->n, &b);
     }
-    return JSObjectCallAsFunction(ctx, s->make, NULL, s->n, values, NULL);
+    return TV_JS_CALL(ctx, s->make, NULL, s->n, values, NULL);
 }
 
 JSValueRef tv_js_thunk(JSObjectRef *slot, const char *body, size_t n, const JSValueRef *args, JSValueRef *exc) {
@@ -1877,7 +1885,7 @@ JSValueRef tv_js_thunk(JSObjectRef *slot, const char *body, size_t n, const JSVa
         *slot = tv_js_make_fn(NULL, (uint32_t)n, &b);
         if (!*slot) tv_trap("internal error: a fused JavaScript expression didn't compile", body);
     }
-    JSValueRef r = JSObjectCallAsFunction(ctx, *slot, NULL, n, args, exc);
+    JSValueRef r = TV_JS_CALL(ctx, *slot, NULL, n, args, exc);
     return *exc ? NULL : r;
 }
 

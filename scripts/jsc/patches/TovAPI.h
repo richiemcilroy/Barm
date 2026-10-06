@@ -58,6 +58,11 @@ JS_EXPORT void TVTimeZoneDidChange(JSContextRef ctx);
  * so a collection on another thread needn't wait for it; the next call takes it again. */
 JS_EXPORT void TVSetStickyLock(JSContextRef ctx);
 
+/* JSObjectCallAsFunction, for the calls Tov makes most (a fused expression, a method): `function`
+ * must be callable; `thisObject` NULL is the global object; NULL with *exception set if it
+ * throws. (Without the C API's generality: no profiling hook, its arguments' buffer kept inline.) */
+JS_EXPORT JSValueRef TVCall(JSContextRef ctx, JSObjectRef function, JSObjectRef thisObject, size_t argumentCount, const JSValueRef arguments[], JSValueRef *exception);
+
 /* A property name, made once and kept (for TVGetProperty). */
 JS_EXPORT void *TVPropertyName(JSContextRef ctx, const char *utf8);
 /* `value.name`, as JavaScript reads it (from a primitive's prototype, through getters and
