@@ -41,9 +41,11 @@ typedef JSValueRef (*JSObjectCallAsFunctionCallback)(JSContextRef ctx, JSObjectR
  * compiled when it's first required (layout: Bundle::blob in crates/tov/src/npm/bundle.rs). */
 extern const unsigned char tv_js_blob[];
 
-/* The context: created on first use, with globalThis.__tov_native (filled by tv_node_install),
- * globalThis.__tov_source, and the bundle evaluated. */
-JSContextRef tv_js(void);
+/* The context: created on first use (tv_js_start), with globalThis.__tov_native (filled by
+ * tv_node_install), globalThis.__tov_source, and the bundle evaluated. */
+JSContextRef tv_js_start(void);
+extern JSGlobalContextRef tv_js_ctx;
+static inline JSContextRef tv_js(void) { return tv_js_ctx ? tv_js_ctx : tv_js_start(); }
 
 /* Filled by runtime/node.c: the natives Node.js's built-ins run on (process, timers, fs, ...),
  * as functions on `native` (globalThis.__tov_native). */
@@ -59,7 +61,7 @@ void tv_js_drain(void);
 
 /* ------------------------------------------------------------------ values */
 
-extern JSGlobalContextRef tv_js_ctx;   /* NULL until tv_js() */
+/* (tv_js_ctx: NULL until tv_js()) */
 extern bool tv_js_encoded;             /* the engine encodes values as below (checked by tv_js()) */
 
 #define TV_JS_NUMBER_TAG 0xfffe000000000000ull

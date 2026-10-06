@@ -143,10 +143,10 @@ index 0fa9323d..705df868 100644
  
      dropper->setDropDepth(m_lockDropDepth);
 diff --git a/Source/JavaScriptCore/runtime/JSLock.h b/Source/JavaScriptCore/runtime/JSLock.h
-index d4da3311..b5e126b5 100644
+index d4da3311..855c9dc0 100644
 --- a/Source/JavaScriptCore/runtime/JSLock.h
 +++ b/Source/JavaScriptCore/runtime/JSLock.h
-@@ -106,6 +106,14 @@ public:
+@@ -106,6 +106,29 @@ public:
  
      void NODELETE willDestroyVM(VM*);
  
@@ -157,11 +157,26 @@ index d4da3311..b5e126b5 100644
 +    // blocks (so a collection needn't wait for it, and another thread can take the lock).
 +    void setSticky(bool sticky) { m_sticky = sticky; }
 +    JS_EXPORT_PRIVATE void releaseStickyLock();
++    // (and for the embedder's own API functions, while it owns the sticky lock: a scope that only
++    // counts, as JSLockHolder does once the lock is held, without its VM reference)
++    bool stickyHeldByCurrentThread() { return m_sticky && m_hasOwnerThread.load(std::memory_order_relaxed) && m_ownerThread.get() == &Thread::currentSingleton(); }
++    void stickyEnter() { ++m_lockCount; }
++    void stickyLeave()
++    {
++        if (m_lockCount == 1) {
++            if (m_lockDropDepth) {
++                unlock(1);
++                return;
++            }
++            willReleaseLockVisibly();
++        }
++        --m_lockCount;
++    }
 +
      class DropAllLocks {
          WTF_MAKE_NONCOPYABLE(DropAllLocks);
      public:
-@@ -136,6 +144,8 @@ private:
+@@ -136,6 +159,8 @@ private:
  
      void didAcquireLock();
      void willReleaseLock();
@@ -170,7 +185,7 @@ index d4da3311..b5e126b5 100644
  
      unsigned dropAllLocks(DropAllLocks*);
      void grabAllLocks(DropAllLocks*, unsigned lockCount);
-@@ -156,6 +166,7 @@ private:
+@@ -156,6 +181,7 @@ private:
      RefPtr<Thread> m_ownerThread;
      intptr_t m_lockCount;
      unsigned m_lockDropDepth;

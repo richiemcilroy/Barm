@@ -911,7 +911,7 @@ static void tv_js_profile_write(void) {
     JSStringRelease(json);
 }
 
-JSContextRef tv_js(void) {
+JSContextRef tv_js_start(void) {
     if (tv_js_ctx) return tv_js_ctx;
     double t0 = tv_performance_now();
     /* JavaScriptCore's options come from the environment when the first VM starts, and only then

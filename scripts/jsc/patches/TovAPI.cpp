@@ -27,6 +27,31 @@ using namespace JSC;
 
 namespace {
 
+/* The engine's lock for one of these functions: while the program owns its sticky lock (it
+ * nearly always does), only counted; otherwise JSLockHolder's. */
+class TovLockScope {
+public:
+    explicit TovLockScope(VM& vm)
+        : m_lock(vm.apiLock())
+    {
+        if (m_lock.stickyHeldByCurrentThread()) [[likely]] {
+            m_lock.stickyEnter();
+            m_counted = true;
+        } else
+            m_holder.emplace(vm);
+    }
+    ~TovLockScope()
+    {
+        if (m_counted)
+            m_lock.stickyLeave();
+    }
+
+private:
+    JSLock& m_lock;
+    bool m_counted { false };
+    std::optional<JSLockHolder> m_holder;
+};
+
 /* A script's text as the caller gave it (not copied when it's ASCII), and its bytecode if it has
  * some cached. */
 class TovSourceProvider final : public SourceProvider {
@@ -190,10 +215,10 @@ JSValueRef TVGetProperty(JSContextRef ctx, JSValueRef value, void* name, JSValue
 {
     JSGlobalObject* globalObject = toJS(ctx);
     VM& vm = globalObject->vm();
-    JSLockHolder locker(vm);
+    TovLockScope locker(vm);
     auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
     JSValue base = toJS(globalObject, value);
-    JSValue result = base.get(globalObject, Identifier::fromUid(vm, static_cast<UniquedStringImpl*>(name)));
+    JSValue result = base.get(globalObject, PropertyName(static_cast<UniquedStringImpl*>(name)));
     if (Exception* thrown = scope.exception()) [[unlikely]] {
         if (exception)
             *exception = toRef(globalObject, thrown->value());
@@ -207,7 +232,7 @@ JSValueRef TVCall(JSContextRef ctx, JSObjectRef function, JSObjectRef thisObject
 {
     JSGlobalObject* globalObject = toJS(ctx);
     VM& vm = globalObject->vm();
-    JSLockHolder locker(vm);
+    TovLockScope locker(vm);
     auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
     JSObject* callee = toJS(function);
     auto callData = JSC::getCallData(callee);
