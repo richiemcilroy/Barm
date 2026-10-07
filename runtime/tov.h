@@ -416,8 +416,9 @@ extern bool tv_loop_check_pending, tv_loop_check_ref;
 extern uint64_t (*tv_loop_host_due)(uint64_t now_ms);
 extern void (*tv_loop_host_run)(void);
 /* Called once the loop has been idle (no I/O, no timers firing) for a second after doing work,
- * and again (deep) after ten: the engine collects its garbage then and gives the memory back,
- * and deep, drops its compiled code too. The first idle after starting is deep. */
+ * and again (deep) after 2.5 s to 20 s (adapting to how soon work comes back after a drop: see
+ * runtime/tov.c): the engine collects its garbage then and gives the memory back, and deep,
+ * drops its compiled code too. The first idle after starting is deep. */
 extern void (*tv_loop_idle)(bool deep);
 /* Called just before the thread blocks (the loop waits, or sleeps): the engine gives back the
  * lock it keeps between calls (runtime/js.c). */

@@ -3423,8 +3423,28 @@ static uint64_t tv_loop_ms;   /* the loop's clock (0: not read yet) */
 static uint64_t tv_loop_worked_at;   /* when the loop last did work (0: it hasn't) */
 static int tv_loop_idle_stage;       /* idle since then: 1 collected, 2 deep (see tv_loop_idle) */
 
+/* The deep idle (compiled code dropped) comes this long after the last work. It adapts, as a
+ * JIT's code flushing does: a program idle for good gives its memory back soon, and one whose
+ * bursts come back within seconds of each drop (and recompile on each, ~25% more CPU for their
+ * first second) waits longer, doubling to 20 s; long quiet halves it back. */
+#define TV_LOOP_DEEP_IDLE_MIN_MS 2500
+#define TV_LOOP_DEEP_IDLE_MAX_MS 20000
+#define TV_LOOP_DEEP_SOON_MS 10000    /* work this soon after a drop: the drop cost more than it saved */
+#define TV_LOOP_DEEP_QUIET_MS 60000   /* idle this long after a drop: the program is quiet again */
+static uint64_t tv_loop_deep_ms = TV_LOOP_DEEP_IDLE_MIN_MS;
+static uint64_t tv_loop_dropped_at;  /* when a deep idle after work last dropped code (0: none since) */
+
 /* the loop did work (I/O, timers) */
 static void tv_loop_work(uint64_t now_ms) {
+    if (tv_loop_dropped_at) {
+        uint64_t since = now_ms - tv_loop_dropped_at;
+        if (since < TV_LOOP_DEEP_SOON_MS) {
+            tv_loop_deep_ms = tv_loop_deep_ms * 2 < TV_LOOP_DEEP_IDLE_MAX_MS ? tv_loop_deep_ms * 2 : TV_LOOP_DEEP_IDLE_MAX_MS;
+        } else if (since > TV_LOOP_DEEP_QUIET_MS) {
+            tv_loop_deep_ms = tv_loop_deep_ms / 2 > TV_LOOP_DEEP_IDLE_MIN_MS ? tv_loop_deep_ms / 2 : TV_LOOP_DEEP_IDLE_MIN_MS;
+        }
+        tv_loop_dropped_at = 0;
+    }
     tv_loop_worked_at = now_ms ? now_ms : 1;
     tv_loop_idle_stage = 0;
 }
@@ -3574,12 +3594,11 @@ static bool tv_loop_idled;   /* the loop has been idle since the program started
  * connection closing): it doesn't put off tv_loop_idle. */
 bool tv_io_quiet;
 #define TV_LOOP_IDLE_MS 1000
-#define TV_LOOP_DEEP_IDLE_MS 10000
 
 /* when tv_loop_idle is next due (0: it isn't) */
 static uint64_t tv_loop_idle_due(void) {
     if (!tv_loop_idle || !tv_loop_worked_at || tv_loop_idle_stage >= 2) return 0;
-    return tv_loop_worked_at + (tv_loop_idle_stage == 0 ? TV_LOOP_IDLE_MS : TV_LOOP_DEEP_IDLE_MS);
+    return tv_loop_worked_at + (tv_loop_idle_stage == 0 ? TV_LOOP_IDLE_MS : tv_loop_deep_ms);
 }
 
 static void tv_loop_maybe_idle(uint64_t now_ms) {
@@ -3588,6 +3607,8 @@ static void tv_loop_maybe_idle(uint64_t now_ms) {
     /* (the first time, what's compiled is mostly startup code that won't run again) */
     bool deep = tv_loop_idle_stage == 1 || !tv_loop_idled;
     tv_loop_idle_stage = deep ? 2 : 1;
+    /* (the first idle's drop, of startup code, says nothing about the program's bursts) */
+    if (deep && tv_loop_idled) tv_loop_dropped_at = now_ms;
     tv_loop_idled = true;
     tv_loop_idle(deep);
 }
