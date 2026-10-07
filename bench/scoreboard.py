@@ -90,10 +90,13 @@ def fetch(quick):
     run(cmd)
     d = newest("fetch-", t)
     for scen, clients in d["results"].items():
+        # (a run that failed has no numbers: a client none of whose runs finished is left out)
+        ok = {c: [r for r in runs if isinstance(r, dict) and "rps" in r] for c, runs in clients.items()}
+        ok = {c: runs for c, runs in ok.items() if runs}
         med = lambda runs, k: statistics.median(x[k] for x in runs)
-        add("fetch", f"{scen} req/s", "req/s", "higher", {c: med(runs, "rps") for c, runs in clients.items() if runs})
-        add("fetch", f"{scen} CPU", "s", "lower", {c: med(runs, "cpu") for c, runs in clients.items() if runs})
-        add("fetch", f"{scen} peak memory", "MB", "lower", {c: med(runs, "rss") / 1e6 for c, runs in clients.items() if runs})
+        add("fetch", f"{scen} req/s", "req/s", "higher", {c: med(runs, "rps") for c, runs in ok.items()})
+        add("fetch", f"{scen} CPU", "s", "lower", {c: med(runs, "cpu") for c, runs in ok.items()})
+        add("fetch", f"{scen} peak memory", "MB", "lower", {c: med(runs, "rss") / 1e6 for c, runs in ok.items()})
 
 
 def npm(quick):
