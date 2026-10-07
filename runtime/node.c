@@ -30,6 +30,7 @@
 #include <sys/time.h>
 #include <sys/utsname.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
