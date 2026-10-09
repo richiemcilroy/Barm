@@ -877,9 +877,16 @@ static void tv_js_idle(bool deep) {
         drop_code = JSObjectMakeFunctionWithCallback(tv_js_ctx, NULL, tv_js_drop_code_fn);
         JSValueProtect(tv_js_ctx, drop_code);
     }
+#ifdef TV_JSC_OWN
+    /* (TovAPI: and the blocks the collection emptied are freed at once, so their memory goes back
+     * now rather than as the engine's sweeper and scavenger get to it, seconds later) */
+    (void)release;
+    TVReleaseMemory(tv_js_ctx, deep);
+#else
     if (deep) JSObjectCallAsFunction(tv_js_ctx, drop_code, NULL, 0, NULL, NULL);
     if (JSSynchronousGarbageCollectForDebugging) JSSynchronousGarbageCollectForDebugging(tv_js_ctx);
     if (release) release();
+#endif
     /* (and what the system allocator holds freed: native addons' and the runtime's own) */
 #ifdef __APPLE__
     malloc_zone_pressure_relief(NULL, 0);

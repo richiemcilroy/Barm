@@ -51,6 +51,11 @@ JS_EXPORT bool TVSetOptions(const char *options);
  * system's time zone.) */
 JS_EXPORT void TVTimeZoneDidChange(JSContextRef ctx);
 
+/* Gives memory back now (the program is idle): optionally drops compiled code, collects in
+ * full, frees the blocks that emptied (rather than as the incremental sweeper reaches them), and
+ * returns the allocator's free pages to the system. */
+JS_EXPORT void TVReleaseMemory(JSContextRef ctx, bool dropCode);
+
 /* The engine's lock stays this thread's between calls into it (a "sticky" lock): each call no
  * longer takes it and gives it back (setting the stack's limits, the heap's access, and back),
  * while what giving it back does that a program sees happens as before (microtasks run when the
