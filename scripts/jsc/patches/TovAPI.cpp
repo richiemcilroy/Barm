@@ -250,3 +250,16 @@ JSValueRef TVCall(JSContextRef ctx, JSObjectRef function, JSObjectRef thisObject
     }
     return toRef(globalObject, result);
 }
+
+void TVReleaseMemory(JSContextRef ctx, bool dropCode)
+{
+    VM& vm = toJS(ctx)->vm();
+    JSLockHolder locker(vm);
+    if (dropCode)
+        vm.deleteAllCode(DeleteAllCodeIfNotCollecting);
+    vm.heap.collectNow(Sync, CollectionScope::Full);
+    // (the blocks that collection emptied are freed now, not as the incremental sweeper gets to
+    // them: until then the allocator has nothing to give back)
+    vm.heap.sweepSynchronously();
+    WTF::releaseFastMallocFreeMemory();
+}
