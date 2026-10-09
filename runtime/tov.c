@@ -219,6 +219,7 @@ static void tv_sb_cache_flush(void) {
 #define TV_STR_MAYBE_MAPPED(size) false
 static const size_t tv_sb_cache_bytes = 0;
 static void tv_sb_cache_flush(void) {}
+static void tv_sb_unmap(char *p, size_t size) { (void)size; free(p); }  /* (never mapped here) */
 static size_t tv_sb_map_size(size_t cap) { return cap; }
 static char *tv_sb_map(size_t cap) { return (char *)tv_alloc(cap); }
 #endif
