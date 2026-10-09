@@ -136,18 +136,89 @@ static size_t tv_size_mul_add(size_t a, size_t b, size_t c) {
  * so a burst of big buffers would stay in the program's footprint. (glibc maps blocks this
  * big itself.) */
 #if defined(__APPLE__) && !(defined(__SANITIZE_ADDRESS__) || (defined(__has_feature) && __has_feature(address_sanitizer)))
+#include <malloc/malloc.h>
 #define TV_SB_MAPPED(cap) ((cap) >= ((size_t)128 << 10))
+/* A mapped builder holding this much becomes its string as it is (tv_str_from_sb); the string is
+ * unmapped when released (tv_str_release_slow: malloc doesn't own it). Less is copied out. */
+#define TV_STR_ADOPT_MAPPED ((size_t)64 << 10)
+#define TV_STR_MAYBE_MAPPED(size) ((size) >= TV_STR_ADOPT_MAPPED)
 static size_t tv_sb_map_size(size_t cap) {
     size_t page = (size_t)getpagesize();
     return (TV_STR_HDR + cap + 1 + page - 1) & ~(page - 1);
 }
+/* Freed mapped buffers are kept (up to TV_SB_CACHE_MAX bytes) for the next to reuse, warm: a
+ * fresh mapping's pages are zeroed and faulted in one by one, ~350 µs of an 8 MB body's ~1.1 ms.
+ * The event loop unmaps them once the program has been idle a second (tv_sb_cache_flush). */
+#include <os/lock.h>
+#define TV_SB_CACHE_MAX ((size_t)32 << 20)
+#define TV_SB_CACHE_SLOTS 8
+static struct { char *p; size_t size; } tv_sb_cache[TV_SB_CACHE_SLOTS];
+static size_t tv_sb_cache_bytes;
+static os_unfair_lock tv_sb_cache_lock = OS_UNFAIR_LOCK_INIT;
+
 static char *tv_sb_map(size_t cap) {
-    void *p = mmap(NULL, tv_sb_map_size(cap), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    size_t size = tv_sb_map_size(cap);
+    if (tv_sb_cache_bytes) {
+        /* (the smallest that's big enough, and not more than twice it: a buffer growing by
+         * doubling finds each of its sizes again, rather than cutting down the biggest; what's
+         * past `size` goes back) */
+        char *p = NULL;
+        size_t have = 0;
+        os_unfair_lock_lock(&tv_sb_cache_lock);
+        int best = -1;
+        for (int i = 0; i < TV_SB_CACHE_SLOTS; i++)
+            if (tv_sb_cache[i].p && tv_sb_cache[i].size >= size && tv_sb_cache[i].size <= 2 * size && (best < 0 || tv_sb_cache[i].size < tv_sb_cache[best].size)) best = i;
+        if (best >= 0) {
+            p = tv_sb_cache[best].p;
+            have = tv_sb_cache[best].size;
+            tv_sb_cache[best].p = NULL;
+            tv_sb_cache_bytes -= have;
+        }
+        os_unfair_lock_unlock(&tv_sb_cache_lock);
+        if (p) {
+            if (have > size) munmap(p + size, have - size);
+            return p;
+        }
+    }
+    void *p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (TV_UNLIKELY(p == MAP_FAILED)) tv_oom(cap);
     return (char *)p;
 }
+
+/* Unmaps `size` bytes at p (page-rounded, from tv_sb_map), or keeps them for reuse. */
+static void tv_sb_unmap(char *p, size_t size) {
+    if (size <= TV_SB_CACHE_MAX / 2) {
+        os_unfair_lock_lock(&tv_sb_cache_lock);
+        if (tv_sb_cache_bytes + size <= TV_SB_CACHE_MAX)
+            for (int i = 0; i < TV_SB_CACHE_SLOTS; i++)
+                if (!tv_sb_cache[i].p) {
+                    tv_sb_cache[i].p = p;
+                    tv_sb_cache[i].size = size;
+                    tv_sb_cache_bytes += size;
+                    p = NULL;
+                    break;
+                }
+        os_unfair_lock_unlock(&tv_sb_cache_lock);
+    }
+    if (p) munmap(p, size);
+}
+
+static void tv_sb_cache_flush(void) {
+    os_unfair_lock_lock(&tv_sb_cache_lock);
+    for (int i = 0; i < TV_SB_CACHE_SLOTS; i++)
+        if (tv_sb_cache[i].p) {
+            munmap(tv_sb_cache[i].p, tv_sb_cache[i].size);
+            tv_sb_cache[i].p = NULL;
+        }
+    tv_sb_cache_bytes = 0;
+    os_unfair_lock_unlock(&tv_sb_cache_lock);
+}
 #else
 #define TV_SB_MAPPED(cap) false
+#define TV_STR_ADOPT_MAPPED SIZE_MAX
+#define TV_STR_MAYBE_MAPPED(size) false
+static const size_t tv_sb_cache_bytes = 0;
+static void tv_sb_cache_flush(void) {}
 static size_t tv_sb_map_size(size_t cap) { return cap; }
 static char *tv_sb_map(size_t cap) { return (char *)tv_alloc(cap); }
 #endif
@@ -158,7 +229,7 @@ static inline void tv_sb_release_buf(char *base, size_t cap) {
         *(void **)(void *)base = tv_small_bins[c];
         tv_small_bins[c] = base;
     } else if (TV_SB_MAPPED(cap)) {
-        munmap(base, tv_sb_map_size(cap));
+        tv_sb_unmap(base, tv_sb_map_size(cap));
     } else {
         free(base);
     }
@@ -553,6 +624,12 @@ static tv_strbuf *tv_strbuf_new(size_t n) {
 void tv_str_release_slow(tv_str s) {
     size_t size = tv_strbuf_size((size_t)s.p->len);
     if (size <= TV_SMALL_MAX) tv_small_free(s.p, size);
+#ifdef __APPLE__
+    else if (TV_STR_MAYBE_MAPPED(size) && malloc_size(s.p) == 0) {
+        size_t page = (size_t)getpagesize();
+        tv_sb_unmap((char *)s.p, (size + page - 1) & ~(page - 1));
+    }
+#endif
     else free(s.p);
 }
 
@@ -575,6 +652,22 @@ tv_str tv_str_from_sb(tv_sb *sb) {
         tv_str r = tv_str_from(sb->data, n);
         tv_sb_free(sb);
         return r;
+    }
+    if (TV_SB_MAPPED(sb->cap) && TV_STR_MAYBE_MAPPED(tv_strbuf_size(n))) {
+        /* a big mapped builder (a response body, say) becomes the string, its spare pages given
+         * back: no copy of it, nor a second of its size at once */
+        char *base = sb->data - TV_STR_HDR;
+        size_t page = (size_t)getpagesize();
+        size_t keep = (tv_strbuf_size(n) + page - 1) & ~(page - 1), mapped = tv_sb_map_size(sb->cap);
+        if (n > INT32_MAX) tv_trap("string too long", NULL);
+        if (keep < mapped) munmap(base + keep, mapped - keep);
+        tv_strbuf *b = (tv_strbuf *)base;
+        b->rc = 1;
+        b->len = (int32_t)n;
+        b->data[n] = 0;
+        sb->data = NULL;
+        sb->len = sb->cap = 0;
+        return (tv_str){b};
     }
     if (TV_SB_SMALL(sb->cap) || TV_SB_MAPPED(sb->cap)) { /* the builder's block is in the small-object heap, or mapped: copy out */
         tv_strbuf *b = (tv_strbuf *)tv_alloc(TV_STR_HDR + n + 1);
@@ -3597,7 +3690,7 @@ bool tv_io_quiet;
 
 /* when tv_loop_idle is next due (0: it isn't) */
 static uint64_t tv_loop_idle_due(void) {
-    if (!tv_loop_idle || !tv_loop_worked_at || tv_loop_idle_stage >= 2) return 0;
+    if ((!tv_loop_idle && !tv_sb_cache_bytes) || !tv_loop_worked_at || tv_loop_idle_stage >= 2) return 0;
     return tv_loop_worked_at + (tv_loop_idle_stage == 0 ? TV_LOOP_IDLE_MS : tv_loop_deep_ms);
 }
 
@@ -3610,7 +3703,9 @@ static void tv_loop_maybe_idle(uint64_t now_ms) {
     /* (the first idle's drop, of startup code, says nothing about the program's bursts) */
     if (deep && tv_loop_idled) tv_loop_dropped_at = now_ms;
     tv_loop_idled = true;
-    tv_loop_idle(deep);
+    /* (the buffers kept for reuse go back: the burst is over) */
+    tv_sb_cache_flush();
+    if (tv_loop_idle) tv_loop_idle(deep);
 }
 
 /* Runs the engine's timers that are due; returns when the next is (0: none). Asked at most once
@@ -6781,7 +6876,14 @@ static void tv_fc_ready(tv_io *h, bool readable, bool writable, bool broken) {
             size_t step = r->whole ? (size_t)1 << 20 : r->streaming ? (size_t)64 << 10 : TV_STREAM_HIGH;
             size_t want = (size_t)r->remaining < step ? (size_t)r->remaining : step;
             tv_sb *sink = tv_fr_sink(r);
-            if (sink->cap - sink->len < want) tv_sb_grow(sink, sink->len + want);
+            if (sink->cap - sink->len < want) {
+                /* read whole, its length known: room for the rest at once (a buffer grown by
+                 * doubling copies itself each time, ends up to twice the size, and doesn't fit
+                 * the string it becomes, which tv_sb_map would otherwise reuse) */
+                size_t rest = (size_t)r->remaining;
+                bool all = r->whole && !tv_fr_decoding(r) && rest <= ((size_t)256 << 20);
+                tv_sb_grow(sink, sink->len + (all ? rest : want));
+            }
             long n = tv_fc_recv(c, sink->data + sink->len, want);
             if (n > 0) {
                 r->got_any = true;
