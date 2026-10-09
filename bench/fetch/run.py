@@ -10,7 +10,7 @@ loops run at once) it reports requests/s, the client's CPU time per request (use
 and its peak RSS: the median of --reps runs, with clients interleaved. Writes
 bench/results/fetch-<timestamp>.json.
 """
-import argparse, json, os, platform, socket, subprocess, sys, time
+import argparse, json, os, platform, socket, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
@@ -68,22 +68,27 @@ CLIENTS = {
 
 def run_client(argv, env, timeout):
     """Wall seconds, CPU seconds, peak RSS (bytes) and output of one run."""
-    t0 = time.perf_counter()
-    p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
-    deadline = time.time() + timeout
-    while True:
-        pid, status, ru = os.wait4(p.pid, os.WNOHANG)
-        if pid:
-            break
-        if time.time() > deadline:
-            p.kill()
-            os.wait4(p.pid, 0)
-            raise RuntimeError("timed out")
-        time.sleep(0.002)
-    wall = time.perf_counter() - t0
-    out = p.stdout.read().decode()
-    if status != 0:
-        raise RuntimeError(f"exit {status}: {p.stderr.read().decode()[-300:]}")
+    # (output to files, not pipes: a client that printed more than a pipe holds would block on
+    # it until the timeout, since nothing reads the pipe until the client exits)
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        t0 = time.perf_counter()
+        p = subprocess.Popen(argv, stdout=stdout, stderr=stderr, env=env)
+        deadline = time.time() + timeout
+        while True:
+            pid, status, ru = os.wait4(p.pid, os.WNOHANG)
+            if pid:
+                break
+            if time.time() > deadline:
+                p.kill()
+                os.wait4(p.pid, 0)
+                raise RuntimeError("timed out")
+            time.sleep(0.002)
+        wall = time.perf_counter() - t0
+        stdout.seek(0)
+        stderr.seek(0)
+        out = stdout.read().decode(errors="replace")
+        if status != 0:
+            raise RuntimeError(f"exit {status}: {stderr.read().decode(errors='replace')[-300:]}")
     rss = ru.ru_maxrss if sys.platform == "darwin" else ru.ru_maxrss * 1024
     return wall, ru.ru_utime + ru.ru_stime, rss, out.strip()
 
