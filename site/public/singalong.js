@@ -15,9 +15,9 @@ const SONG = "/fast-with-tov.mp3";
 const INSTALL = "curl -fsSL https://tov.sh/install.sh | sh";
 
 const C = {
-  amber: "#FFC233", amberHi: "#FFE45C", foam: "#FFF6E0", ink: "#1E1033", rust: "#F0602A",
-  green: "#5CFF8F", red: "#FF4D5E", cyan: "#26E8FF", pink: "#FF3D9A", violet: "#A35CFF",
-  lime: "#C8FF3D", yellow: "#FFEA3D", blue: "#3D6BFF", orange: "#FF7A1A",
+  amber: "#F2B35B", amberHi: "#FFD08A", foam: "#FFF4E2", ink: "#1A1424", rust: "#E8714A",
+  green: "#8FE3BE", red: "#FF8A7A", cyan: "#9DD3FF", pink: "#F59AB8", violet: "#B9A4FF",
+  lime: "#C9E99A", yellow: "#FFD98A", blue: "#7C9CFF", orange: "#F49B5C",
 };
 const FONT = `"Schibsted Grotesk", ui-sans-serif, system-ui, sans-serif`;
 const MONO = `ui-monospace, "SF Mono", Menlo, Consolas, monospace`;
@@ -29,7 +29,8 @@ const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const lerp = (a, b, k) => a + (b - a) * k;
 const out3 = k => 1 - Math.pow(1 - clamp(k, 0, 1), 3);
 const inOut = k => (k = clamp(k, 0, 1), k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2);
-const back = k => { k = clamp(k, 0, 1) - 1; return 1 + k * k * (2.7 * k + 1.7); };
+// (a small overshoot: things arrive, and settle, without bouncing)
+const back = k => { k = clamp(k, 0, 1) - 1; return 1 + k * k * (1.9 * k + 0.9); };
 const TAU = Math.PI * 2;
 function hash(n) { n = Math.sin(n * 127.1 + 311.7) * 43758.5453; return n - Math.floor(n); }
 function hex(h) { const n = parseInt(h.slice(1), 16); return [n >> 16, (n >> 8) & 255, n & 255]; }
@@ -71,13 +72,13 @@ const NAMES = {
 };
 // each section's sky (top, middle, bottom), its sticker colour, and what's drawn behind the stage
 const THEMES = {
-  intro: { sky: ["#2B0B6E", "#B5179E", "#FF4D6D"], tag: C.yellow, bg: "pub" },
-  chorus: { sky: ["#FF2E7E", "#FF6A2B", "#FFB627"], tag: C.cyan, bg: "burst" },
-  verse1: { sky: ["#07073A", "#2A1A8F", "#7B2FF7"], tag: C.lime, bg: "night" },
-  verse2: { sky: ["#002E3B", "#00877F", "#00D1A0"], tag: C.pink, bg: "grid" },
-  bridge: { sky: ["#0D0026", "#4B00A8", "#FF2EB5"], tag: C.cyan, bg: "arcade" },
-  final: { sky: ["#FF006E", "#FF4D2E", "#FFC300"], tag: C.lime, bg: "burst" },
-  outro: { sky: ["#2D4BFF", "#B026FF", "#FF2E7E"], tag: C.yellow, bg: "burst" },
+  intro: { sky: ["#140E26", "#33184A", "#6B2A5E"], tag: C.amber, bg: "pub" },
+  chorus: { sky: ["#22101C", "#6A2230", "#C8603A"], tag: C.amber, bg: "burst" },
+  verse1: { sky: ["#090C22", "#17204E", "#2C3A82"], tag: C.cyan, bg: "night" },
+  verse2: { sky: ["#071A1C", "#0E3E3D", "#1C6B62"], tag: C.green, bg: "grid" },
+  bridge: { sky: ["#0C0920", "#25124F", "#5A2878"], tag: C.violet, bg: "arcade" },
+  final: { sky: ["#240C12", "#7A2328", "#D47634"], tag: C.amber, bg: "burst" },
+  outro: { sky: ["#12112E", "#36205F", "#97405E"], tag: C.pink, bg: "burst" },
 };
 
 const sections = [];
@@ -101,7 +102,7 @@ function sectionAt(t) {
 // ---------------------------------------------------------------- the page around it
 
 const css = `
-#ts { position: fixed; inset: 0; z-index: 1000; background: #1E1033; color: #fff; font-family: ${FONT}; overflow: hidden; touch-action: manipulation; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; contain: strict; }
+#ts { position: fixed; inset: 0; z-index: 1000; background: #140E1E; color: #fff; font-family: ${FONT}; overflow: hidden; touch-action: manipulation; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; contain: strict; }
 #ts[hidden] { display: none; }
 #ts button { font: inherit; color: inherit; cursor: pointer; border: 0; background: none; }
 /* the sky (two layers, crossfading between sections), the stage, then shading and flashes */
@@ -113,101 +114,80 @@ const css = `
 #ts .ts-flash { position: absolute; inset: 0; pointer-events: none; opacity: 0; display: none; }
 #ts .ts-top { position: absolute; top: 0; left: 0; right: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: max(14px, env(safe-area-inset-top)) max(18px, env(safe-area-inset-right)) 14px max(18px, env(safe-area-inset-left)); z-index: 3; pointer-events: none; }
 #ts .ts-top > * { pointer-events: auto; }
-#ts .ts-name { display: flex; align-items: center; gap: 10px; font-weight: 900; letter-spacing: -.02em; font-size: 1.125rem; line-height: 1.05; text-shadow: 0 2px 0 rgba(30,16,51,.5); }
-#ts .ts-name small { display: block; font-weight: 600; font-size: .8125rem; letter-spacing: 0; opacity: .8; }
-#ts .ts-name svg { width: 44px; height: auto; filter: drop-shadow(0 2px 0 rgba(30,16,51,.4)); }
-#ts .ts-x { width: 46px; height: 46px; border-radius: 14px; background: ${C.ink} !important; color: #fff; display: grid; place-items: center; box-shadow: 0 4px 0 rgba(0,0,0,.3); transition: transform .15s; }
-#ts .ts-x:hover { transform: rotate(8deg) scale(1.06); }
+#ts .ts-name { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: -.02em; font-size: 1.0625rem; line-height: 1.1; }
+#ts .ts-name small { display: block; font-weight: 500; font-size: .8125rem; letter-spacing: 0; opacity: .6; }
+#ts .ts-name svg { width: 42px; height: auto; }
+#ts .ts-x { width: 44px; height: 44px; border-radius: 50%; background: rgba(255,255,255,.1) !important; color: #fff; display: grid; place-items: center; transition: background .2s; }
+#ts .ts-x:hover { background: rgba(255,255,255,.18) !important; }
 #ts .ts-x svg { width: 18px; height: 18px; }
-/* the section's sticker */
-#ts .ts-sec { position: absolute; top: max(78px, calc(env(safe-area-inset-top) + 64px)); left: 50%; z-index: 2; font-size: 1.0625rem; font-weight: 900; letter-spacing: -.01em; padding: 7px 16px 8px; border-radius: 12px; color: ${C.ink}; background: var(--tag, ${C.yellow}); box-shadow: 0 4px 0 rgba(30,16,51,.45); white-space: nowrap; transform: translateX(-50%) rotate(-3deg); transition: opacity .3s; }
-#ts .ts-sec.swap { animation: ts-sticker .6s cubic-bezier(.3,1.7,.5,1); }
-#ts .ts-hint { position: absolute; left: 50%; top: max(128px, calc(env(safe-area-inset-top) + 114px)); transform: translateX(-50%) rotate(1.5deg); z-index: 2; font-size: .9375rem; font-weight: 700; padding: 9px 14px; border-radius: 12px; background: ${C.ink}; box-shadow: 0 4px 0 rgba(0,0,0,.25); white-space: nowrap; opacity: 0; transition: opacity .5s; pointer-events: none; }
+/* where we are in the song */
+#ts .ts-sec { position: absolute; top: max(80px, calc(env(safe-area-inset-top) + 66px)); left: 50%; z-index: 2; display: flex; align-items: center; gap: 8px; font-size: .9375rem; font-weight: 600; padding: 7px 14px 7px 12px; border-radius: 99px; color: rgba(255,255,255,.88); background: rgba(10,6,20,.3); border: 1px solid rgba(255,255,255,.12); white-space: nowrap; transform: translateX(-50%); transition: opacity .3s; }
+#ts .ts-sec::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--tag, ${C.amber}); }
+#ts .ts-sec.swap { animation: ts-in .6s cubic-bezier(.2,.8,.2,1); }
+#ts .ts-hint { position: absolute; left: 50%; top: max(128px, calc(env(safe-area-inset-top) + 114px)); transform: translateX(-50%); z-index: 2; font-size: .875rem; font-weight: 500; padding: 8px 14px; border-radius: 99px; color: rgba(255,255,255,.75); background: rgba(10,6,20,.3); white-space: nowrap; opacity: 0; transition: opacity .6s; pointer-events: none; }
 #ts .ts-hint.show { opacity: 1; }
-#ts .ts-hint b { color: ${C.yellow}; }
+#ts .ts-hint b { color: ${C.amber}; font-weight: 700; }
 /* the lyrics: the line being sung, the next one under it */
 #ts .ts-lyrics { position: absolute; left: max(14px, env(safe-area-inset-left)); right: max(14px, env(safe-area-inset-right)); bottom: calc(92px + env(safe-area-inset-bottom)); z-index: 2; pointer-events: none; height: 0; }
-#ts .ts-l { position: absolute; left: 0; right: 0; bottom: 0; margin: 0 auto; max-width: 19em; text-align: center; font-weight: 900; font-size: clamp(1.5rem, min(5.2vw, 8vh), 6.5rem); line-height: 1.12; letter-spacing: -.035em; text-wrap: balance; transform-origin: 50% 100%; opacity: 0; transform: translateY(.6em) scale(.5); visibility: hidden; transition: transform .5s cubic-bezier(.2,.9,.2,1.15), opacity .35s ease, visibility 0s .5s; text-shadow: 0 .07em 0 rgba(30,16,51,.6); }
-#ts .ts-l.is-cur { opacity: 1; visibility: visible; transform: translateY(calc(var(--nh, 0px) * -1 - .25em)) scale(1); transition-delay: 0s; }
-#ts .ts-l.is-next { opacity: .62; visibility: visible; transform: scale(.5); transition-delay: 0s; }
-#ts .ts-l.is-prev { opacity: 0; visibility: visible; transform: translateY(calc(var(--nh, 0px) * -1 - var(--h, 1em) - .4em)) scale(.62) rotate(-2deg); transition-delay: 0s; }
-#ts .ts-w { position: relative; display: inline-block; color: rgba(255,255,255,.42); white-space: pre; transform-origin: 50% 80%; }
+#ts .ts-l { position: absolute; left: 0; right: 0; bottom: 0; margin: 0 auto; max-width: 18em; text-align: center; font-weight: 800; font-size: clamp(1.5rem, min(5vw, 7.5vh), 6rem); line-height: 1.12; letter-spacing: -.03em; text-wrap: balance; transform-origin: 50% 100%; opacity: 0; transform: translateY(.5em) scale(.5); visibility: hidden; transition: transform .7s cubic-bezier(.2,.8,.2,1), opacity .5s ease, visibility 0s .7s; -webkit-font-smoothing: antialiased; }
+#ts .ts-l.is-cur { opacity: 1; visibility: visible; transform: translateY(calc(var(--nh, 0px) * -1 - .3em)) scale(1); transition-delay: 0s; }
+#ts .ts-l.is-next { opacity: .5; visibility: visible; transform: scale(.5); transition-delay: 0s; }
+#ts .ts-l.is-prev { opacity: 0; visibility: visible; transform: translateY(calc(var(--nh, 0px) * -1 - var(--h, 1em) - .5em)) scale(.7); transition-delay: 0s; }
+/* a word: dim until it's sung, then filled left to right in time with the voice */
+#ts .ts-w { position: relative; display: inline-block; color: rgba(255,255,255,.3); white-space: pre; transform-origin: 50% 90%; transition: transform .5s cubic-bezier(.2,.8,.2,1); }
 #ts .ts-w > i { position: absolute; left: 0; top: 0; font-style: normal; color: var(--c, #fff); clip-path: inset(-30% calc(100% - var(--p, 0) * 100%) -30% -10%); }
-#ts .ts-w.is-on { animation: ts-pop .32s cubic-bezier(.3,1.8,.5,1) both; }
-/* words with a voice of their own */
-#ts .ts-w.ts-tov { --c: ${C.yellow}; margin: 0 .16em; }
-#ts .ts-w.ts-tov.is-on { animation: ts-boing .6s cubic-bezier(.3,1.8,.5,1) both; }
-#ts .ts-w.ts-tov.is-done { color: ${C.yellow}; }
-#ts .ts-w.ts-shout { --c: ${C.lime}; margin: 0 .14em; }
-#ts .ts-w.ts-shout.is-on { animation: ts-shout .5s cubic-bezier(.3,1.8,.5,1) both; }
+#ts .ts-w.is-on { transform: translateY(-.05em); transition-duration: .25s; }
+#ts .ts-w.is-on > i { text-shadow: 0 0 .5em color-mix(in srgb, var(--c, #fff) 45%, transparent); }
+/* a few words have a colour of their own, and the shouted ones swell as they're sung */
+#ts .ts-w.ts-tov { --c: ${C.amber}; }
 #ts .ts-w.ts-rust { --c: ${C.rust}; }
-#ts .ts-w.ts-rust.is-on { animation: ts-rusty .5s ease-in-out both; }
-#ts .ts-w.ts-fast { --c: ${C.cyan}; }
-#ts .ts-w.ts-fast.is-on { animation: ts-zoom .45s cubic-bezier(.2,1.6,.4,1) both; }
-#ts .ts-w.ts-code { font-family: ${MONO}; font-weight: 800; letter-spacing: -.05em; font-size: .88em; --c: ${C.cyan}; }
-#ts .ts-w.ts-no { --c: ${C.cyan}; }
-#ts .ts-w.ts-no::after { content: ""; position: absolute; left: -6%; right: -6%; top: 52%; height: .12em; border-radius: .06em; background: ${C.red}; transform: scaleX(0) rotate(-6deg); transform-origin: 0 50%; transition: transform .2s cubic-bezier(.3,1.6,.5,1); }
-#ts .ts-w.ts-no.is-done::after { transform: scaleX(1) rotate(-6deg); }
+#ts .ts-w.ts-code { font-family: ${MONO}; font-weight: 700; letter-spacing: -.05em; font-size: .86em; --c: ${C.cyan}; }
 #ts .ts-w.ts-good { --c: ${C.green}; }
-#ts .ts-w.ts-good.is-on { animation: ts-jelly .5s cubic-bezier(.3,1.6,.5,1) both; }
 #ts .ts-w.ts-bad { --c: ${C.red}; }
-#ts .ts-w.ts-bad.is-on { animation: ts-shake .4s linear both; }
-#ts .ts-w.ts-small.is-on { animation: ts-shrink .4s cubic-bezier(.3,1.6,.5,1) both; }
-#ts .ts-w.ts-beer { --c: ${C.amber}; }
-#ts .ts-w.ts-night { --c: #C9B8FF; }
-#ts .ts-w.ts-beep { --c: ${C.pink}; }
-#ts .ts-w.ts-beep.is-on { animation: ts-press .3s cubic-bezier(.3,1.6,.5,1) both; }
-#ts .ts-w.ts-big { --c: ${C.pink}; margin: 0 .14em; }
-#ts .ts-w.ts-big.is-on { animation: ts-shout .5s cubic-bezier(.3,1.8,.5,1) both; }
-@keyframes ts-pop { 0% { transform: none; } 40% { transform: translateY(-.12em) scale(1.08); } 100% { transform: translateY(-.04em); } }
-@keyframes ts-boing { 0% { transform: none; } 30% { transform: scale(1.45) rotate(-8deg); } 55% { transform: scale(1.1) rotate(5deg); } 75% { transform: scale(1.22) rotate(-3deg); } 100% { transform: scale(1.16) rotate(-2deg); } }
-@keyframes ts-shout { 0% { transform: none; } 25% { transform: scale(1.28) rotate(4deg); } 45% { transform: scale(1.12) translateX(-.04em) rotate(-3deg); } 65% { transform: scale(1.18) translateX(.04em) rotate(2deg); } 100% { transform: scale(1.12) rotate(0); } }
-@keyframes ts-rusty { 0%, 100% { transform: none; } 20% { transform: rotate(-6deg) translateY(.04em); } 40% { transform: rotate(5deg); } 60% { transform: rotate(-4deg) translateY(.06em); } 80% { transform: rotate(3deg); } }
-@keyframes ts-zoom { 0% { transform: none; } 40% { transform: skewX(-20deg) translateX(.05em); } 100% { transform: skewX(-10deg); } }
-@keyframes ts-jelly { 0% { transform: none; } 30% { transform: scale(1.18, .8); } 55% { transform: scale(.92, 1.15); } 75% { transform: scale(1.04, .96); } 100% { transform: none; } }
-@keyframes ts-shake { 0%, 100% { transform: none; } 20% { transform: translateX(-.06em) rotate(-2deg); } 40% { transform: translateX(.06em) rotate(2deg); } 60% { transform: translateX(-.04em); } 80% { transform: translateX(.04em); } }
-@keyframes ts-shrink { 0% { transform: none; } 50% { transform: scale(.62); } 100% { transform: scale(.78); } }
-@keyframes ts-press { 0% { transform: none; } 35% { transform: translateY(.14em) scale(1.1, .82); } 100% { transform: translateY(-.03em); } }
-@keyframes ts-sticker { 0% { opacity: 0; transform: translateX(-50%) scale(.4) rotate(-14deg); } 100% { opacity: 1; transform: translateX(-50%) rotate(-3deg); } }
+#ts .ts-w.ts-no::after { content: ""; position: absolute; left: -4%; right: -4%; top: 54%; height: .07em; border-radius: .04em; background: ${C.red}; transform: scaleX(0); transform-origin: 0 50%; transition: transform .35s cubic-bezier(.2,.8,.2,1); }
+#ts .ts-w.ts-no.is-done::after { transform: scaleX(1); }
+#ts .ts-w.ts-big { margin: 0 .06em; }
+#ts .ts-w.ts-big.is-on, #ts .ts-w.ts-tov.is-on { transform: translateY(-.05em) scale(1.1); }
+@keyframes ts-in { 0% { opacity: 0; transform: translate(-50%, -6px); } 100% { opacity: 1; transform: translateX(-50%); } }
 /* the controls */
 #ts .ts-bar { position: absolute; left: 0; right: 0; bottom: 0; z-index: 3; display: flex; align-items: center; gap: 14px; padding: 14px max(20px, env(safe-area-inset-right)) max(18px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left)); }
-#ts .ts-play { width: 50px; height: 50px; border-radius: 50%; background: ${C.yellow} !important; color: ${C.ink} !important; display: grid; place-items: center; flex: none; box-shadow: 0 4px 0 rgba(30,16,51,.5); transition: transform .15s; }
-#ts .ts-play:hover { transform: scale(1.06) rotate(-6deg); }
+#ts .ts-play { width: 48px; height: 48px; border-radius: 50%; background: ${C.foam} !important; color: ${C.ink} !important; display: grid; place-items: center; flex: none; transition: transform .15s; }
+#ts .ts-play:hover { transform: scale(1.05); }
 #ts .ts-play:active { transform: scale(.94); }
 #ts .ts-play svg { width: 20px; height: 20px; }
 #ts .ts-track { position: relative; flex: 1; height: 28px; cursor: pointer; touch-action: none; }
-#ts .ts-rail { position: absolute; left: 0; right: 0; top: 50%; height: 8px; margin-top: -4px; border-radius: 4px; background: rgba(30,16,51,.45); overflow: hidden; }
-#ts .ts-fill { position: absolute; inset: 0; background: linear-gradient(90deg, ${C.yellow}, ${C.pink}, ${C.cyan}); transform-origin: 0 50%; transform: scaleX(0); }
-#ts .ts-tick { position: absolute; top: 50%; width: 3px; height: 14px; margin: -7px 0 0 -1.5px; border-radius: 2px; background: rgba(255,255,255,.55); }
-#ts .ts-knob { position: absolute; top: 50%; width: 18px; height: 18px; margin: -9px 0 0 -9px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 4px ${C.pink}; }
-#ts .ts-time { font-size: .875rem; font-weight: 800; font-variant-numeric: tabular-nums; min-width: 5.6em; text-align: right; text-shadow: 0 2px 0 rgba(30,16,51,.5); }
+#ts .ts-rail { position: absolute; left: 0; right: 0; top: 50%; height: 4px; margin-top: -2px; border-radius: 2px; background: rgba(255,255,255,.18); overflow: hidden; }
+#ts .ts-fill { position: absolute; inset: 0; background: ${C.foam}; transform-origin: 0 50%; transform: scaleX(0); }
+#ts .ts-tick { position: absolute; top: 50%; width: 2px; height: 10px; margin: -5px 0 0 -1px; border-radius: 1px; background: rgba(255,255,255,.35); }
+#ts .ts-knob { position: absolute; top: 50%; width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%; background: #fff; }
+#ts .ts-time { font-size: .8125rem; font-weight: 600; font-variant-numeric: tabular-nums; min-width: 5.6em; text-align: right; color: rgba(255,255,255,.7); }
 /* the cards at the start and the end */
-#ts .ts-card { position: absolute; inset: 0; z-index: 4; display: grid; place-items: center; padding: 24px 16px; overflow-y: auto; background: radial-gradient(ellipse at 50% 35%, #B5179E, #2B0B6E 75%); text-align: center; transition: opacity .45s ease, transform .45s ease; }
+#ts .ts-card { position: absolute; inset: 0; z-index: 4; display: grid; place-items: center; padding: 24px 16px; overflow-y: auto; background: radial-gradient(ellipse at 50% 30%, #4A1F4E, #140E26 75%); text-align: center; transition: opacity .45s ease, transform .45s ease; }
 #ts .ts-card[hidden] { display: none; }
 #ts .ts-card.away { opacity: 0; transform: scale(1.08); pointer-events: none; }
-#ts .ts-card h2 { font-size: clamp(2.5rem, min(10vw, 12vh), 6rem); line-height: .92; letter-spacing: -.05em; font-weight: 900; margin: 14px 0 12px; color: #fff; text-shadow: 0 .06em 0 ${C.pink}, 0 .12em 0 rgba(30,16,51,.6); transform: rotate(-2deg); }
-#ts .ts-card h2 em { font-style: normal; color: ${C.yellow}; }
-#ts .ts-card p { margin: 0 auto 26px; max-width: 30rem; color: rgba(255,255,255,.85); font-size: 1.125rem; line-height: 1.5; font-weight: 500; }
-#ts .ts-card p b { color: ${C.yellow}; font-weight: 800; }
-#ts .ts-go { display: inline-flex; align-items: center; gap: 12px; padding: 16px 30px; border-radius: 99px; background: ${C.yellow} !important; color: ${C.ink} !important; font-weight: 900 !important; font-size: 1.375rem !important; letter-spacing: -.02em; box-shadow: 0 6px 0 ${C.pink}, 0 14px 40px rgba(255,61,154,.45); transition: transform .15s, box-shadow .15s; }
-#ts .ts-go:hover { transform: scale(1.05) rotate(-2deg); }
-#ts .ts-go:active { transform: translateY(4px); box-shadow: 0 2px 0 ${C.pink}; }
+#ts .ts-card h2 { font-size: clamp(2.5rem, min(9vw, 11vh), 5.5rem); line-height: .95; letter-spacing: -.045em; font-weight: 800; margin: 16px 0 12px; color: #fff; }
+#ts .ts-card h2 em { font-style: normal; color: ${C.amber}; }
+#ts .ts-card p { margin: 0 auto 28px; max-width: 28rem; color: rgba(255,255,255,.7); font-size: 1.0625rem; line-height: 1.55; }
+#ts .ts-card p b { color: #fff; font-weight: 600; }
+#ts .ts-go { display: inline-flex; align-items: center; gap: 10px; padding: 15px 28px; border-radius: 99px; background: ${C.amber} !important; color: ${C.ink} !important; font-weight: 700 !important; font-size: 1.125rem !important; letter-spacing: -.01em; box-shadow: 0 10px 40px rgba(242,179,91,.25); transition: transform .2s cubic-bezier(.2,.8,.2,1), background .2s; }
+#ts .ts-go:hover { transform: translateY(-1px); background: ${C.amberHi} !important; }
+#ts .ts-go:active { transform: scale(.98); }
 #ts .ts-go svg { width: 20px; height: 20px; }
 #ts .ts-keys { margin-top: 24px; font-size: .875rem; color: rgba(255,255,255,.7); }
-#ts .ts-keys kbd { font: inherit; font-weight: 800; padding: 2px 8px; border-radius: 7px; background: rgba(30,16,51,.45); color: #fff; }
+#ts .ts-keys kbd { font: inherit; font-weight: 600; padding: 2px 7px; border-radius: 6px; background: rgba(255,255,255,.1); color: rgba(255,255,255,.85); }
 #ts .ts-row { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
-#ts .ts-ghost { padding: 14px 22px; border-radius: 99px; background: rgba(30,16,51,.45) !important; font-weight: 800; }
-#ts .ts-ghost:hover { background: rgba(30,16,51,.7) !important; }
-#ts .ts-birdy { width: clamp(80px, 16vh, 130px); height: auto; animation: ts-hover 1.4s ease-in-out infinite; filter: drop-shadow(0 6px 0 rgba(30,16,51,.35)); }
+#ts .ts-ghost { padding: 14px 22px; border-radius: 99px; background: rgba(255,255,255,.1) !important; font-weight: 600; }
+#ts .ts-ghost:hover { background: rgba(255,255,255,.16) !important; }
+#ts .ts-birdy { width: clamp(80px, 15vh, 120px); height: auto; animation: ts-hover 2.4s ease-in-out infinite; }
 #ts .ts-birdy .hb-wing { transform-box: fill-box; transform-origin: 92% 96%; animation: ts-flap .07s ease-in-out infinite alternate; }
-#ts :focus-visible { outline: 3px solid ${C.yellow}; outline-offset: 3px; }
-@keyframes ts-hover { 0%, 100% { transform: translateY(0) rotate(-4deg); } 50% { transform: translateY(-10px) rotate(-1deg); } }
+#ts :focus-visible { outline: 2px solid ${C.amber}; outline-offset: 3px; }
+@keyframes ts-hover { 0%, 100% { transform: translateY(0) rotate(-3deg); } 50% { transform: translateY(-8px) rotate(-1deg); } }
 @keyframes ts-flap { from { transform: rotate(-12deg); } to { transform: rotate(30deg) scale(.92, .55); } }
 /* small screens, and short ones (a phone on its side) */
 @media (max-width: 640px) {
   #ts .ts-name small { display: none; }
   #ts .ts-name svg { width: 36px; }
-  #ts .ts-sec { font-size: .9375rem; top: max(70px, calc(env(safe-area-inset-top) + 58px)); }
+  #ts .ts-sec { font-size: .875rem; top: max(70px, calc(env(safe-area-inset-top) + 58px)); }
   #ts .ts-hint { font-size: .8125rem; top: max(116px, calc(env(safe-area-inset-top) + 104px)); }
   #ts .ts-lyrics { bottom: calc(80px + env(safe-area-inset-bottom)); }
   #ts .ts-bar { gap: 10px; padding-top: 10px; }
@@ -218,10 +198,10 @@ const css = `
   #ts .ts-name svg { width: 30px; }
   #ts .ts-name small { display: none; }
   #ts .ts-x { width: 38px; height: 38px; }
-  #ts .ts-sec { top: 12px; font-size: .875rem; padding: 5px 12px 6px; }
+  #ts .ts-sec { top: 12px; font-size: .8125rem; padding: 5px 12px 5px 10px; }
   #ts .ts-hint { display: none; }
   #ts .ts-lyrics { bottom: calc(62px + env(safe-area-inset-bottom)); }
-  #ts .ts-l { font-size: clamp(1.25rem, min(4.2vw, 8.5vh), 2.6rem); }
+  #ts .ts-l { font-size: clamp(1.25rem, min(4.2vw, 8vh), 2.6rem); }
   #ts .ts-bar { padding-top: 6px; padding-bottom: max(10px, env(safe-area-inset-bottom)); }
   #ts .ts-play { width: 40px; height: 40px; }
   #ts .ts-card h2 { margin: 6px 0; }
@@ -234,7 +214,7 @@ const css = `
 }
 @media (prefers-reduced-motion: reduce) {
   #ts .ts-l { transition-duration: .01s; }
-  #ts .ts-w.is-on { animation: none !important; }
+  #ts .ts-w { transition: none; }
   #ts .ts-birdy, #ts .ts-birdy .hb-wing { animation: none; }
 }
 `;
@@ -257,17 +237,11 @@ const ICON = {
 // which words get a colour (and a way of moving) of their own
 const VOICES = {
   "ts-tov": ["tov"],
-  "ts-shout": ["oi", "agents", "pints", "up", "bust", "oi"],
-  "ts-rust": ["rust", "rusts", "compiling"],
-  "ts-fast": ["faster", "milliseconds", "fortytwo"],
+  "ts-big": ["oi", "agents", "bust", "ding", "five", "four", "three", "two", "one"],
+  "ts-rust": ["rust", "rusts"],
   "ts-code": ["typescript", "json", "try", "curl", "pipe", "sh", "binary"],
-  "ts-good": ["right", "fix", "fine", "done", "through", "straight", "ship"],
-  "ts-bad": ["error", "never", "guesses", "poor", "missed"],
-  "ts-small": ["little"],
-  "ts-beer": ["pub", "tonight"],
-  "ts-night": ["night", "grafter"],
-  "ts-beep": ["tap", "bleep", "keys", "go"],
-  "ts-big": ["ding", "five", "four", "three", "two", "one"],
+  "ts-good": ["fix", "fine", "through", "done"],
+  "ts-bad": ["error", "never"],
 };
 const VOICE = new Map();
 for (const [cls, ws] of Object.entries(VOICES)) for (const w of ws) if (!VOICE.has(w)) VOICE.set(w, cls);
@@ -275,10 +249,10 @@ function wordClass(text, before) {
   const w = text.toLowerCase().replace(/[^a-z0-9]/g, "");
   if (w === "any" || w === "null" || w === "equals") return "ts-code ts-no";
   // (an agent that never gets it right isn't right)
-  if (w === "right" && before.includes("never")) return "ts-bad";
+  if (w === "right") return before.includes("never") ? "ts-bad" : "ts-good";
   const cls = VOICE.get(w) || "";
   // (shouts and the countdown are the words sung with a "!"; "agent's", "one little" aren't)
-  if ((cls === "ts-shout" || cls === "ts-big") && !text.includes("!") && w !== "pints") return "";
+  if (cls === "ts-big" && !text.includes("!")) return "";
   return cls;
 }
 
@@ -310,7 +284,7 @@ function build() {
   <button type="button" class="ts-x" aria-label="Close the singalong">${ICON.close}</button>
 </div>
 <div class="ts-sec" aria-hidden="true"></div>
-<div class="ts-hint">Tap, click or mash any key on every <b>TOV!</b></div>
+<div class="ts-hint">Tap along on every <b>Tov</b></div>
 <div class="ts-lyrics">${lyricHtml}</div>
 <div class="ts-bar">
   <button type="button" class="ts-play" aria-label="Play">${ICON.play}</button>
@@ -321,7 +295,7 @@ function build() {
   <div>
     ${BIRD_SVG}
     <h2>Fast with <em>Tov</em></h2>
-    <p>A singalong for coding agents and the people who buy them pints. Follow the words, and <b>tap, click or mash a key on every TOV!</b></p>
+    <p>A singalong for coding agents and the people who buy them pints. Follow the words, and <b>tap along on every Tov.</b></p>
     <button type="button" class="ts-go">${ICON.play}Pints up!</button>
     <div class="ts-keys"><kbd>Space</kbd> pause · <kbd>←</kbd> <kbd>→</kbd> skip · <kbd>Esc</kbd> back to the page</div>
   </div>
@@ -329,8 +303,8 @@ function build() {
 <div class="ts-card ts-end" hidden>
   <div>
     ${BIRD_SVG}
-    <h2>That's the <em>build</em> done!</h2>
-    <p>Pints down, agents. Now the real thing:</p>
+    <h2>That's the <em>build</em> done.</h2>
+    <p>Now the real thing:</p>
     <div class="ts-row">
       <button type="button" class="ts-go ts-again">${ICON.play}Again!</button>
       <button type="button" class="ts-ghost ts-copy">Copy the install line</button>
@@ -763,42 +737,17 @@ function bigText(text, x, y, size, col, o = {}) {
   if (o.rot) ctx.rotate(o.rot);
   if (o.scale) ctx.scale(o.scale, o.scale);
   ctx.globalAlpha = o.a ?? 1;
-  ctx.font = `${o.weight || 900} ${size}px ${o.font || FONT}`;
+  ctx.font = `${o.weight || 800} ${size}px ${o.font || FONT}`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.lineJoin = "round";
-  // (an extruded side in a second colour, then the ink outline, then the face)
-  const depth = o.extrude ? 4 : 1, step = size * (o.extrude ? 0.022 : 0.06);
-  ctx.fillStyle = o.extrude || "rgba(30,16,51,.4)";
-  for (let i = depth; i >= 1; i--) ctx.fillText(text, step * i * 0.6, step * i);
-  ctx.lineWidth = size * (o.stroke ?? 0.1);
-  ctx.strokeStyle = o.strokeCol || C.ink;
-  ctx.strokeText(text, 0, 0);
+  if (o.outline) {
+    ctx.lineJoin = "round";
+    ctx.lineWidth = size * o.outline;
+    ctx.strokeStyle = C.ink;
+    ctx.strokeText(text, 0, 0);
+  }
   ctx.fillStyle = col;
   ctx.fillText(text, 0, 0);
-  ctx.restore();
-}
-
-// a comic-book burst, behind a word that's shouted
-function starburst(x, y, r, col, rot, a = 1) {
-  ctx.save();
-  ctx.globalAlpha = a;
-  ctx.translate(x, y);
-  ctx.rotate(rot);
-  ctx.fillStyle = col;
-  ctx.strokeStyle = C.ink;
-  ctx.lineWidth = Math.max(2, r * 0.035);
-  ctx.lineJoin = "round";
-  ctx.beginPath();
-  const n = 14;
-  for (let i = 0; i < n * 2; i++) {
-    const rr = i % 2 ? r * (0.62 + hash(i) * 0.12) : r * (0.92 + hash(i * 3) * 0.16);
-    const ang = (i / (n * 2)) * TAU;
-    ctx.lineTo(Math.cos(ang) * rr, Math.sin(ang) * rr * 0.78);
-  }
-  ctx.closePath();
-  ctx.fill();
-  ctx.stroke();
   ctx.restore();
 }
 
@@ -839,7 +788,7 @@ function add(p) {
   p.age = 0;
   P.push(p);
 }
-const CONF = [C.yellow, C.pink, C.cyan, C.lime, "#fff", C.violet, C.orange];
+const CONF = [C.amber, C.foam, C.pink, C.cyan, C.green, C.violet];
 function confetti(n, x, y, spread = 1) {
   for (let i = 0; i < n; i++) {
     const a = Math.random() * TAU, v = (200 + Math.random() * 600) * U * spread;
@@ -921,7 +870,7 @@ function drawParticles() {
       ctx.stroke();
     } else if (p.k === "txt") {
       const sc = k < 0.15 ? back(k / 0.15) : 1;
-      bigText(p.text, p.x, p.y, p.s, p.col, { a, rot: p.rot, scale: sc, stroke: 0.14 });
+      bigText(p.text, p.x, p.y, p.s, p.col, { a, rot: p.rot, scale: sc });
     } else if (p.k === "pix") {
       ctx.fillStyle = p.col;
       ctx.fillRect(Math.round(p.x / 4) * 4, Math.round(p.y / 4) * 4, p.s, p.s);
@@ -940,43 +889,32 @@ function on(t, fn) { triggers.push({ t, fn }); }
 function target(t, label) { targets.push({ t, label, popped: false }); }
 
 let shakeAmt = 0, flashAmt = 0, zoomAmt = 0;
-function shake(n) { if (!calm) shakeAmt = Math.max(shakeAmt, n); }
+function shake(n) { if (!calm) shakeAmt = Math.max(shakeAmt, n * 0.45); }
 function flash(a, col = "#fff") { if (!calm) { flashAmt = Math.max(flashAmt, a); els.flash.style.background = col; } }
 function punch(n) { if (!calm) zoomAmt = Math.max(zoomAmt, n); }
 
-// the colours a stamp comes in, one after another: face, extruded side, burst behind
-const LOUD = [[C.yellow, C.pink, C.cyan], [C.cyan, C.violet, C.yellow], [C.lime, C.blue, C.pink], [C.pink, C.yellow, C.lime], [C.orange, C.cyan, C.violet], ["#fff", C.pink, C.lime]];
-let stamps = 0;
-
-// a word slammed onto the stage
+// a word slammed onto the stage: it lands from a little bigger, settles, and lifts away
 function stamp(t, text, o = {}) {
   const life = o.life ?? 0.8;
-  const [face, side, back_] = LOUD[stamps++ % LOUD.length];
-  const col = o.col || face, ext = o.extrude || side, burst = o.burst ?? back_;
-  const spin = (hash(stamps) - 0.5) * 0.6;
+  const col = o.col || C.foam;
   const at = () => [cx() + (o.dx ?? 0) * U * narrow(), (o.y ? Ht * o.y : cy() - 40 * U) + (o.dy ?? 0) * U];
   scene(t, t + life, now => {
     const dt = now - t;
-    const k = clamp(dt / 0.11, 0, 1);
-    let sc = lerp(3, 1, out3(k));
-    if (k >= 1) sc = 1 + Math.sin((dt - 0.11) * 30) * 0.07 * Math.exp(-(dt - 0.11) * 6);
-    // (it leaves by shrinking away: fading would show through its extruded layers)
-    const gone = clamp((dt - (life - 0.16)) / 0.16, 0, 1);
-    sc *= 1 - gone * gone;
-    const a = Math.min(k * 3, 1);
-    if (sc <= 0.01) return;
+    const k = out3(dt / 0.16);
+    const leave = clamp((dt - (life - 0.25)) / 0.25, 0, 1);
+    const sc = lerp(1.35, 1, k) * (1 + leave * 0.08);
+    const a = Math.min(clamp(dt / 0.06, 0, 1), 1 - leave);
     const [x, y] = at();
     const size = (o.size ?? 200) * U;
-    if (burst) starburst(x, y, size * 0.95 * back(dt / 0.25), burst, spin + dt * 0.8, a);
-    bigText(text, x, y, size, col, { a, rot: o.rot ?? 0, scale: sc, stroke: 0.08, extrude: ext });
+    drawGlow(o.glow || "amber", x, y, size * 1.6, 0.35 * a);
+    bigText(text, x, y, size, col, { a, rot: (o.rot ?? 0) * 0.6, scale: sc });
   }, 0.001);
   on(t, () => {
     const [x, y] = at();
-    shake(o.shake ?? 14);
-    punch(0.05);
-    flash(0.14, burst || col);
-    ring(x, y, col, 280, 0.5, 12);
-    sparks(o.sparks ?? 22, x, y, col);
+    shake(o.shake ?? 12);
+    punch(0.02);
+    ring(x, y, col, 240, 0.6, 3);
+    sparks(Math.round((o.sparks ?? 18) * 0.6), x, y, col);
   });
 }
 
@@ -985,7 +923,7 @@ function fadeIn(now, s, d = 0.35) { return clamp((now - s) / d, 0, 1); }
 // ---- the intro: Oi! Agents! Pints up!
 function intro(li) {
   const oi = W(li, 0), agents = W(li, 1), pints = W(li, 2), up = W(li, 3);
-  stamp(oi.s, "OI!", { size: 260, rot: -0.12, shake: 22, sparks: 30 });
+  stamp(oi.s, "OI!", { size: 260, rot: -0.12, shake: 22, sparks: 30, col: C.amber });
   target(oi.s, "OI!");
   scene(agents.s - 0.1, up.e + 4.2, now => {
     const n = Wd < 700 ? 3 : 5;
@@ -1014,7 +952,7 @@ function intro(li) {
 function chorus(b, last) {
   const l0 = L(b), l1 = L(b + 1), l2 = L(b + 2), l3 = L(b + 3);
   // Tov! Tov!
-  stamp(W(b, 2).s, "TOV!", { rot: -0.1, dx: -150 });
+  stamp(W(b, 2).s, "TOV!", { rot: -0.1, dx: -150, col: C.amber });
   stamp(W(b, 3).s, "TOV!", { rot: 0.1, dx: 150 });
   target(W(b, 2).s, "TOV"); target(W(b, 3).s, "TOV");
   // faster than Rust: the hummingbird laps the crab
@@ -1250,7 +1188,7 @@ function verse1(b) {
     for (const [dx, dy, r] of [[-14, -10, 9], [12, 8, 12], [-6, 18, 6]]) { ctx.beginPath(); ctx.arc(mx + dx * U, my + dy * U, r * U, 0, TAU); ctx.fill(); }
     if (now > night.s) {
       const n = (now - night.s);
-      for (let i = 0; i < 3; i++) bigText("z", mx - 70 * U - i * 26 * U, my + 20 * U - ((n * 40 + i * 30) % 90) * U, (20 + i * 6) * U, C.foam, { a: 0.6 * clamp(1 - ((n * 40 + i * 30) % 90) / 90, 0, 1), weight: 800, stroke: 0.06 });
+      for (let i = 0; i < 3; i++) bigText("z", mx - 70 * U - i * 26 * U, my + 20 * U - ((n * 40 + i * 30) % 90) * U, (20 + i * 6) * U, C.foam, { a: 0.6 * clamp(1 - ((n * 40 + i * 30) % 90) / 90, 0, 1), weight: 800 });
     }
   }, 0.8);
   // the agent at its laptop
@@ -1295,7 +1233,7 @@ function verse1(b) {
         const k = (now - t0) / 1.4;
         if (k > 1) continue;
         const qx = x - 90 * U + (hash(i * 4.4) - 0.5) * 260 * U, qy = y - 120 * U - k * 120 * U;
-        bigText("?", qx, qy, (40 + hash(i) * 30) * U, C.cyan, { a: 1 - k, rot: (hash(i * 2) - 0.5) * 0.6, scale: back(k * 5), stroke: 0.1 });
+        bigText("?", qx, qy, (40 + hash(i) * 30) * U, C.cyan, { a: 1 - k, rot: (hash(i * 2) - 0.5) * 0.6, scale: back(k * 5) });
       }
     }
   }, 0.4);
@@ -1426,11 +1364,11 @@ function verse2(b) {
     ctx.lineCap = "round";
     ctx.beginPath(); ctx.arc(x, y, r - 18 * U, -Math.PI / 2, -Math.PI / 2 + TAU * k * 0.42 * 2.38); ctx.stroke();
     ctx.restore();
-    bigText(`${Math.round(42 * out3(k))}`, x, y - 8 * U, 84 * U, C.amber, { a, stroke: 0.06 });
+    bigText(`${Math.round(42 * out3(k))}`, x, y - 8 * U, 84 * U, C.amber, { a });
     mono("ms", x, y + 46 * U, 22 * U, C.foam, a, "center");
     if (now > done.s) {
       const k2 = back((now - done.s) / 0.3);
-      bigText("BUILD DONE", x, y + r + 50 * U, 44 * U, C.green, { a, scale: k2, rot: -0.04, stroke: 0.12 });
+      bigText("BUILD DONE", x, y + r + 50 * U, 44 * U, C.green, { a, scale: k2, rot: -0.04 });
     }
   }, 0.2);
   on(done.s, () => { confetti(30, cx(), cy(), 1); shake(8); });
@@ -1462,12 +1400,9 @@ function verse2(b) {
     ctx.lineWidth = 3 * U;
     ctx.beginPath(); ctx.arc(0, 0, 9 * U, 0, Math.PI * 1.4); ctx.stroke();
     ctx.restore();
-    if (now > fun.s) {
-      // the party it missed, going on somewhere else
-      const k = clamp((now - fun.s) / 0.8, 0, 1);
-      bigText("🎉", cx() + 300 * U * narrow(), cy() - 120 * U, 60 * U, C.foam, { a: a * (1 - k * 0.5), scale: back(k * 2), stroke: 0 });
-    }
   }, 0.25);
+  // the party it missed, going off somewhere else
+  on(fun.s, () => confetti(30, cx() + 300 * U * narrow(), cy() - 120 * U, 0.7));
   on(comp.s, () => floatText("still compiling…", cx() - 170 * U, cy() - 80 * U, "#FF8A5C", 26, 1.6));
 }
 
@@ -1478,7 +1413,7 @@ function lightKey(ch, t) { keyLit.set(ch.toUpperCase(), t); }
 function bridge(b) {
   const l0 = L(b), l1 = L(b + 1), l2 = L(b + 2), l3 = L(b + 3);
   // the keyboard
-  scene(l0.s - 0.1, l1.e + 0.2, now => {
+  scene(l0.s - 0.1, until(l1.i) - 0.3, now => {
     const a = fadeIn(now, l0.s - 0.1, 0.2);
     const key = Math.min(64 * U, (Wd - 40) / 11);
     const gap = key * 0.14;
@@ -1525,7 +1460,7 @@ function bridge(b) {
   }
   // check the JSON please
   const json = W(b + 1, 5), please = W(b + 1, 6);
-  scene(json.s - 0.1, l1.e + 0.4, now => {
+  scene(json.s - 0.1, until(l1.i) - 0.3, now => {
     const a = fadeIn(now, json.s - 0.1, 0.2);
     const fs = Math.max(14, 30 * U);
     const y = cy() - 160 * U;
@@ -1533,17 +1468,17 @@ function bridge(b) {
     if (now > please.s) check(cx() + 190 * U, y, 40 * U, C.green, clamp((now - please.s) / 0.3, 0, 1));
   }, 0.2);
   // five, four, three, two, one
-  const cols = [C.cyan, C.green, C.amber, C.pink, C.red];
+  const cols = [C.foam, C.foam, C.foam, C.foam, C.amber];
   for (let i = 0; i < 5; i++) {
     const w = W(b + 2, i);
-    stamp(w.s, ["5", "4", "3", "2", "1"][i], { size: 280 + i * 30, col: cols[i], glow: ["cyan", "white", "amber", "pink", "pink"][i], rot: (i % 2 ? 0.06 : -0.06), life: 0.55, shake: 8 + i * 4 });
+    stamp(w.s, ["5", "4", "3", "2", "1"][i], { size: 280 + i * 30, col: cols[i], glow: "amber", rot: (i % 2 ? 0.06 : -0.06), life: 0.55, shake: 8 + i * 4 });
     target(w.s, "!");
-    on(w.s, () => flash(0.08 + i * 0.04, cols[i]));
+    on(w.s, () => flash(0.03 + i * 0.015, cols[i]));
   }
   // DING!
   const ding = W(b + 3, 0), done = W(b + 3, 4);
   target(ding.s, "DING");
-  on(ding.s, () => { flash(0.55); shake(28); confetti(140, cx(), cy(), 1.6); ring(cx(), cy(), "#fff", 500, 0.9, 16); sparks(40, cx(), cy(), C.amberHi, 1.5); });
+  on(ding.s, () => { flash(0.22, C.foam); shake(24); confetti(90, cx(), cy(), 1.6); ring(cx(), cy(), "#fff", 500, 0.9, 16); sparks(40, cx(), cy(), C.amberHi, 1.5); });
   scene(ding.s, l3.e + 0.6, now => {
     const k = now - ding.s;
     const swing = Math.sin(k * 14) * 0.5 * Math.exp(-k * 2.5);
@@ -1578,8 +1513,8 @@ function bridge(b) {
     ctx.fillStyle = C.amber;
     ctx.beginPath(); ctx.arc(0, -46, 12, 0, TAU); ctx.fill(); ctx.stroke();
     ctx.restore();
-    bigText("DING!", x, y + 120 * U, 110 * U, "#fff", { scale: back(k / 0.2), rot: -0.06, stroke: 0.1 });
-    if (now > W(b + 3, 3).s) bigText("BUILD ✓", x, y + 210 * U, 46 * U, C.green, { scale: back((now - W(b + 3, 3).s) / 0.3), stroke: 0.12 });
+    bigText("DING!", x, y + 120 * U, 110 * U, "#fff", { scale: back(k / 0.2), rot: -0.06 });
+    if (now > W(b + 3, 3).s) bigText("BUILD ✓", x, y + 210 * U, 46 * U, C.green, { scale: back((now - W(b + 3, 3).s) / 0.3) });
   }, 0.01);
   // the tension: the arcade gets brighter and faster until the DING
   bridgeSpan = [l0.s - 1, ding.s];
@@ -1589,13 +1524,13 @@ let bridgeSpan = [0, 0];
 // ---- the outro: Tov! Tov! ... curl it, pipe it, off you go, Tov dot S-H, OI!
 function outro(b) {
   const l0 = L(b), l1 = L(b + 1), l2 = L(b + 2), l3 = L(b + 3);
-  stamp(W(b, 0).s, "TOV!", { rot: -0.1, dx: -150 });
+  stamp(W(b, 0).s, "TOV!", { rot: -0.1, dx: -150, col: C.amber });
   stamp(W(b, 1).s, "TOV!", { rot: 0.1, dx: 150 });
   target(W(b, 0).s, "TOV"); target(W(b, 1).s, "TOV");
   race(W(b, 2).s, l1.s + 0.2);
-  stamp(W(b + 1, 0).s, "TOV!", { rot: -0.12, dx: -220, size: 170 });
+  stamp(W(b + 1, 0).s, "TOV!", { rot: -0.12, dx: -220, size: 170, col: C.amber });
   stamp(W(b + 1, 1).s, "TOV!", { rot: 0.0, dx: 0, size: 190 });
-  stamp(W(b + 1, 2).s, "TOV!", { rot: 0.12, dx: 220, size: 210 });
+  stamp(W(b + 1, 2).s, "TOV!", { rot: 0.12, dx: 220, size: 210, col: C.amber });
   for (let i = 0; i < 3; i++) target(W(b + 1, i).s, "TOV");
   const bust = W(b + 1, 4);
   stamp(bust.s, "BUST!", { size: 180, col: C.pink, glow: "pink", rot: -0.06, shake: 22 });
@@ -1637,14 +1572,14 @@ function outro(b) {
     let x = cx() - total / 2;
     parts.forEach(([p, at], i) => {
       const k = clamp((now - at) / 0.25, 0, 1);
-      if (k > 0) bigText(p, x + widths[i] / 2, cy() - 30 * U, size, i === 0 ? C.amber : C.foam, { scale: back(k), stroke: 0.07, a: k });
+      if (k > 0) bigText(p, x + widths[i] / 2, cy() - 30 * U, size, i === 0 ? C.amber : C.foam, { scale: back(k), a: k });
       x += widths[i];
     });
   }, 0.01);
   for (const at of [tov.s, dot.s, sh.s]) on(at, () => { shake(8); sparks(12, cx(), cy() - 30 * U, C.amber); });
-  stamp(oi.s, "OI!", { size: 320, rot: -0.1, shake: 30, sparks: 40, life: 1.6 });
+  stamp(oi.s, "OI!", { size: 320, rot: -0.1, shake: 30, sparks: 40, life: 1.6, col: C.amber });
   target(oi.s, "OI!");
-  on(oi.s, () => { flash(0.4, C.amber); confetti(180, cx(), cy(), 1.8); for (let i = 0; i < 6; i++) foam(10, Wd * (i + 0.5) / 6, Ht * 0.7); });
+  on(oi.s, () => { flash(0.16, C.amber); confetti(110, cx(), cy(), 1.8); for (let i = 0; i < 6; i++) foam(10, Wd * (i + 0.5) / 6, Ht * 0.7); });
   scene(oi.s, oi.s + 6, now => { if (Math.random() < 0.6) rainConfetti(2); }, 0.01);
 }
 
@@ -1666,7 +1601,7 @@ function cueAll() {
 // ---------------------------------------------------------------- the stage: backdrops
 
 const STARS = Array.from({ length: 140 }, (_, i) => ({ x: hash(i * 1.3), y: hash(i * 2.7) * 0.75, r: 0.6 + hash(i * 4.1) * 1.8, tw: hash(i * 5.9) * TAU }));
-const BOKEH = Array.from({ length: 18 }, (_, i) => ({ x: hash(i * 3.1), y: hash(i * 7.7), r: 30 + hash(i * 1.9) * 90, sp: 0.02 + hash(i * 6.2) * 0.04, col: ["amber", "pink", "cyan", "white", "violet"][i % 5] }));
+const BOKEH = Array.from({ length: 18 }, (_, i) => ({ x: hash(i * 3.1), y: hash(i * 7.7), r: 30 + hash(i * 1.9) * 90, sp: 0.02 + hash(i * 6.2) * 0.04, col: ["amber", "amber", "white", "pink", "amber"][i % 5] }));
 
 function backdrop(name, a, t, pulse, tension) {
   if (a <= 0.01) return;
@@ -1675,7 +1610,7 @@ function backdrop(name, a, t, pulse, tension) {
   if (name === "pub" || name === "burst") {
     for (const b of BOKEH) {
       const x = ((b.x + t * b.sp) % 1.2 - 0.1) * Wd, y = (b.y * 0.8 + Math.sin(t * 0.5 + b.x * 9) * 0.03) * Ht;
-      drawGlow(b.col, x, y, b.r * U * (1 + pulse * 0.25), a * (name === "pub" ? 0.3 : 0.22));
+      drawGlow(b.col, x, y, b.r * U * (1 + pulse * 0.15), a * (name === "pub" ? 0.2 : 0.12));
     }
     ctx.globalAlpha = a;
   }
@@ -1683,14 +1618,14 @@ function backdrop(name, a, t, pulse, tension) {
     ctx.save();
     ctx.translate(cx(), cy() - 30 * U);
     ctx.rotate(t * 0.12);
-    ctx.fillStyle = `rgba(255,240,180,${0.1 + pulse * 0.12})`;
+    ctx.fillStyle = `rgba(255,225,180,${0.035 + pulse * 0.04})`;
     const R = Math.hypot(Wd, Ht);
     for (let i = 0; i < 18; i++) {
       ctx.rotate(TAU / 18);
       ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(-R * 0.09, -R); ctx.lineTo(R * 0.09, -R); ctx.closePath(); ctx.fill();
     }
     ctx.restore();
-    drawGlow("white", cx(), cy() - 30 * U, 380 * U * (1 + pulse * 0.25), 0.3 * a);
+    drawGlow("amber", cx(), cy() - 30 * U, 420 * U * (1 + pulse * 0.15), 0.18 * a);
   }
   if (name === "night") {
     for (const s of STARS) {
@@ -1701,7 +1636,7 @@ function backdrop(name, a, t, pulse, tension) {
   }
   if (name === "grid") {
     const g = 56 * U, off = (t * 30 * U) % g;
-    ctx.strokeStyle = `rgba(255,255,255,${0.12 + pulse * 0.12})`;
+    ctx.strokeStyle = `rgba(255,255,255,${0.05 + pulse * 0.05})`;
     ctx.lineWidth = 1;
     ctx.beginPath();
     for (let x = -off; x < Wd; x += g) { ctx.moveTo(x, 0); ctx.lineTo(x, Ht); }
@@ -1714,18 +1649,18 @@ function backdrop(name, a, t, pulse, tension) {
     const sr = 170 * U;
     if (!sunGrad) {
       sunGrad = ctx.createLinearGradient(0, hz - sr, 0, hz);
-      sunGrad.addColorStop(0, C.yellow);
-      sunGrad.addColorStop(1, C.pink);
+      sunGrad.addColorStop(0, C.amberHi);
+      sunGrad.addColorStop(1, "#C8507A");
     }
     ctx.fillStyle = sunGrad;
     ctx.beginPath(); ctx.arc(cx(), hz, sr * (1 + pulse * 0.05), Math.PI, 0); ctx.fill();
-    ctx.fillStyle = "#4B00A8";
+    ctx.fillStyle = "#25124F";
     for (let i = 0; i < 6; i++) ctx.fillRect(cx() - sr * 1.1, hz - sr * 0.1 - i * sr * 0.14, sr * 2.2, (2 + i * 1.2) * U);
     // the floor
-    ctx.fillStyle = "rgba(13,0,38,.7)";
+    ctx.fillStyle = "rgba(10,7,26,.72)";
     ctx.fillRect(0, hz, Wd, Ht - hz);
     ctx.strokeStyle = mix(hex(C.pink), hex(C.cyan), tension);
-    ctx.globalAlpha = a * (0.5 + pulse * 0.4);
+    ctx.globalAlpha = a * (0.28 + pulse * 0.2);
     ctx.lineWidth = 2;
     ctx.beginPath();
     const speed = 0.6 + tension * 3;
@@ -1754,14 +1689,14 @@ function crowd(t, a, beat, big) {
     const x = (i + 0.5) * Wd / n + (hash(i) - 0.5) * 30 * U;
     const hop = Math.abs(Math.sin((beat + hash(i * 3) * 0.2) * Math.PI)) * (big ? 22 : 12) * U;
     const hr = (22 + hash(i * 2) * 9) * U, y = base - 100 * U - hash(i * 5) * 34 * U - hop;
-    ctx.fillStyle = "rgba(30,16,51,.92)";
+    ctx.fillStyle = "rgba(12,8,20,.78)";
     ctx.beginPath(); ctx.arc(x, y, hr, 0, TAU); ctx.fill();
     roundRect(x - hr * 1.7, y + hr * 0.8, hr * 3.4, 200 * U, hr); ctx.fill();
     if (i % 2 === 0 || big) {
       const side = i % 4 < 2 ? 1 : -1;
       const sway = Math.sin(beat * Math.PI + i) * 0.25;
       const hx = x + side * hr * 1.6 + sway * 20 * U, hy = y - hr * 1.6;
-      ctx.strokeStyle = "rgba(30,16,51,.92)";
+      ctx.strokeStyle = "rgba(12,8,20,.78)";
       ctx.lineWidth = hr * 0.6;
       ctx.lineCap = "round";
       ctx.beginPath(); ctx.moveTo(x + side * hr * 1.2, y + hr * 1.2); ctx.lineTo(hx, hy); ctx.stroke();
@@ -1949,12 +1884,11 @@ function shout(x, y, key) {
     g.popped = true;
     const sx = cx(), sy = cy() - 40 * U;
     const col = CONF[Math.floor(Math.random() * CONF.length)];
-    floatText(`${g.label}!`, sx + (Math.random() - 0.5) * 300 * U * narrow(), sy - 140 * U, col, 54, 0.9);
-    confetti(40, sx, sy, 1.1);
-    ring(sx, sy, col, 320, 0.5, 14);
-    shake(10);
-    punch(0.04);
-    flash(0.12, col);
+    floatText(`${g.label}!`, sx + (Math.random() - 0.5) * 300 * U * narrow(), sy - 140 * U, col, 44, 0.9);
+    confetti(28, sx, sy, 1);
+    ring(sx, sy, col, 260, 0.6, 3);
+    shake(8);
+    punch(0.02);
   } else if (key) {
     lightKey(key, t);
     floatText(key.toUpperCase(), 40 * U + Math.random() * (Wd - 80 * U), Ht * 0.6, CONF[Math.floor(Math.random() * CONF.length)], 36, 0.7);
