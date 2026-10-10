@@ -18,7 +18,10 @@ BODY = '{"name":"Ada Lovelace","email":"ada@example.com","age":36}'
 
 
 def sh(cmd, **kw):
-    return subprocess.run(cmd, check=True, capture_output=True, text=True, **kw).stdout
+    r = subprocess.run(cmd, capture_output=True, text=True, **kw)
+    if r.returncode != 0:
+        raise RuntimeError(f"{' '.join(cmd)}: exit {r.returncode}: {(r.stderr or r.stdout).strip()[-500:]}")
+    return r.stdout
 
 
 def wall(cmd, n=20):
