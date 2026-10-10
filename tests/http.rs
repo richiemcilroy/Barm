@@ -23,7 +23,8 @@ impl Drop for Server {
 }
 
 fn kill_group(pid: u32) {
-    let _ = Command::new("kill").arg("-TERM").arg(format!("-{pid}")).stderr(std::process::Stdio::null()).status();
+    // (`--`: procps's kill, Linux's, reads a negative pid after the signal as an option)
+    let _ = Command::new("kill").args(["-TERM", "--"]).arg(format!("-{pid}")).stderr(std::process::Stdio::null()).status();
 }
 
 fn start(binary: &Path, workers: u32) -> Server {
