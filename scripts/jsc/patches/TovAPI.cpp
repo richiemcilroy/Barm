@@ -131,6 +131,17 @@ bool TVWriteBytecode(JSContextGroupRef group, const char* source, size_t len, co
     return written && !error.isValid();
 }
 
+void TVInitialize()
+{
+    JSC::initialize();
+#if !PLATFORM(COCOA)
+    // (WebKit's ports make the UI thread's run loop the main one. Without one, the first full
+    // collection on Linux crashed: its timer asks the memory pressure handler, made then, which
+    // puts a timer of its own on the main run loop.)
+    RunLoop::initializeMain();
+#endif
+}
+
 double TVRunLoopSecondsUntilWork()
 {
     Seconds until = RunLoop::currentSingleton().secondsUntilWork();

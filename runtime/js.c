@@ -948,6 +948,9 @@ JSContextRef tv_js_start(void) {
     tv_js_glib = g_main_context_new();
     g_main_context_push_thread_default(tv_js_glib);
 #endif
+#ifdef TV_JSC_OWN
+    TVInitialize();
+#endif
     JSGlobalContextRef ctx = JSGlobalContextCreate(NULL);
     for (int i = 0; i < noptions; i++)
         if (set[i]) unsetenv(options[i][0]);

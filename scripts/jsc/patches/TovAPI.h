@@ -27,6 +27,11 @@ JS_EXPORT JSValueRef TVEvaluateScript(JSContextRef ctx, const char *source, size
  * `fd` (from its start); false if it can't (the script doesn't parse, or the write failed). */
 JS_EXPORT bool TVWriteBytecode(JSContextGroupRef group, const char *source, size_t len, const char *url, int fd);
 
+/* Starts the engine on the calling thread, which is then the one its contexts are used on, with
+ * the options in the environment (JSC_name=value): its run loop (below) is the engine's main one,
+ * where it schedules what's meant for the main thread. Before the first context is made. */
+JS_EXPORT void TVInitialize(void);
+
 /* The calling thread's run loop, where the engine runs its timers (collections, finalizers) and
  * what its threads hand back (WebAssembly compiled off the thread), for an event loop of the
  * embedder's own to run: seconds until it has work (0: it has now; < 0: none scheduled); run
