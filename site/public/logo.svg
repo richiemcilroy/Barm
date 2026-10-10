@@ -1,8 +1,32 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Tov">
-  <!-- Tov's mark: a ball meeting the wall at speed (the race on tov.sh) -->
-  <rect width="64" height="64" rx="17" fill="#18204A"/>
-  <rect x="48.5" y="13" width="5" height="38" rx="2.5" fill="#F5F6F9"/>
-  <rect x="9" y="23" width="15" height="4.5" rx="2.25" fill="#F5F6F9" opacity=".5"/>
-  <rect x="14" y="36.5" width="10" height="4.5" rx="2.25" fill="#F5F6F9" opacity=".3"/>
-  <ellipse cx="37.5" cy="32" rx="9.5" ry="12.5" fill="#E4A95A"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 96" role="img" aria-label="Tov">
+  <!-- Tov: a happy ball mid-bounce, quick as the race on tov.sh -->
+  <style>
+    @media (prefers-color-scheme: dark) { .lines { stroke: #A8AECB; } .shadow { fill: #000; opacity: .35; } }
+  </style>
+  <defs>
+    <filter id="r" x="-20%" y="-20%" width="140%" height="140%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.022" numOctaves="2" seed="3"/>
+      <feDisplacementMap in="SourceGraphic" scale="1.8"/>
+    </filter>
+  </defs>
+  <g filter="url(#r)" stroke-linecap="round" stroke-linejoin="round">
+    <!-- its shadow, below the bounce -->
+    <ellipse class="shadow" cx="66" cy="88" rx="24" ry="4" fill="#1E2A66" opacity=".14"/>
+    <!-- speed lines -->
+    <path class="lines" d="M8 40h17M4 52h18M10 64h12" fill="none" stroke="#1E2A66" stroke-width="4.2" opacity=".85"/>
+    <!-- the ball, a little squashed from the last bounce -->
+    <ellipse cx="68" cy="48" rx="37" ry="34" fill="#E4A95A"/>
+    <!-- its shine -->
+    <path d="M44 30c5-8 14-12 22-12" fill="none" stroke="#FFF3DC" stroke-width="5"/>
+    <circle cx="40" cy="38" r="2.6" fill="#FFF3DC"/>
+    <ellipse cx="68" cy="48" rx="37" ry="34" fill="none" stroke="#1E2A66" stroke-width="3.6"/>
+    <!-- face -->
+    <ellipse cx="50" cy="58" rx="6" ry="3.4" fill="#F08F8A" opacity=".65"/>
+    <ellipse cx="90" cy="58" rx="6" ry="3.4" fill="#F08F8A" opacity=".65"/>
+    <circle cx="58" cy="48" r="4.6" fill="#1E2A66"/>
+    <circle cx="82" cy="48" r="4.6" fill="#1E2A66"/>
+    <circle cx="59.7" cy="46.3" r="1.5" fill="#fff"/>
+    <circle cx="83.7" cy="46.3" r="1.5" fill="#fff"/>
+    <path d="M63.5 56.5q6.5 6.5 13 0" fill="none" stroke="#1E2A66" stroke-width="3.2"/>
+  </g>
 </svg>
