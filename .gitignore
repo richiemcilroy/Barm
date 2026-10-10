@@ -10,3 +10,4 @@ bench/fetch/rust-client/target/
 # Internal docs stay local
 docs/design.md
 docs/research.md
+site/dist/

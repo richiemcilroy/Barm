@@ -2,11 +2,10 @@
 
 import { css } from "./style"
 
-const repo = "https://github.com/richiemcilroy/Tov"
+export const repo = "https://github.com/richiemcilroy/Tov"
 
-// what the server knows about itself when it renders the page (how long the render took isn't
-// known until it's done: the page holds `renderMsMark` where the server writes it)
-export type Stats = { binaryBytes: int, pagesServed: int }
+// (how long a render took isn't known until it's done: a footer can hold `renderMsMark`, and the
+// caller writes the time there)
 export const renderMsMark = "<!--render-ms-->"
 
 // ---------------------------------------------------------------- benchmarks
@@ -126,18 +125,15 @@ const startCode = [
   `<span class="d">$</span> git clone ${repo}`,
   `<span class="d">$</span> cd Tov && cargo install --path crates/tov`,
   ``,
-  `<span class="d">$</span> tov run examples/shapes      <span class="d"># build and run</span>`,
-  `<span class="d">$</span> tov --watch server.tov      <span class="d"># rebuild on save</span>`,
-  `<span class="d">$</span> tov check --json src/        <span class="d"># errors and fixes, for tools</span>`,
+  `<span class="d">$</span> tov run examples/shapes     <span class="d"># build and run</span>`,
+  `<span class="d">$</span> tov --watch server.tov     <span class="d"># rebuild on save</span>`,
+  `<span class="d">$</span> tov check --json src/      <span class="d"># errors and fixes, for tools</span>`,
   `<span class="d">$</span> tov build app.tov -o app   <span class="d"># one native binary</span>`,
 ].join("\n")
 
-function kb(bytes: int): string {
-  return `${Math.round(bytes / 1024)} KB`
-}
-
-export function renderPage(stats: Stats): string {
-  const pages = stats.pagesServed === 1 ? "1 page" : `${stats.pagesServed} pages`
+// The page, with `footer` (HTML) saying how it was made: served by site/server.tov, or written
+// out by site/build.tov.
+export function renderPage(footer: string): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -273,7 +269,7 @@ export function renderPage(stats: Stats): string {
 <footer>
   <div class="wrap">
     <img src="/logo.svg" alt="" width="40" height="29">
-    <p>This page is a Tov program. <a href="${repo}/tree/main/site">site/server.tov</a> rendered it in <b>${renderMsMark} ms</b>, in a <b>${kb(stats.binaryBytes)}</b> binary that has served <b>${pages}</b> since it started.</p>
+    <p>${footer}</p>
   </div>
 </footer>
 </body>
