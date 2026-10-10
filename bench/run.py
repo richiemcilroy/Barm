@@ -20,6 +20,7 @@ import datetime as dt
 import json
 import os
 import platform
+import select
 import shutil
 import signal
 import statistics
@@ -297,6 +298,20 @@ def toolchain_versions() -> dict[str, str | None]:
 # running
 
 
+def wait_for_exit(pid: int) -> None:
+    """Block until pid exits, without reaping it, so the pid can't be reused while the timer may still fire.
+    os.waitid does that where Python has it (Linux); where it doesn't (macOS, through Python 3.12 at least, the
+    system python3 included), a kqueue NOTE_EXIT event does, and it fires at once for a pid that already exited."""
+    if hasattr(os, "waitid"):
+        os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
+        return
+    kq = select.kqueue()
+    try:
+        kq.control([select.kevent(pid, filter=select.KQ_FILTER_PROC, flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT, fflags=select.KQ_NOTE_EXIT)], 1, None)
+    finally:
+        kq.close()
+
+
 def run_once(cmd: list[str], timeout: float) -> tuple[float, int, int, str, str, bool]:
     """Run cmd once. Returns (wall seconds, peak RSS bytes, exit code, stdout, stderr, timed_out)."""
     cmd, report = rusage.wrap(cmd)
@@ -318,15 +333,12 @@ def run_once(cmd: list[str], timeout: float) -> tuple[float, int, int, str, str,
 
         timer = threading.Timer(timeout, kill)
         timer.start()
-        if hasattr(os, "waitid"):
-            # Wait for exit without reaping, so the pid can't be reused while the timer may still fire.
-            os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
+        wait_for_exit(proc.pid)
         elapsed = time.perf_counter() - t0
         with lock:
             done = True
             timer.cancel()
         _, status, usage = os.wait4(proc.pid, 0)
-        elapsed = min(elapsed, time.perf_counter() - t0)
         proc.returncode = os.waitstatus_to_exitcode(status)  # already reaped; keep Popen from waiting
         out.seek(0)
         err.seek(0)
