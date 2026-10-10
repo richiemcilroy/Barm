@@ -17,6 +17,11 @@
 #ifndef TOV_H
 #define TOV_H
 
+/* (for compilers without it: GCC before 14 rejects __has_feature in #if even behind defined()) */
+#ifndef __has_feature
+#define __has_feature(x) 0
+#endif
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
