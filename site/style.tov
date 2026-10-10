@@ -271,10 +271,10 @@ h2 { font-size: clamp(1.75rem, 3.2vw, 2.375rem); line-height: 1.1; letter-spacin
   display: flex; flex-direction: column; min-width: 0;
 }
 .cap-card h3 { margin: 0 0 16px; font-size: 1rem; font-weight: 600; }
-.cap-card > p { color: var(--ink-2); margin: 0 0 22px; font-size: .9375rem; }
+.cap-card > p:not([class]) { color: var(--ink-2); margin: 0 0 22px; font-size: .9375rem; }
 .cap-big { margin: 0 0 28px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; }
 .cap-big b { font-size: clamp(3rem, 6vw, 4.25rem); font-weight: 700; letter-spacing: -.055em; line-height: .9; }
-.cap-big span { color: var(--ink-2); font-size: 1rem; max-width: 11rem; line-height: 1.35; }
+.cap-big span { color: var(--ink-2); font-size: 1rem; max-width: 15rem; line-height: 1.35; }
 .clips { list-style: none; margin: 0; padding: 0; display: grid; gap: 7px; }
 .clips li { display: grid; grid-template-columns: 8.4rem minmax(0, 1fr) 2.6rem; gap: 12px; align-items: center; font-size: .8125rem; }
 .cl-name { color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
