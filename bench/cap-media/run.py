@@ -128,6 +128,12 @@ def client(route, body, conns, secs):
 
 
 def port_free(port):
+    # (anything answering: a server on IPv6's wildcard doesn't stop a bind to 127.0.0.1)
+    try:
+        socket.create_connection(("127.0.0.1", port), 0.2).close()
+        return False
+    except OSError:
+        pass
     s = socket.socket()
     # (as servers bind: closed connections in TIME_WAIT don't hold the port)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

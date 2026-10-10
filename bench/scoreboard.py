@@ -44,7 +44,8 @@ rows = []
 
 
 def add(section, name, unit, better, values):
-    values = {k: v for k, v in values.items() if v is not None}
+    # (a reading of 0 is a failed measurement: a process gone before it was read)
+    values = {k: v for k, v in values.items() if v}
     if "tov" in values and len(values) > 1:
         rows.append((section, name, unit, better, values))
 
