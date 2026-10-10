@@ -248,62 +248,49 @@ h2 { font-size: clamp(2rem, 4vw, 2.875rem); line-height: 1.05; letter-spacing: -
 }
 .stats dd { margin: 0; color: var(--term-dim); font-size: 1rem; line-height: 1.45; }
 
-.legend { display: flex; flex-wrap: wrap; gap: 8px 22px; list-style: none; margin: 0 0 28px; padding: 0; font-size: .9375rem; color: var(--term-dim); }
-.legend li { display: flex; align-items: center; gap: 8px; }
-.legend .dot { position: static; transform: none; animation: none; }
-
-.plot { margin: 0 0 40px; }
-.plot h3 { margin: 0 0 6px; font-size: 1.0625rem; font-weight: 600; color: var(--term-ink); }
-.plot ul { list-style: none; margin: 0; padding: 0; }
-.axis, .row { display: grid; grid-template-columns: 13rem 1fr 9rem; gap: 24px; align-items: center; }
-.axis-ticks { position: relative; height: 26px; }
-.axis-ticks span {
-  position: absolute; left: var(--x); bottom: 4px; transform: translateX(-50%);
-  font-size: .75rem; color: var(--term-dim); font-variant-numeric: tabular-nums;
+/* the explorer: a list of benchmarks, and the chosen one's chart */
+.explorer { margin: 0 0 30px; }
+.bench-pick { position: absolute; opacity: 0; pointer-events: none; }
+.bx-list { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px 18px; align-items: center; margin: 0 0 22px; }
+.bx-list p { margin: 0; font-size: .875rem; color: var(--term-dim); }
+.bx-list ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.bx-list label {
+  display: inline-flex; align-items: baseline; gap: 8px; padding: 7px 13px; border-radius: 999px; cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, .1); color: var(--term-dim); transition: background .15s ease, color .15s ease, border-color .15s ease;
 }
-.axis-ticks span:first-child { transform: none; color: var(--term-amber); }
-.row { padding: 13px 0; border-top: 1px solid rgba(255, 255, 255, .07); }
-.row-name { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.row-name code { font-size: .9375rem; color: var(--term-ink); background: none; padding: 0; }
-.row-name span { font-size: .8125rem; color: var(--term-dim); }
-.row-plot {
-  position: relative; height: 22px;
-  /* the scale's grid: Tov, 2×, 4×, 8×, 16×, 32× */
-  background:
-    linear-gradient(90deg, rgba(255,255,255,.12) 1px, transparent 1px) 0 0 / 20% 100%,
-    linear-gradient(rgba(255,255,255,.08), rgba(255,255,255,.08)) 0 50% / 100% 1px no-repeat;
-  border-right: 1px solid rgba(255,255,255,.12);
+.bx-list label:hover { background: rgba(255, 255, 255, .05); color: var(--term-ink); }
+.bx-list label code { color: inherit; background: none; padding: 0; font-size: .875rem; }
+.bx-list label span { font-size: .75rem; color: var(--term-amber); }
+.bx-charts { background: rgba(255, 255, 255, .035); border: 1px solid rgba(255, 255, 255, .08); border-radius: 20px; padding: 30px 34px 26px; }
+.cp { display: none; }
+.cp-head { margin: 0; }
+.cp-head b { display: block; font-size: clamp(1.8rem, 3.4vw, 2.7rem); font-weight: 800; letter-spacing: -.04em; line-height: 1.05; color: #fff; }
+.cp-head span { display: block; margin-top: 8px; color: var(--term-dim); font-size: 1rem; }
+.hbars { list-style: none; margin: 34px 0 0; padding: 0; display: grid; gap: 16px; }
+.hbar { display: grid; grid-template-columns: 4.5rem minmax(0, 1fr) 7.5rem; gap: 14px; align-items: center; }
+.hb-who { font-weight: 600; color: var(--term-dim); }
+.hbar.us .hb-who { color: #fff; }
+.hb-track { height: 36px; border-radius: 10px; background: rgba(255, 255, 255, .05); overflow: hidden; }
+.hb-fill { display: block; height: 100%; width: var(--w); border-radius: 9px; background: #4A5288; }
+.hbar.us .hb-fill { background: linear-gradient(90deg, #E4A95A, #F2C37E); box-shadow: 0 0 24px rgba(228, 169, 90, .35); }
+.hb-val { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--term-ink); }
+.hbar.us .hb-val { color: var(--crust); }
+.cp-note { margin: 22px 0 0; font-size: .875rem; color: var(--term-dim); }
+@media (prefers-reduced-motion: no-preference) {
+  /* (each time a chart is chosen: it's shown afresh, so its bars grow again) */
+  .hb-fill { animation: grow .8s cubic-bezier(.2, .8, .2, 1) both; }
+  .hbar:nth-child(2) .hb-fill { animation-delay: .05s; }
+  .hbar:nth-child(3) .hb-fill { animation-delay: .1s; }
+  .hbar:nth-child(4) .hb-fill { animation-delay: .15s; }
+  .hbar:nth-child(5) .hb-fill { animation-delay: .2s; }
+  .cp-head { animation: rise .5s cubic-bezier(.2, .8, .2, 1) both; }
 }
-.row-lead { display: flex; flex-direction: column; line-height: 1.2; }
-.row-lead b { font-size: 1.125rem; color: var(--crust); letter-spacing: -.01em; }
-.row-lead span { font-size: .8125rem; color: var(--term-dim); }
-
-.dot {
-  position: absolute; top: 50%; left: var(--x); width: 14px; height: 14px; border-radius: 50%;
-  transform: translate(-50%, -50%); background: #8A92BD; display: inline-block; flex: none;
-  box-shadow: 0 0 0 3px var(--term);
-}
-.dot-tov { width: 18px; height: 18px; background: var(--crust); box-shadow: 0 0 0 3px var(--term), 0 0 18px rgba(228, 169, 90, .6); z-index: 2; }
-.dot-rust { background: #E06A45; z-index: 1; }
-.dot-c { background: #8FA3D8; }
-.dot-bun { background: #F2D7B6; }
-.dot-node { background: #6DBE58; }
-.row-plot .dot { cursor: default; }
-.row-plot .dot:hover, .row-plot .dot:focus-visible { z-index: 3; outline: none; box-shadow: 0 0 0 3px var(--term), 0 0 0 5px rgba(255,255,255,.7); }
-.row-plot .dot::after {
-  content: attr(data-tip); position: absolute; bottom: calc(100% + 10px); left: 50%; transform: translate(-50%, 4px);
-  white-space: nowrap; font-size: .8125rem; font-weight: 600; color: var(--term); background: var(--term-ink);
-  padding: 5px 9px; border-radius: 8px; opacity: 0; pointer-events: none; transition: opacity .15s ease, transform .15s ease;
-}
-.row-plot .dot:hover::after, .row-plot .dot:focus-visible::after { opacity: 1; transform: translate(-50%, 0); }
 @supports (animation-timeline: view()) {
   @media (prefers-reduced-motion: no-preference) {
-    /* the others fall behind as the row comes into view: each dot slides out from Tov's */
-    .row-plot .dot:not(.dot-tov) { animation: fall-behind linear both; animation-timeline: view(); animation-range: entry 20% cover 45%; }
     .stats dt { animation: rise linear both; animation-timeline: view(); animation-range: entry 0% cover 25%; }
   }
 }
-@keyframes fall-behind { from { left: 0; } to { left: var(--x); } }
+@keyframes grow { from { width: 0; } to { width: var(--w); } }
 .bench .fine { color: var(--term-dim); font-size: .875rem; margin: 8px 0 0; max-width: 52rem; }
 
 /* ---- npm */
@@ -353,7 +340,10 @@ footer b { color: var(--ink); font-variant-numeric: tabular-nums; font-weight: 6
   .bench { padding: 44px 28px 32px; border-radius: 22px; }
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px 0; }
   .stats div:nth-child(3) { padding-left: 0; border-left: 0; }
-  .axis, .row { grid-template-columns: 9.5rem 1fr 7rem; gap: 16px; }
+  .bx-list { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .bx-list ul { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 4px; }
+  .bx-list ul + p { margin-top: 8px; }
+  .bx-list label { white-space: nowrap; }
 }
 @media (max-width: 600px) {
   .wrap { padding: 0 16px; }
@@ -366,12 +356,10 @@ footer b { color: var(--ink); font-variant-numeric: tabular-nums; font-weight: 6
   .lane .who { font-size: .875rem; }
   .lane .val b { font-size: .875rem; }
   .bench { padding: 34px 18px 24px; border-radius: 18px; }
-  .axis, .row { grid-template-columns: 1fr 5.5rem; gap: 6px 12px; }
-  .axis > span:first-child, .axis > span:last-child { display: none; }
-  .axis-ticks { grid-column: 1; }
-  .row-name { grid-column: 1 / -1; flex-direction: row; align-items: baseline; gap: 8px; }
-  .row-plot { grid-column: 1; }
-  .row-lead b { font-size: 1rem; }
+  .bx-charts { padding: 22px 18px 18px; }
+  .hbar { grid-template-columns: 3.6rem minmax(0, 1fr) 5.6rem; gap: 10px; }
+  .hb-track { height: 24px; }
+  .hb-val { font-size: .875rem; }
   .install { width: 100%; }
   .copy.primary { width: 100%; justify-content: center; }
   .facts li { grid-template-columns: 6rem 1fr; }

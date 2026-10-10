@@ -84,14 +84,11 @@ function renderRaces(): string {
   return `<div class="race" aria-label="Tov against Rust, Bun and Node">${inputs}<div class="tabs" role="presentation">${tabs}</div><div class="boards">${boards}</div></div>`
 }
 
-// ---------------------------------------------------------------- the dot plot
+// ---------------------------------------------------------------- the benchmarks
 
-// Each benchmark a row; each runtime a dot, placed by how many times longer (or more) it takes
-// than Tov, on a log scale from Tov (1×) to 32×. (The first entry of a row is Tov's.)
+// Each benchmark a row of results, Tov's first.
 type Entry = { who: string, value: f64, label: string }
 type Row = { name: string, what: string, higher: bool, less: bool, entries: Entry[] }
-
-const scaleMax = 32.0
 
 function e(who: string, value: f64, label: string): Entry {
   return { who: who, value: value, label: label }
@@ -124,15 +121,10 @@ function ratioOf(r: Row, x: Entry): f64 {
   return r.higher ? tov / x.value : x.value / tov
 }
 
-function renderRow(r: Row): string {
-  const dots = r.entries.map(x => {
-    const ratio = ratioOf(r, x)
-    const at = Math.log(Math.min(ratio, scaleMax)) / Math.log(scaleMax) * 100
-    const word = r.less ? "more" : "slower"
-    const tip = x.who === "Tov" ? `Tov: ${x.label}` : `${x.who}: ${x.label}, ${ratio.toFixed(1)}× ${word}`
-    return `<span class="dot dot-${x.who.toLowerCase()}" style="--x:${at.toFixed(1)}%" data-tip="${tip}" tabindex="0" aria-label="${tip}"></span>`
-  })
-  // the punchline: against Rust, else against the best of the rest
+// the headline of a row: its lead over Rust, else over the best of the rest
+type Lead = { ratio: f64, rival: string }
+
+function leadOf(r: Row): Lead {
   let rival = r.entries[1]!
   for (const x of r.entries) {
     if (x.who === "Rust") rival = x
@@ -142,23 +134,46 @@ function renderRow(r: Row): string {
       if (x.who !== "Tov" && ratioOf(r, x) < ratioOf(r, rival)) rival = x
     }
   }
-  const lead = `${ratioOf(r, rival).toFixed(1)}× ${r.less ? "less" : "faster"}`
-  return `<li class="row"><div class="row-name"><code>${r.name}</code><span>${r.what}</span></div><div class="row-plot">${dots.reverse().join("")}</div><div class="row-lead"><b>${lead}</b><span>than ${rival.who}</span></div></li>`
+  return { ratio: ratioOf(r, rival), rival: rival.who }
 }
 
-function renderAxis(): string {
-  const ticks = [1, 2, 4, 8, 16, 32].map(n => {
-    const at = Math.log(n * 1.0) / Math.log(scaleMax) * 100
-    return `<span style="--x:${at.toFixed(1)}%">${n === 1 ? "Tov" : `${n}×`}</span>`
+function leadText(r: Row): string {
+  const l = leadOf(r)
+  return `${l.ratio.toFixed(1)}× ${r.less ? "less" : "faster"} than ${l.rival}`
+}
+
+// One benchmark's chart: a bar per runtime, labelled, Tov's first and in amber.
+function renderChart(id: string, r: Row): string {
+  let max = 0.0
+  for (const x of r.entries) {
+    max = Math.max(max, x.value)
+  }
+  const bars = r.entries.map(x => {
+    const us = x.who === "Tov" ? " us" : ""
+    return `<li class="hbar${us}"><span class="hb-who">${x.who}</span><span class="hb-track"><span class="hb-fill" style="--w:${(x.value / max * 100).toFixed(1)}%"></span></span><span class="hb-val">${x.label}</span></li>`
   })
-  return `<div class="axis" aria-hidden="true"><span></span><div class="axis-ticks">${ticks.join("")}</div><span></span></div>`
+  const read = r.higher ? "Longer is faster." : r.less ? "Shorter is less memory." : "Shorter is faster."
+  return `<div class="cp cp-${id}"><p class="cp-head"><b>${leadText(r)}</b><span>${r.name}: ${r.what}</span></p><ul class="hbars">${bars.join("")}</ul><p class="cp-note">${read}</p></div>`
 }
 
-function renderPlot(title: string, rows: Row[]): string {
-  return `<div class="plot"><h3>${title}</h3>${renderAxis()}<ul>${rows.map(renderRow).join("")}</ul></div>`
+// The benchmarks: pick one from the list, see its chart (no script: radio inputs and :checked).
+function renderBench(): string {
+  let rows: Row[] = []
+  for (const r of programRows) {
+    rows.push(r)
+  }
+  for (const r of systemRows) {
+    rows.push(r)
+  }
+  const ids = rows.map((r, i) => `b${i}`)
+  const inputs = rows.map((r, i) => `<input type="radio" name="bench" id="pick-${ids[i]!}" class="bench-pick"${i === 0 ? " checked" : ""}>`).join("")
+  const item = (r: Row, i: int) => `<li><label for="pick-${ids[i]!}"><code>${r.name}</code><span>${leadText(r)}</span></label></li>`
+  const programs = programRows.map((r, i) => item(r, i)).join("")
+  const systems = systemRows.map((r, i) => item(r, programRows.length + i)).join("")
+  const charts = rows.map((r, i) => renderChart(ids[i]!, r)).join("")
+  const rules = ids.map(id => `#pick-${id}:checked ~ .bx .cp-${id} { display: block; } #pick-${id}:checked ~ .bx label[for="pick-${id}"] { background: rgba(228,169,90,.14); border-color: var(--crust); color: #fff; } #pick-${id}:focus-visible ~ .bx label[for="pick-${id}"] { outline: 3px solid var(--crust); outline-offset: 2px; }`).join("\n")
+  return `<style>${rules}</style><div class="explorer">${inputs}<div class="bx"><nav class="bx-list" aria-label="Benchmarks"><p>Programs</p><ul>${programs}</ul><p>Servers, clients, the compiler</p><ul>${systems}</ul></nav><div class="bx-charts">${charts}</div></div></div>`
 }
-
-const legend = ["Tov", "Rust", "C", "Bun", "Node"].map(w => `<li><span class="dot dot-${w.toLowerCase()}"></span>${w}</li>`).join("")
 
 // ---------------------------------------------------------------- the agent
 
@@ -351,9 +366,7 @@ export function renderPage(footer: string): string {
           <div><dt>1.6 MB</dt><dd>to serve 242k requests a second (Rust: 4.4)</dd></div>
           <div><dt>33 KB</dt><dd>a binary (Rust: 351)</dd></div>
         </dl>
-        <ul class="legend" aria-label="Runtimes">${legend}</ul>
-        ${renderPlot("Programs: how long each takes, against Tov", programRows)}
-        ${renderPlot("Servers, clients and the compiler", systemRows)}
+        ${renderBench()}
         <p class="fine">Apple M4 Max; every language prints the same output. From <code>bench/results/scoreboard-20261006-205209.json</code>, in which Tov beat Rust on every measurement but one, a tie (<code>points</code>: 292 ms against 291). Tov checks integer overflow by default; Rust's release builds don't. <a href="${repo}/tree/main/bench">Method, every result and caveats</a>.</p>
       </div>
     </section>
