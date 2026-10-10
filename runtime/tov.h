@@ -382,9 +382,11 @@ tv_promise *tv_task_spawn(tv_task *t);
 void tv_task_start(tv_task *t);
 
 /* Continuing now is indistinguishable from waiting a tick: no microtask is queued, and the task
- * isn't being run synchronously by a starter that still has code to run. */
+ * isn't being run synchronously by a starter that still has code to run (tv_cur_sync: nonzero
+ * then, and outside tasks). Every `await` asks, so it's one test. */
 extern size_t tv_mq_len;
-static inline bool tv_async_eager(void) { return tv_mq_len == 0 && tv_cur_task && !(tv_cur_task->flags & TV_TASK_SYNC); }
+extern size_t tv_cur_sync;
+static inline bool tv_async_eager(void) { return (tv_mq_len | tv_cur_sync) == 0; }
 /* `await p`: true if the value can be taken now — settled, and nothing else could run first.
  * Otherwise call tv_await_suspend and suspend: the task resumes once the value is ready. */
 static inline bool tv_await_now(tv_promise *p) { p->handled = true; return p->state != TV_PENDING && tv_async_eager(); }

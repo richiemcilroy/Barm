@@ -1820,17 +1820,16 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let p = self.place(*target);
                 let ct = self.ctype(p.ty);
                 let loc = self.loc(span);
-                let pv = self.fresh("p");
-                self.line(format!("{ct} *{pv} = &{};", p.lv));
+                let lv = self.place_lvalue(&p);
                 let old = self.fresh("o");
-                self.line(format!("{ct} {old} = *{pv};"));
+                self.line(format!("{ct} {old} = {lv};"));
                 let new = if self.c.types.is_float(p.ty) {
                     format!("{old} {} 1", if *inc { "+" } else { "-" })
                 } else {
                     format!("{}({ct}, {old}, 1, {loc})", if *inc { "TV_ADD" } else { "TV_SUB" })
                 };
-                self.line(format!("*{pv} = {new};"));
-                Val::plain(if *prefix { format!("(*{pv})") } else { old }, p.ty)
+                self.line(format!("{lv} = {new};"));
+                Val::plain(if *prefix { lv } else { old }, p.ty)
             }
             ExprKind::Call { .. } => self.call(e),
             ExprKind::New { callee, args, .. } => {
@@ -3102,6 +3101,20 @@ impl<'c, 'a> Gen<'c, 'a> {
         p
     }
 
+    /// The place as an lvalue to read and write more than once: a variable as it is (its address
+    /// isn't taken, so an async function can keep it in a register: see frame.rs), anything else
+    /// through a pointer, so what reaching it costs (an index's bounds check, a copy on write)
+    /// happens once.
+    fn place_lvalue(&mut self, p: &Place) -> String {
+        if p.lv.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') && p.lv.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return p.lv.clone();
+        }
+        let ct = self.ctype(p.ty);
+        let pv = self.fresh("p");
+        self.line(format!("{ct} *{pv} = &{};", p.lv));
+        format!("(*{pv})")
+    }
+
     fn assign(&mut self, op: AssignOp, target: ExprId, value: ExprId, span: Span) -> Val {
         // a JavaScript property: assigned in JavaScript
         let m = self.cur_m();
@@ -3126,24 +3139,22 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let v = self.coerce(v, p.ty);
                 let code = self.consume(v);
                 let ct = self.ctype(p.ty);
-                let pv = self.fresh("p");
-                self.line(format!("{ct} *{pv} = &{};", p.lv));
+                let lv = self.place_lvalue(&p);
                 if self.is_rc(p.ty) {
                     let nv = self.fresh("n");
                     self.line(format!("{ct} {nv} = {code};"));
-                    let r = self.release_code(p.ty, &format!("(*{pv})"));
-                    self.line(format!("{r}; *{pv} = {nv};"));
+                    let r = self.release_code(p.ty, &lv);
+                    self.line(format!("{r}; {lv} = {nv};"));
                 } else {
-                    self.line(format!("*{pv} = {code};"));
+                    self.line(format!("{lv} = {code};"));
                 }
-                Val::plain(format!("(*{pv})"), p.ty)
+                Val::plain(lv, p.ty)
             }
             AssignOp::Op(bop) => {
                 let p = self.place(target);
                 let ct = self.ctype(p.ty);
-                let pv = self.fresh("p");
-                self.line(format!("{ct} *{pv} = &{};", p.lv));
-                let cur = Val::plain(format!("(*{pv})"), p.ty);
+                let lv = self.place_lvalue(&p);
+                let cur = Val::plain(lv.clone(), p.ty);
                 // `x += await f()` reads `x` before it waits, as JavaScript does.
                 let cur = if self.awaits_in(value) { self.snapshot(cur) } else { cur };
                 let rhs = self.expr(value);
@@ -3154,8 +3165,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                         self.push_temps();
                         let v = self.coerce(rhs, p.ty);
                         let code = self.consume(v);
-                        let r = self.release_code(p.ty, &format!("(*{pv})"));
-                        self.line(format!("{r}; *{pv} = {code};"));
+                        let r = self.release_code(p.ty, &lv);
+                        self.line(format!("{r}; {lv} = {code};"));
                         self.pop_temps();
                         self.close("}");
                         return cur;
@@ -3165,13 +3176,13 @@ impl<'c, 'a> Gen<'c, 'a> {
                         self.line(format!("tv_sb {sbv} = {{0}};"));
                         self.open("{");
                         self.line(format!("tv_sb *sb = &{sbv};"));
-                        self.line(format!("tv_sb_push_str(sb, *{pv});"));
+                        self.line(format!("tv_sb_push_str(sb, {lv});"));
                         let c = self.string_code(rhs.ty, &rhs.code);
                         self.line(format!("{c};"));
                         self.close("}");
                         let s = self.fresh("s");
                         self.line(format!("tv_str {s} = tv_str_from_sb(&{sbv});"));
-                        self.line(format!("tv_str_release(*{pv}); *{pv} = {s};"));
+                        self.line(format!("tv_str_release({lv}); {lv} = {s};"));
                         return cur;
                     }
                     BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr | BinOp::UShr => {
@@ -3194,7 +3205,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                         self.coerce(r, p.ty)
                     }
                 };
-                self.line(format!("*{pv} = {};", result.code));
+                self.line(format!("{lv} = {};", result.code));
                 cur
             }
         }

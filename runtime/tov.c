@@ -3080,6 +3080,7 @@ tv_str tv_jp_error(tv_jp *p) {
 #endif
 
 tv_task *tv_cur_task;
+size_t tv_cur_sync = 1;
 static void (*tv_err_retain)(void *);
 static void (*tv_err_release)(void *);
 
@@ -3199,9 +3200,12 @@ tv_task *tv_task_new(size_t frame_size, tv_task_run run, const tv_type *vt) {
 /* Runs the task as the current one; frees it once it has finished. */
 static void tv_task_step(tv_task *t) {
     tv_task *prev = tv_cur_task;
+    size_t prev_sync = tv_cur_sync;
     tv_cur_task = t;
+    tv_cur_sync = t->flags & TV_TASK_SYNC;
     bool done = t->run(t);
     tv_cur_task = prev;
+    tv_cur_sync = prev_sync;
     if (done) {
         tv_promise_release(t->promise);
         tv_async_free(t, sizeof(tv_task) + t->size);

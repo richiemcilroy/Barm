@@ -1,7 +1,8 @@
 //! Async functions. An async function `f` compiles to:
 //! - a frame `AF_f`: `pc` (the label to resume at), `ret`, the parameters and, after
 //!   `frame::lower`, every local and temporary, plus a union `u` of the frames of the async calls
-//!   it awaits directly (only one is in progress at a time);
+//!   it awaits directly that can wait themselves (only one is in progress at a time; a call that
+//!   can't wait has its frame on the C stack);
 //! - `f(AF_f *F)`: runs from `F->pc`, returns true once finished (the result in `F->ret`, or an
 //!   error in `tvg_err`) and false when it waits, after arranging to be resumed;
 //! - `f_task` / `f_spawn`: runs it as a task of its own, for calls that aren't awaited (the task's
@@ -136,9 +137,9 @@ impl<'c, 'a> Gen<'c, 'a> {
     #[allow(clippy::too_many_arguments)]
     fn async_parts(&mut self, resume: &str, task: &str, frame: &str, code: &str, params: &[TyId], ret: TyId, extra: &[(String, String, String)]) -> bool {
         let children = std::mem::take(&mut self.last_children);
-        let mut names: Vec<String> = (0..params.len()).map(|i| format!("p{i}")).collect();
-        names.extend(extra.iter().map(|e| e.1.clone()));
-        let lowered = match super::frame::lower(code, &names) {
+        let mut fields: Vec<super::frame::Field> = params.iter().enumerate().map(|(i, ty)| super::frame::Field { ty: self.ctype(*ty), name: format!("p{i}") }).collect();
+        fields.extend(extra.iter().map(|e| super::frame::Field { ty: e.0.trim_end().to_string(), name: e.1.clone() }));
+        let lowered = match super::frame::lower(code, &fields) {
             Ok(l) => l,
             Err(msg) => {
                 self.internal.push(format!("async function `{resume}`: {msg}"));
@@ -173,7 +174,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.frame_defs.push(FrameDef { name: frame.to_string(), deps, text: def });
         // (A body without `await` never suspends: it has nowhere to resume.)
         let dispatch = if lowered.body.contains("&&aw") { "    if (F->pc) goto *F->pc;\n" } else { "    (void)F;\n" };
-        let _ = writeln!(self.funcs, "static bool {resume}({frame} *F) {{\n{dispatch}{}    return true;\n}}\n", lowered.body);
+        let _ = writeln!(self.funcs, "static bool {resume}({frame} *F) {{\n{}{dispatch}{}    return true;\n}}\n", lowered.prologue, lowered.body);
         // Run as a task: settle the task's promise, then release what the frame was given.
         let mut release = String::new();
         for (i, ty) in params.iter().enumerate() {
@@ -251,6 +252,14 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
         }
         false
+    }
+
+    /// Can (module, item), an async function, wait? Only an `await` in its body suspends it.
+    fn may_suspend(&self, m: u32, item: u32) -> bool {
+        let ast::ItemKind::Function(f) = &self.ast(m).items[item as usize].kind else { return true };
+        let mut exprs = Vec::new();
+        super::body::collect_exprs_stmt(self.ast(m), f.body, &mut exprs);
+        exprs.iter().any(|&e| matches!(self.ast(m).expr(e).kind, ExprKind::Await(_)))
     }
 
     /// `x` is a call to a module async function: (module, item).
@@ -362,31 +371,51 @@ impl<'c, 'a> Gen<'c, 'a> {
             let v = self.coerce(Val::plain("0", UNDEFINED), p.ty);
             argv.push(v.code);
         }
-        let member = format!("aw{n}");
-        self.b().children.push((member.clone(), format!("AF_{child}")));
-        let fr = format!("F->u.{member}");
-        self.line(format!("memset(&{fr}, 0, sizeof {fr});"));
-        for (i, a) in argv.iter().enumerate() {
-            self.line(format!("{fr}.p{i} = {a};"));
-        }
-        // Resume here while the call is in progress; once it has finished, the promise it stands
-        // for would take a tick to reach this `await` (its error waits in `e<n>` meanwhile).
-        self.line(format!("F->pc = &&aw{n};"));
-        self.line(format!("aw{n}:;"));
-        self.line(format!("if (!{child}(&{fr})) TV_SUSPEND;"));
+        let ret = self.inst(fact.ret);
+        let inner = self.async_value_type(ret);
+        let throwing = self.facts(m).throwing.contains(&e);
+        let unit = inner == VOID || self.is_unit(inner);
+        // The callee's result is owned (its error path leaves a valid default), and taken now.
+        let v = if !self.may_suspend(fm, fi) {
+            // A call that can't wait runs to its end now: its frame is a C local (`frame.rs`
+            // leaves declarations inside an expression where they are), which the C compiler
+            // dissolves into registers when it inlines the call.
+            let cf = format!("cf{n}");
+            let mut call = format!("({{ AF_{child} {cf} = {{0}};");
+            for (i, a) in argv.iter().enumerate() {
+                let _ = write!(call, " {cf}.p{i} = {a};");
+            }
+            let _ = write!(call, " {child}(&{cf}); {} }})", if unit { "0;".to_string() } else { format!("{cf}.ret;") });
+            if unit {
+                self.line(format!("(void){call};"));
+                None
+            } else {
+                Some(self.tmp(inner, &call, true))
+            }
+        } else {
+            let member = format!("aw{n}");
+            self.b().children.push((member.clone(), format!("AF_{child}")));
+            let fr = format!("F->u.{member}");
+            self.line(format!("memset(&{fr}, 0, sizeof {fr});"));
+            for (i, a) in argv.iter().enumerate() {
+                self.line(format!("{fr}.p{i} = {a};"));
+            }
+            // Resume at `aw<n>` while the call is in progress. The first run of the call has a
+            // path of its own, so where nothing waits no jump lands between setting its arguments
+            // and reading its result, and the C compiler keeps them in registers.
+            self.line(format!("if (!{child}(&{fr})) {{ F->pc = &&aw{n}; TV_SUSPEND; }}"));
+            self.line(format!("if (0) {{ aw{n}:; if (!{child}(&{fr})) TV_SUSPEND; }}"));
+            (!unit).then(|| self.tmp(inner, &format!("{fr}.ret"), true))
+        };
+        // Once the call has finished, the promise it stands for would take a tick to reach this
+        // `await` (its error waits in `e<n>` meanwhile).
         let en = format!("e{n}");
         self.line(format!("void *{en} = NULL;"));
         self.line(format!("if (!tv_async_eager()) {{ {en} = tvg_err; tvg_err = NULL; F->pc = &&aw{n}t; tv_task_yield(); TV_SUSPEND; }}"));
         self.line(format!("if (0) {{ aw{n}t:; tvg_err = {en}; }}"));
-        let ret = self.inst(fact.ret);
-        let inner = self.async_value_type(ret);
-        let throwing = self.facts(m).throwing.contains(&e);
-        let v = if inner == VOID || self.is_unit(inner) {
-            Val::plain("0", ty)
-        } else {
-            // The callee's result is owned (its error path leaves a valid default).
-            let v = self.tmp(inner, &format!("{fr}.ret"), true);
-            self.coerce(v, ty)
+        let v = match v {
+            Some(v) => self.coerce(v, ty),
+            None => Val::plain("0", ty),
         };
         if throwing {
             self.error_check();

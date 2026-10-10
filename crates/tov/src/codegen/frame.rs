@@ -3,6 +3,18 @@
 //! moves every local declaration into the frame, rewrites uses to `F->name`, and turns `return`
 //! into "store the result; finished". Nothing else changes, so every construct compiles exactly
 //! as it does in a synchronous function. Anything it can't parse is an error, never wrong code.
+//!
+//! A local that fits a register and whose address is never taken is kept in a C variable of the
+//! same name while the function runs instead: loaded from the frame on entry and stored back when
+//! it suspends (and, for parameters, when it finishes). Resuming jumps into the middle of the body
+//! (`goto *F->pc`), and C compilers can't keep a value in a register across such a jump when it
+//! lives in memory, so without this a loop around an `await` reads and writes every variable
+//! through the frame on each pass.
+//!
+//! The same jumps make a loop with an `await` in it one a C compiler can't optimize as a loop
+//! (it has more than one way in). Such a body is emitted twice: first as the function's first
+//! run, with no labels to resume at (it suspends to the labels of the second copy), then as is,
+//! for resuming. A run that never waits stays in the first, whose loops are ordinary ones.
 
 use std::collections::HashMap;
 
@@ -92,6 +104,8 @@ pub(crate) struct Field {
 
 pub(crate) struct Lowered {
     pub fields: Vec<Field>,
+    /// The locals and parameters kept in C variables: their declarations, loaded from the frame.
+    pub prologue: String,
     pub body: String,
 }
 
@@ -176,8 +190,117 @@ fn parse_decl(toks: &[(Kind, &str)], start: usize) -> Result<Option<Decl>, Strin
     }
 }
 
+/// C types that fit a register: kept in C variables (see the module comment).
+fn register_type(ty: &str) -> bool {
+    !ty.starts_with("const ") && (ty.ends_with('*') || matches!(ty, "tv_int" | "double" | "float" | "bool" | "int" | "int32_t" | "int64_t" | "uint8_t" | "uint32_t" | "uint64_t" | "size_t" | "tv_str"))
+}
+
+/// Names whose address the body takes (`&x`, `&(x)`, `&x.f`; not `&p->f` or `&p[i]`, which
+/// address what `p` points to): a pointer to them may outlive this run of the function.
+fn addressed<'a>(toks: &[(Kind, &'a str)]) -> std::collections::HashSet<&'a str> {
+    let mut out = std::collections::HashSet::new();
+    for i in 0..toks.len() {
+        if toks[i].1 != "&" {
+            continue;
+        }
+        let mut j = sig(toks, i + 1);
+        let mut parens = false;
+        while toks.get(j).is_some_and(|t| t.1 == "(") {
+            parens = true;
+            j = sig(toks, j + 1);
+        }
+        let Some(&(Kind::Ident, name)) = toks.get(j) else { continue };
+        let next = toks.get(sig(toks, j + 1)).map(|t| t.1);
+        if parens || !matches!(next, Some("->" | "[")) {
+            out.insert(name);
+        }
+    }
+    out
+}
+
+/// The body as its first run (see the module comment) when it has an `await` inside a loop: its
+/// resume labels (`aw<n>:`, taken with `&&`) removed, so nothing jumps into it, and its other
+/// labels renamed, so they don't clash with the copy that resumes. None otherwise.
+fn first_run(body: &str) -> Option<String> {
+    let toks = tokenize(body);
+    let next = |i: usize| sig(&toks, i + 1);
+    // labels defined here: `name:;` where a statement starts
+    let mut labels: Vec<(usize, &str)> = Vec::new();
+    let mut prev = "";
+    for i in 0..toks.len() {
+        let (kind, text) = toks[i];
+        if kind == Kind::Other {
+            continue;
+        }
+        if kind == Kind::Ident && matches!(prev, "" | ";" | "{" | "}") && text != "default" {
+            let c = next(i);
+            if toks.get(c).is_some_and(|t| t.1 == ":") && toks.get(next(c)).is_some_and(|t| t.1 == ";") {
+                labels.push((i, text));
+            }
+        }
+        prev = text;
+    }
+    let resumes: std::collections::HashSet<&str> = toks.windows(2).filter(|w| w[0].1 == "&&" && w[1].0 == Kind::Ident).map(|w| w[1].1).collect();
+    // the braced bodies of loops: `for (...) {`, `while (...) {`, `do {`
+    let close = |open: usize| -> Option<usize> {
+        let mut depth = 0i32;
+        for (j, t) in toks.iter().enumerate().skip(open) {
+            match t.1 {
+                "(" | "{" => depth += 1,
+                ")" | "}" => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(j);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    };
+    let mut loops = Vec::new();
+    for i in 0..toks.len() {
+        let open = match toks[i].1 {
+            "for" | "while" if toks[i].0 == Kind::Ident && toks.get(next(i)).is_some_and(|t| t.1 == "(") => close(next(i)).map(next),
+            "do" if toks[i].0 == Kind::Ident => Some(next(i)),
+            _ => None,
+        };
+        if let Some(open) = open
+            && toks.get(open).is_some_and(|t| t.1 == "{")
+            && let Some(end) = close(open)
+        {
+            loops.push(open..end);
+        }
+    }
+    if !labels.iter().any(|(at, name)| resumes.contains(name) && loops.iter().any(|l| l.contains(at))) {
+        return None;
+    }
+    let renamed: std::collections::HashSet<&str> = labels.iter().map(|l| l.1).filter(|n| !resumes.contains(n)).collect();
+    let defined: std::collections::HashSet<usize> = labels.iter().map(|l| l.0).collect();
+    let mut out = String::with_capacity(body.len() + 64);
+    let mut prev = "";
+    let mut i = 0;
+    while i < toks.len() {
+        let (kind, text) = toks[i];
+        if defined.contains(&i) && resumes.contains(text) {
+            // (`name:`, leaving the `;`)
+            i = next(i) + 1;
+            continue;
+        }
+        out.push_str(text);
+        if kind == Kind::Ident && renamed.contains(text) && (prev == "goto" || defined.contains(&i)) {
+            out.push_str("_f");
+        }
+        if kind != Kind::Other {
+            prev = text;
+        }
+        i += 1;
+    }
+    Some(out)
+}
+
 /// Moves `body`'s locals into the frame. `params` are already frame fields (named as in the body).
-pub(crate) fn lower(body: &str, params: &[String]) -> Result<Lowered, String> {
+pub(crate) fn lower(body: &str, params: &[Field]) -> Result<Lowered, String> {
     let toks = tokenize(body);
     // Pass 1: find the declarations (at statement starts and in `for (` headers).
     let mut decls: HashMap<usize, Decl> = HashMap::new();
@@ -224,7 +347,14 @@ pub(crate) fn lower(body: &str, params: &[String]) -> Result<Lowered, String> {
         at_start = depth == 0 && matches!(text, ";" | "{" | "}");
         i += 1;
     }
-    let names: std::collections::HashSet<&str> = fields.iter().map(|f| f.name.as_str()).chain(params.iter().map(|p| p.as_str())).collect();
+    // (the frame's: rewritten to `F->name`; the shadowed: C variables)
+    let addressed = addressed(&toks);
+    let shadowed: Vec<&Field> = params.iter().chain(fields.iter()).filter(|f| register_type(&f.ty) && !addressed.contains(f.name.as_str())).collect();
+    let in_c: std::collections::HashSet<&str> = shadowed.iter().map(|f| f.name.as_str()).collect();
+    let names: std::collections::HashSet<&str> = fields.iter().chain(params.iter()).map(|f| f.name.as_str()).filter(|n| !in_c.contains(n)).collect();
+    // How the body leaves: with C variables, through labels that store them in the frame first.
+    let (done, suspend) = if shadowed.is_empty() { ("return true;", "TV_SUSPEND") } else { ("goto tvf_done;", "goto tvf_suspend") };
+    let mut suspends = false;
 
     // Pass 2: rewrite.
     let mut out = String::with_capacity(body.len() + body.len() / 4);
@@ -251,7 +381,9 @@ pub(crate) fn lower(body: &str, params: &[String]) -> Result<Lowered, String> {
                     out.push(' ');
                 }
                 first = false;
-                out.push_str("F->");
+                if names.contains(name.as_str()) {
+                    out.push_str("F->");
+                }
                 out.push_str(name);
                 out.push_str(" = ");
                 let init_start = sig(&toks, from);
@@ -290,12 +422,21 @@ pub(crate) fn lower(body: &str, params: &[String]) -> Result<Lowered, String> {
             if has_value {
                 out.push_str("{ F->ret =");
                 emit_range(&mut out, i + 1, e, &names);
-                out.push_str("; return true; }");
+                out.push_str("; ");
+                out.push_str(done);
+                out.push_str(" }");
             } else {
-                out.push_str("return true;");
+                out.push_str(done);
             }
             i = e + 1;
             prev_sig = ";";
+            continue;
+        }
+        if kind == Kind::Ident && text == "TV_SUSPEND" {
+            suspends = true;
+            out.push_str(suspend);
+            prev_sig = text;
+            i += 1;
             continue;
         }
         if kind == Kind::Ident && names.contains(text) && prev_sig != "." && prev_sig != "->" {
@@ -307,44 +448,105 @@ pub(crate) fn lower(body: &str, params: &[String]) -> Result<Lowered, String> {
         }
         i += 1;
     }
-    Ok(Lowered { fields, body: out })
+    if let Some(first) = first_run(&out) {
+        let resumed = std::mem::replace(&mut out, first);
+        out.push_str("    ");
+        out.push_str(done);
+        out.push('\n');
+        out.push_str(&resumed);
+    }
+    let mut prologue = String::new();
+    if !shadowed.is_empty() {
+        for f in &shadowed {
+            let space = if f.ty.ends_with('*') { "" } else { " " };
+            prologue.push_str(&format!("    {}{space}{} = F->{};\n", f.ty, f.name, f.name));
+        }
+        out.push_str("    goto tvf_done;\n");
+        if suspends {
+            out.push_str("tvf_suspend:\n");
+            for f in &shadowed {
+                out.push_str(&format!("    F->{} = {};\n", f.name, f.name));
+            }
+            out.push_str("    return false;\n");
+        }
+        // (finished: the task releases the parameters it was given, from the frame)
+        out.push_str("tvf_done:\n");
+        for f in shadowed.iter().filter(|f| params.iter().any(|p| p.name == f.name)) {
+            out.push_str(&format!("    F->{} = {};\n", f.name, f.name));
+        }
+    }
+    Ok(Lowered { fields, prologue, body: out })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn lowered(body: &str, params: &[&str]) -> (String, Vec<(String, String)>) {
-        let params: Vec<String> = params.iter().map(|s| s.to_string()).collect();
-        let l = lower(body, &params).unwrap();
-        (l.body, l.fields.into_iter().map(|f| (f.ty, f.name)).collect())
+    fn field(ty: &str, name: &str) -> Field {
+        Field { ty: ty.into(), name: name.into() }
+    }
+
+    fn lowered(body: &str, params: &[Field]) -> (String, String, Vec<(String, String)>) {
+        let l = lower(body, params).unwrap();
+        (l.prologue, l.body, l.fields.into_iter().map(|f| (f.ty, f.name)).collect())
     }
 
     #[test]
     fn moves_declarations_and_rewrites_uses() {
-        let (b, f) = lowered("    tv_int t1 = p0 + 1;\n    tv_str t2 = tv_str_concat(t1, x.t1);\n    t1++;\n", &["p0"]);
-        assert_eq!(b, "    F->t1 = F->p0 + 1;\n    F->t2 = tv_str_concat(F->t1, x.t1);\n    F->t1++;\n");
-        assert_eq!(f, vec![("tv_int".into(), "t1".into()), ("tv_str".into(), "t2".into())]);
+        let (p, b, f) = lowered("    R1 t1 = p0;\n    tv_sb t2 = tv_sb_of(t1, x.t1);\n    t1.n++;\n", &[field("R1", "p0")]);
+        assert_eq!(p, "");
+        assert_eq!(b, "    F->t1 = F->p0;\n    F->t2 = tv_sb_of(F->t1, x.t1);\n    F->t1.n++;\n");
+        assert_eq!(f, vec![("R1".into(), "t1".into()), ("tv_sb".into(), "t2".into())]);
     }
 
     #[test]
-    fn pointers_multiple_declarators_and_no_initializer() {
-        let (b, f) = lowered("tv_int c3 = 0; void *c3k, *c3v;\ntv_str r;\nr = s;\n", &[]);
-        assert_eq!(b, "F->c3 = 0; ;\n;\nF->r = s;\n");
+    fn keeps_register_locals_in_c_variables() {
+        let (p, b, f) = lowered("tv_int c3 = 0; void *c3k, *c3v;\ntv_str r;\nr = s;\n", &[]);
+        assert_eq!(p, "    tv_int c3 = F->c3;\n    void *c3k = F->c3k;\n    void *c3v = F->c3v;\n    tv_str r = F->r;\n");
+        assert_eq!(b, "c3 = 0; ;\n;\nr = s;\n    goto tvf_done;\ntvf_done:\n");
         assert_eq!(f, vec![("tv_int".into(), "c3".into()), ("void *".into(), "c3k".into()), ("void *".into(), "c3v".into()), ("tv_str".into(), "r".into())]);
     }
 
     #[test]
+    fn stores_c_variables_when_suspending_and_parameters_when_done() {
+        let (p, b, _) = lowered("tv_int t = p0 + 1;\nif (!f(&F->u.aw1)) TV_SUSPEND;\nreturn t;\n", &[field("tv_int", "p0")]);
+        assert_eq!(p, "    tv_int p0 = F->p0;\n    tv_int t = F->t;\n");
+        assert_eq!(b, "t = p0 + 1;\nif (!f(&F->u.aw1)) goto tvf_suspend;\n{ F->ret = t; goto tvf_done; }\n    goto tvf_done;\ntvf_suspend:\n    F->p0 = p0;\n    F->t = t;\n    return false;\ntvf_done:\n    F->p0 = p0;\n");
+    }
+
+    #[test]
+    fn keeps_what_is_addressed_in_the_frame() {
+        let (p, b, _) = lowered("tv_int a = 1; tv_int c = 2; tv_int *q = &a;\ng(&(c)); h(&p0->x, &p0[1]);\n", &[field("R1 *", "p0")]);
+        assert_eq!(p, "    R1 *p0 = F->p0;\n    tv_int *q = F->q;\n");
+        assert_eq!(b, "F->a = 1; F->c = 2; q = &F->a;\ng(&(F->c)); h(&p0->x, &p0[1]);\n    goto tvf_done;\ntvf_done:\n    F->p0 = p0;\n");
+    }
+
+    #[test]
     fn for_headers_braces_and_returns() {
-        let (b, f) = lowered("for (tv_int i4 = 0; i4 < n; i4++) { E7 ev = { {-1, NULL}, &(i4) }; f(&ev); }\nreturn i4;\nreturn;\n", &[]);
+        let (p, b, f) = lowered("for (tv_int i4 = 0; i4 < n; i4++) { E7 ev = { {-1, NULL}, &(i4) }; f(&ev); }\nreturn i4;\nreturn;\n", &[]);
+        assert_eq!(p, "");
         assert_eq!(b, "for (F->i4 = 0; F->i4 < n; F->i4++) { F->ev = (E7){ {-1, NULL}, &(F->i4) }; f(&F->ev); }\n{ F->ret = F->i4; return true; }\nreturn true;\n");
         assert_eq!(f, vec![("tv_int".into(), "i4".into()), ("E7".into(), "ev".into())]);
     }
 
     #[test]
     fn leaves_strings_members_labels_and_expression_statements() {
-        let (b, _) = lowered("tv_int x = 1;\nputs(\"x = 1;\"); s->x = x; F->pc = &&L2; L2:; *p = x; (void)x;\n", &[]);
-        assert_eq!(b, "F->x = 1;\nputs(\"x = 1;\"); s->x = F->x; F->pc = &&L2; L2:; *p = F->x; (void)F->x;\n");
+        let (_, b, _) = lowered("R1 x = y;\nputs(\"x = 1;\"); s->x = x; F->pc = &&L2; L2:; *p = x; (void)x;\n", &[]);
+        assert_eq!(b, "F->x = y;\nputs(\"x = 1;\"); s->x = F->x; F->pc = &&L2; L2:; *p = F->x; (void)F->x;\n");
+    }
+
+    #[test]
+    fn a_loop_with_an_await_gets_a_first_run_without_labels() {
+        let body = "R1 x = y;\nfor (;;) { if (!f()) { F->pc = &&aw1; TV_SUSPEND; } aw1:; if (g) goto cont2; h(x); cont2:; }\nreturn;\n";
+        let (_, b, _) = lowered(body, &[]);
+        assert_eq!(
+            b,
+            "F->x = y;\nfor (;;) { if (!f()) { F->pc = &&aw1; TV_SUSPEND; } ; if (g) goto cont2_f; h(F->x); cont2_f:; }\nreturn true;\n    return true;\n\
+             F->x = y;\nfor (;;) { if (!f()) { F->pc = &&aw1; TV_SUSPEND; } aw1:; if (g) goto cont2; h(F->x); cont2:; }\nreturn true;\n"
+        );
+        // (an `await` outside loops: one copy)
+        let (_, b, _) = lowered("if (!f()) { F->pc = &&aw1; TV_SUSPEND; } aw1:;\nfor (;;) { h(); }\n", &[]);
+        assert_eq!(b, "if (!f()) { F->pc = &&aw1; TV_SUSPEND; } aw1:;\nfor (;;) { h(); }\n");
     }
 
     #[test]
