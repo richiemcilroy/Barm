@@ -10,10 +10,12 @@ loops run at once) it reports requests/s, the client's CPU time per request (use
 and its peak RSS: the median of --reps runs, with clients interleaved. Writes
 bench/results/fetch-<timestamp>.json.
 """
-import argparse, json, os, platform, socket, subprocess, sys, tempfile, time
+import argparse, json, os, platform, signal, socket, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
+sys.path.insert(0, os.path.dirname(HERE))
+import rusage  # noqa: E402
 OUT = os.path.join(HERE, "out")
 PORT = 3311
 TLS_PORT = 3312
@@ -70,27 +72,32 @@ def run_client(argv, env, timeout):
     """Wall seconds, CPU seconds, peak RSS (bytes) and output of one run."""
     # (output to files, not pipes: a client that printed more than a pipe holds would block on
     # it until the timeout, since nothing reads the pipe until the client exits)
+    argv, report = rusage.wrap(argv)
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         t0 = time.perf_counter()
-        p = subprocess.Popen(argv, stdout=stdout, stderr=stderr, env=env)
+        p = subprocess.Popen(argv, stdout=stdout, stderr=stderr, env=env, start_new_session=report is not None)
         deadline = time.time() + timeout
         while True:
             pid, status, ru = os.wait4(p.pid, os.WNOHANG)
             if pid:
                 break
             if time.time() > deadline:
-                p.kill()
-                os.wait4(p.pid, 0)
+                if report is not None:
+                    os.killpg(p.pid, signal.SIGKILL)  # (the launcher's child is in its group)
+                else:
+                    p.kill()
+                _, _, ru = os.wait4(p.pid, 0)
+                rusage.read(report, ru)
                 raise RuntimeError("timed out")
             time.sleep(0.002)
         wall = time.perf_counter() - t0
         stdout.seek(0)
         stderr.seek(0)
         out = stdout.read().decode(errors="replace")
+        rss, cpu = rusage.read(report, ru)
         if status != 0:
             raise RuntimeError(f"exit {status}: {stderr.read().decode(errors='replace')[-300:]}")
-    rss = ru.ru_maxrss if sys.platform == "darwin" else ru.ru_maxrss * 1024
-    return wall, ru.ru_utime + ru.ru_stime, rss, out.strip()
+    return wall, cpu, rss, out.strip()
 
 
 def wait_port(port):

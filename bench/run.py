@@ -31,6 +31,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import rusage
+
 BENCH_DIR = Path(__file__).resolve().parent
 REPO_DIR = BENCH_DIR.parent
 MICRO_DIR = BENCH_DIR / "micro"
@@ -297,9 +299,10 @@ def toolchain_versions() -> dict[str, str | None]:
 
 def run_once(cmd: list[str], timeout: float) -> tuple[float, int, int, str, str, bool]:
     """Run cmd once. Returns (wall seconds, peak RSS bytes, exit code, stdout, stderr, timed_out)."""
+    cmd, report = rusage.wrap(cmd)
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         t0 = time.perf_counter()
-        proc = subprocess.Popen(cmd, stdout=out, stderr=err, stdin=subprocess.DEVNULL, cwd=REPO_DIR)
+        proc = subprocess.Popen(cmd, stdout=out, stderr=err, stdin=subprocess.DEVNULL, cwd=REPO_DIR, start_new_session=report is not None)
         timed_out = threading.Event()
         lock = threading.Lock()
         done = False
@@ -308,7 +311,10 @@ def run_once(cmd: list[str], timeout: float) -> tuple[float, int, int, str, str,
             with lock:
                 if not done:
                     timed_out.set()
-                    os.kill(proc.pid, signal.SIGKILL)
+                    if report is not None:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    else:
+                        os.kill(proc.pid, signal.SIGKILL)
 
         timer = threading.Timer(timeout, kill)
         timer.start()
@@ -326,9 +332,8 @@ def run_once(cmd: list[str], timeout: float) -> tuple[float, int, int, str, str,
         err.seek(0)
         stdout = out.read().decode("utf-8", "replace")
         stderr = err.read().decode("utf-8", "replace")
-    # ru_maxrss is bytes on macOS, kilobytes on Linux.
-    rss = usage.ru_maxrss if sys.platform == "darwin" else usage.ru_maxrss * 1024
-    return elapsed, rss, proc.returncode, stdout, stderr, timed_out.is_set()
+    rss, _ = rusage.read(report, usage)
+    return elapsed, rss or 0, proc.returncode, stdout, stderr, timed_out.is_set()
 
 
 def source(bench: str, lang: str) -> Path:

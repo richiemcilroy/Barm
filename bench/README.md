@@ -69,6 +69,7 @@ A missing toolchain is reported as `skipped`. A failed build is `build failed` w
 ## Caveats (read before quoting numbers)
 
 - **Noise.** Wall time is measured for the whole process. The published results were collected on a busy developer machine (load average 8–17 on 16 cores, including a browser and other builds), Within one invocation the five runs usually agree to within a few percent, but the same binary can be 2–3× slower in a session where many cores are busy, and slow machine-wide phases can skew one language's column relative to another's. The JSON records the load average. For quotable numbers, use an idle machine and `--runs 10`, and look at `min` as well as the median.
+- **Peak memory on Linux.** Linux starts a process's peak resident set at its parent's, so on Linux every program is run through a small launcher (`rusage.c`) rather than straight from Python, whose 15–20 MB would otherwise hide anything smaller.
 - **Startup.** Node and Bun times include runtime startup (~20–40 ms) and JIT warm-up, and their RSS includes the VM. That's deliberate: it's what a user of a CLI sees.
 - **Library quality differs:**
   - `map_insert`: C uses a small hand-written open-addressing table (FNV-1a, cached hashes), Rust uses std `HashMap` with SipHash (DoS-resistant and slower to hash), and JS uses the engine's `Map`.

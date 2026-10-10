@@ -8,6 +8,8 @@ reports medians.
 import argparse, json, os, re, statistics, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(HERE))
+import rusage  # noqa: E402
 ROOT = os.path.dirname(os.path.dirname(HERE))
 OUT = os.path.join(ROOT, "target", "bench-npm")
 TOV = os.path.join(ROOT, "target", "release", "tov")
@@ -28,10 +30,14 @@ def wall(cmd, n=20):
     return statistics.median(xs)
 
 
-def rss_kb(cmd):
-    r = subprocess.run(["/usr/bin/time", "-l", *cmd], capture_output=True, text=True, cwd=HERE)
-    m = re.search(r"(\d+)\s+maximum resident set size", r.stderr)
-    return int(m.group(1)) / 1024 / 1024 if m else 0
+def rss_mb(cmd):
+    """The program's peak resident set, in MiB."""
+    argv, report = rusage.wrap(cmd)
+    p = subprocess.Popen(argv, stdout=subprocess.DEVNULL, cwd=HERE, start_new_session=report is not None)
+    _, status, ru = os.wait4(p.pid, 0)
+    p.returncode = os.waitstatus_to_exitcode(status)  # (reaped here: Popen mustn't wait again)
+    rss, _ = rusage.read(report, ru)
+    return (rss or 0) / 1024 / 1024
 
 
 def cpu_s(pid):
@@ -87,7 +93,7 @@ def main():
     bun_build = (time.perf_counter() - t) * 1000
     rows = {}
     rows["startup (ms)"] = (wall([os.path.join(OUT, "startup")]), wall(["bun", "--no-install", "startup.js"]))
-    rows["startup rss (MB)"] = (rss_kb([os.path.join(OUT, "startup")]), rss_kb(["bun", "--no-install", "startup.js"]))
+    rows["startup rss (MB)"] = (rss_mb([os.path.join(OUT, "startup")]), rss_mb(["bun", "--no-install", "startup.js"]))
     loops = ([], [])
     for _ in range(a.repeat):
         loops[0].append(int(sh([os.path.join(OUT, "loop")], cwd=HERE).split()[1]))
