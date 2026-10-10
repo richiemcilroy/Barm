@@ -4588,10 +4588,18 @@ static void tv_http_watch_listener(tv_http_server *sv) {
 
 static void tv_http_accept(tv_http_server *sv) {
     while (sv->fd >= 0 && tv_http_may_accept()) {
+        /* (close-on-exec: a child the program starts, ffmpeg say, mustn't keep its connections:
+         * on Linux, epoll keeps reporting a socket closed here while a child holds a copy) */
+#ifdef __linux__
+        int fd = accept4(sv->fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
+        if (fd < 0) break;
+#else
         int fd = accept(sv->fd, NULL, NULL);
         if (fd < 0) break;
-        tv_http_load_add(1);
+        fcntl(fd, F_SETFD, FD_CLOEXEC);
         fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+#endif
+        tv_http_load_add(1);
         int one = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
         tv_http_conn *nc = tv_alloc(sizeof *nc);
@@ -4965,6 +4973,7 @@ tv_int tv_native_httpListen(tv_int port, tv_str host, tv_fn handler) {
     }
     int lfd = socket(v6 ? AF_INET6 : AF_INET, SOCK_STREAM, 0);
     if (lfd < 0) { tv_native_fail(errno, "socket", host); return -1; }
+    fcntl(lfd, F_SETFD, FD_CLOEXEC);   /* (a child the program starts doesn't hold the port) */
     int one = 1, zero = 0;
     setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
     if (v6) setsockopt(lfd, IPPROTO_IPV6, IPV6_V6ONLY, &zero, sizeof zero);
