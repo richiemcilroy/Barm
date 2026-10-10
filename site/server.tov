@@ -14,6 +14,7 @@ function asset(name: string, contentType: string): Asset {
 
 const assets: Map<string, Asset> = new Map()
 assets.set("/logo.svg", try asset("logo.svg", "image/svg+xml"))
+assets.set("/og.png", try asset("og.png", "image/png"))
 assets.set("/fonts/schibsted-grotesk.woff2", try asset("fonts/schibsted-grotesk.woff2", "font/woff2"))
 assets.set("/install.sh", try asset("install.sh", "text/plain;charset=utf-8"))
 assets.set("/llms.txt", { body: renderLlms(try readFileSync("../docs/spec.md")), contentType: "text/plain;charset=utf-8" })

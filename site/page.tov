@@ -88,7 +88,7 @@ function renderRaces(): string {
 
 // Each benchmark a row of results, Tov's first.
 type Entry = { who: string, value: f64, label: string }
-type Row = { name: string, what: string, higher: bool, less: bool, entries: Entry[] }
+type Row = { name: string, what: string, higher: bool, word: string, entries: Entry[] }
 
 function e(who: string, value: f64, label: string): Entry {
   return { who: who, value: value, label: label }
@@ -100,20 +100,21 @@ function t(who: string, value: f64): Entry {
 
 // bench/results/scoreboard-20261006-205209.json
 const programRows: Row[] = [
-  { name: "binary_trees", what: "millions of small objects", higher: false, less: false, entries: [t("Tov", 260), t("Bun", 376), t("Node", 449), t("C", 688), t("Rust", 791)] },
-  { name: "sort", what: "3M floats, with a comparator", higher: false, less: false, entries: [t("Tov", 45), t("Rust", 74), t("C", 275), t("Bun", 696), t("Node", 1175)] },
-  { name: "map_insert", what: "2M string keys", higher: false, less: false, entries: [t("Tov", 284), t("C", 476), t("Rust", 490), t("Bun", 823), t("Node", 1178)] },
-  { name: "dispatch", what: "50M virtual calls", higher: false, less: false, entries: [t("Tov", 36), t("C", 76), t("Rust", 77), t("Bun", 109), t("Node", 191)] },
-  { name: "strings", what: "format, join, split", higher: false, less: false, entries: [t("Tov", 143), t("Bun", 203), t("Rust", 224), t("C", 253), t("Node", 519)] },
-  { name: "fib", what: "recursive calls, overflow-checked", higher: false, less: false, entries: [t("Tov", 416), t("Rust", 444), t("C", 490), t("Bun", 942), t("Node", 1485)] },
-  { name: "nbody", what: "floating point", higher: false, less: false, entries: [t("Tov", 210), t("Rust", 224), t("C", 312), t("Bun", 512), t("Node", 554)] },
+  { name: "binary_trees", what: "millions of small objects", higher: false, word: "faster", entries: [t("Tov", 260), t("Bun", 376), t("Node", 449), t("C", 688), t("Rust", 791)] },
+  { name: "sort", what: "3M floats, with a comparator", higher: false, word: "faster", entries: [t("Tov", 45), t("Rust", 74), t("C", 275), t("Bun", 696), t("Node", 1175)] },
+  { name: "map_insert", what: "2M string keys", higher: false, word: "faster", entries: [t("Tov", 284), t("C", 476), t("Rust", 490), t("Bun", 823), t("Node", 1178)] },
+  { name: "dispatch", what: "50M virtual calls", higher: false, word: "faster", entries: [t("Tov", 36), t("C", 76), t("Rust", 77), t("Bun", 109), t("Node", 191)] },
+  { name: "strings", what: "format, join, split", higher: false, word: "faster", entries: [t("Tov", 143), t("Bun", 203), t("Rust", 224), t("C", 253), t("Node", 519)] },
+  { name: "fib", what: "recursive calls, overflow-checked", higher: false, word: "faster", entries: [t("Tov", 416), t("Rust", 444), t("C", 490), t("Bun", 942), t("Node", 1485)] },
+  { name: "nbody", what: "floating point", higher: false, word: "faster", entries: [t("Tov", 210), t("Rust", 224), t("C", 312), t("Bun", 512), t("Node", 554)] },
 ]
 
 const systemRows: Row[] = [
-  { name: "web server", what: "JSON API, one core", higher: true, less: false, entries: [e("Tov", 241689, "242k req/s"), e("Rust", 216499, "216k req/s"), e("Bun", 110644, "111k req/s")] },
-  { name: "server memory", what: "serving that API", higher: false, less: true, entries: [e("Tov", 1.6, "1.6 MB"), e("Rust", 4.4, "4.4 MB"), e("Bun", 16.6, "16.6 MB")] },
-  { name: "fetch()", what: "64 requests at once", higher: true, less: false, entries: [e("Tov", 176827, "177k req/s"), e("Rust", 162416, "162k req/s"), e("Bun", 128760, "129k req/s"), e("Node", 30282, "30k req/s")] },
-  { name: "compile", what: "a program to a binary", higher: false, less: false, entries: [t("Tov", 42), t("C", 49), t("Rust", 98)] },
+  { name: "web server", what: "JSON API, one core", higher: true, word: "faster", entries: [e("Tov", 241689, "242k req/s"), e("Rust", 216499, "216k req/s"), e("Bun", 110644, "111k req/s")] },
+  { name: "server memory", what: "serving that API", higher: false, word: "less", entries: [e("Tov", 1.6, "1.6 MB"), e("Rust", 4.4, "4.4 MB"), e("Bun", 16.6, "16.6 MB")] },
+  { name: "fetch()", what: "64 requests at once", higher: true, word: "faster", entries: [e("Tov", 176827, "177k req/s"), e("Rust", 162416, "162k req/s"), e("Bun", 128760, "129k req/s"), e("Node", 30282, "30k req/s")] },
+  { name: "compile", what: "a program to a binary", higher: false, word: "faster", entries: [t("Tov", 42), t("C", 49), t("Rust", 98)] },
+  { name: "binary size", what: "a program, stripped", higher: false, word: "smaller", entries: [e("Tov", 33.5, "33 KB"), e("C", 32.8, "33 KB"), e("Rust", 350.7, "351 KB")] },
 ]
 
 function ratioOf(r: Row, x: Entry): f64 {
@@ -139,7 +140,7 @@ function leadOf(r: Row): Lead {
 
 function leadText(r: Row): string {
   const l = leadOf(r)
-  return `${l.ratio.toFixed(1)}× ${r.less ? "less" : "faster"} than ${l.rival}`
+  return `${l.ratio.toFixed(1)}× ${r.word} than ${l.rival}`
 }
 
 // One benchmark's chart: a bar per runtime, labelled, Tov's first and in amber.
@@ -152,7 +153,7 @@ function renderChart(id: string, r: Row): string {
     const us = x.who === "Tov" ? " us" : ""
     return `<li class="hbar${us}"><span class="hb-who">${x.who}</span><span class="hb-track"><span class="hb-fill" style="--w:${(x.value / max * 100).toFixed(1)}%"></span></span><span class="hb-val">${x.label}</span></li>`
   })
-  const read = r.higher ? "Longer is faster." : r.less ? "Shorter is less memory." : "Shorter is faster."
+  const read = r.higher ? "Longer is better." : "Shorter is better."
   return `<div class="cp cp-${id}"><p class="cp-head"><b>${leadText(r)}</b><span>${r.name}: ${r.what}</span></p><ul class="hbars">${bars.join("")}</ul><p class="cp-note">${read}</p></div>`
 }
 
@@ -172,8 +173,37 @@ function renderBench(): string {
   const systems = systemRows.map((r, i) => item(r, programRows.length + i)).join("")
   const charts = rows.map((r, i) => renderChart(ids[i]!, r)).join("")
   const rules = ids.map(id => `#pick-${id}:checked ~ .bx .cp-${id} { display: block; } #pick-${id}:checked ~ .bx label[for="pick-${id}"] { background: rgba(228,169,90,.14); border-color: var(--crust); color: #fff; } #pick-${id}:focus-visible ~ .bx label[for="pick-${id}"] { outline: 3px solid var(--crust); outline-offset: 2px; }`).join("\n")
-  return `<style>${rules}</style><div class="explorer">${inputs}<div class="bx"><nav class="bx-list" aria-label="Benchmarks"><p>Programs</p><ul>${programs}</ul><p>Servers, clients, the compiler</p><ul>${systems}</ul></nav><div class="bx-charts">${charts}</div></div></div>`
+  return `<style>${rules}</style><div class="explorer">${inputs}<div class="bx"><nav class="bx-list" aria-label="Benchmarks"><p>Programs</p><ul>${programs}</ul><p>Servers and builds</p><ul>${systems}</ul></nav><div class="bx-charts">${charts}</div></div></div>`
 }
+
+// ---------------------------------------------------------------- Cap
+
+// capcodec, Cap's H.264 screen encoder written in Tov, against x264 at its veryfast preset at the
+// same quality (VMAF): how many times faster, wall time on one thread, live preset (Cap's
+// apps/media-server/capcodec-benchmarks.md, main 00fecf7)
+type Clip = { name: string, speedup: f64 }
+
+const clips: Clip[] = [
+  { name: "Idle screen", speedup: 8.11 },
+  { name: "Code, 4K", speedup: 7.96 },
+  { name: "Busy UI, 60 fps", speedup: 7.23 },
+  { name: "Slow typing", speedup: 6.88 },
+  { name: "Busy UI", speedup: 6.55 },
+  { name: "Dark mode", speedup: 6.54 },
+  { name: "Code editor", speedup: 6.52 },
+  { name: "Slides", speedup: 4.64 },
+  { name: "Scrolling text", speedup: 4.40 },
+  { name: "Webcam overlay", speedup: 4.21 },
+  { name: "Dashboard", speedup: 3.51 },
+  { name: "Full-motion video", speedup: 1.54 },
+]
+
+function renderClips(): string {
+  const rows = clips.map((c, i) => `<li style="--w:${(c.speedup / 9.0 * 100).toFixed(1)}%;--i:${i}"><span class="cl-name">${c.name}</span><span class="cl-track"><span class="cl-fill"></span></span><span class="cl-val">${c.speedup.toFixed(1)}×</span></li>`).join("")
+  return `<ul class="clips" aria-label="How many times faster than x264, by recording">${rows}</ul>`
+}
+
+const capLogo = `<svg class="cap-logo" viewBox="0 0 1631 1631" width="44" height="44" aria-label="Cap" role="img"><rect x="20" y="20" width="1590" height="1590" rx="306" fill="#fff" stroke="#E7EAF0" stroke-width="41"/><circle cx="815.5" cy="815.5" r="652.4" fill="#4785FF"/><circle cx="815.5" cy="815.5" r="530.1" fill="#ADC9FF"/><circle cx="815.5" cy="815.5" r="407.7" fill="#fff"/></svg>`
 
 // ---------------------------------------------------------------- the agent
 
@@ -237,7 +267,7 @@ const shipped = [
 ].join("\n")
 
 const npmExample = [
-  `<span class="d">// main.tov: Cap's media server, as Bun runs it</span>`,
+  `<span class="d">// main.tov: the whole port</span>`,
   `<span class="k">import</span> server <span class="k">from</span> <span class="s">"cap-media-server"</span>`,
   `<span class="k">import</span> { serve } <span class="k">from</span> <span class="s">"bun"</span>`,
   ``,
@@ -293,11 +323,25 @@ export function renderPage(footer: string): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Tov, the programming language for coding agents</title>
 <meta name="description" content="Faster than Rust, written like TypeScript. Tov is the programming language for coding agents: the syntax they know, the exact fix for every error, and native binaries that beat Rust on speed, compile time and memory.">
+<meta name="theme-color" content="#F5F6F9">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://tov.sh/">
+<meta property="og:site_name" content="Tov">
 <meta property="og:title" content="Tov: faster than Rust, written like TypeScript">
-<meta property="og:description" content="The programming language for coding agents.">
+<meta property="og:description" content="The programming language for coding agents. Native binaries that beat Rust on speed, compile time and memory.">
+<meta property="og:image" content="https://tov.sh/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Tov, a hummingbird: faster than Rust, written like TypeScript.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Tov: faster than Rust, written like TypeScript">
+<meta name="twitter:description" content="The programming language for coding agents. Native binaries that beat Rust on speed, compile time and memory.">
+<meta name="twitter:image" content="https://tov.sh/og.png">
 <link rel="icon" href="/logo.svg" type="image/svg+xml">
 <link rel="preload" href="/fonts/schibsted-grotesk.woff2" as="font" type="font/woff2" crossorigin>
 <style>${css}</style>
+<script>window.va = window.va || function () { (window.vaq = window.vaq || []).push(arguments); };</script>
+<script defer src="/_vercel/insights/script.js"></script>
 </head>
 <body>
 <pre id="prompt" hidden>${esc(agentPrompt)}</pre>
@@ -308,6 +352,7 @@ export function renderPage(footer: string): string {
     <nav aria-label="Main">
       <ul>
         <li class="optional"><a href="#speed">Benchmarks</a></li>
+        <li class="optional"><a href="#cap">Cap</a></li>
         <li class="optional"><a href="/llms.txt">llms.txt</a></li>
         <li><a href="${repo}/blob/main/docs/spec.md">Spec</a></li>
         <li><a href="${repo}">GitHub</a></li>
@@ -317,20 +362,19 @@ export function renderPage(footer: string): string {
 
   <main>
     <div class="hero">
+      <p class="badge"><span class="dot" aria-hidden="true"></span>Experimental: under active development</p>
       <h1><span>Faster than Rust.</span> <span>Written like TypeScript.</span></h1>
-      <p class="lede">Tov is the programming language for coding agents. <strong>Your agent already knows the syntax</strong>, the compiler hands back the exact fix for every error, and what comes out is a native binary that <strong>beats Rust</strong>: faster to run, faster to compile, in a fraction of the memory.</p>
+      <p class="lede">The programming language for coding agents. They already know the syntax, every error comes with its fix, and the binaries <strong>beat Rust's</strong> on speed, compile time and memory.</p>
       <div class="actions">
         ${copyButton("prompt", "Copy the prompt for your agent", "Copied: paste it to your agent", "primary")}
         <div class="install"><code><span class="d">$</span> ${installLine}</code>${copyButton("install", "Copy", "Copied", "small")}</div>
       </div>
-      <p class="note">Tov is early. It runs on macOS and Linux.</p>
 
       ${renderRaces()}
     </div>
 
     <section id="agents">
       <h2>Your agent writes it. Tov fixes it. You ship it.</h2>
-      <p class="intro">Agents are good at TypeScript and bad at guessing. Tov keeps the language they know, and answers every mistake with the edit that fixes it.</p>
       <div class="loop" role="group" aria-label="How an agent works with Tov">
         <div class="step"><h3><span>1</span>Your agent writes TypeScript</h3><pre>${written}</pre></div>
         <div class="step"><h3><span>2</span>Tov says exactly what to fix</h3><pre>${checked}</pre></div>
@@ -339,19 +383,15 @@ export function renderPage(footer: string): string {
       <div class="reasons">
         <div>
           <h3>Nothing new to learn</h3>
-          <p>TypeScript's syntax with Bun's and Node's APIs: <code>Bun.serve</code>, <code>fetch</code>, <code>node:fs</code>, <code>async</code>/<code>await</code>. If code looks like TypeScript, it behaves like TypeScript, or it doesn't compile.</p>
+          <p>TypeScript's syntax with Bun's and Node's APIs: <code>Bun.serve</code>, <code>fetch</code>, <code>node:fs</code>, <code>async</code>/<code>await</code> and npm packages.</p>
         </div>
         <div>
           <h3>Nothing hidden</h3>
-          <p>No <code>any</code>, <code>null</code> or <code>==</code>. Every call that can fail is marked <code>try</code>, integer overflow stops the program, and arrays and records are values, so nothing changes behind the agent's back.</p>
-        </div>
-        <div>
-          <h3>Errors that come with the fix</h3>
-          <p>Every error has a code, a reason and a fix. <code>tov check --json</code> returns the exact edit, and marks the ones safe to apply as they are.</p>
+          <p>No <code>any</code>, <code>null</code> or <code>==</code>. Calls that can fail are marked <code>try</code>. Code that looks like TypeScript behaves like it, or doesn't compile.</p>
         </div>
         <div>
           <h3>Feedback in milliseconds</h3>
-          <p>A program compiles in about 40 ms and rebuilds are cached. <code>--watch</code> restarts on save, and <code>tov test</code> runs the tests written next to the code.</p>
+          <p>Programs compile in about 40 ms. <code>--watch</code> restarts on save, and <code>tov test</code> runs the tests next to the code.</p>
         </div>
       </div>
     </section>
@@ -359,33 +399,40 @@ export function renderPage(footer: string): string {
     <section id="speed">
       <div class="bench">
         <h2>Faster than Rust, in less of everything</h2>
-        <p class="intro">Tov compiles to C and hands it to your system's compiler. Memory is reference-counted, so there are no garbage collection pauses, and a program is one small file.</p>
-        <dl class="stats">
-          <div><dt>3×</dt><dd>faster than Rust on <code>binary_trees</code></dd></div>
-          <div><dt>42 ms</dt><dd>to compile a program (Rust: 98)</dd></div>
-          <div><dt>1.6 MB</dt><dd>to serve 242k requests a second (Rust: 4.4)</dd></div>
-          <div><dt>33 KB</dt><dd>a binary (Rust: 351)</dd></div>
-        </dl>
+        <p class="intro">Tov compiles to C, and counts references instead of collecting garbage: no pauses, and small binaries.</p>
         ${renderBench()}
-        <p class="fine">Apple M4 Max; every language prints the same output. From <code>bench/results/scoreboard-20261006-205209.json</code>, in which Tov beat Rust on every measurement but one, a tie (<code>points</code>: 292 ms against 291). Tov checks integer overflow by default; Rust's release builds don't. <a href="${repo}/tree/main/bench">Method, every result and caveats</a>.</p>
+        <p class="fine">Apple M4 Max; every program prints the same output. Tov beat Rust on every measurement but one, a tie. Tov checks integer overflow by default; Rust's release builds don't. <a href="${repo}/tree/main/bench">Method and every result</a>.</p>
       </div>
     </section>
 
-    <section id="npm">
-      <div class="npm">
-        <div>
-          <h2>Bring your npm packages</h2>
-          <p class="intro">Tov programs import npm packages, and apps written for Bun run on Tov unchanged. Tov code compiles to native code; the packages run on JavaScriptCore, built into the binary.</p>
+    <section id="cap">
+      <div class="cap-head">
+        <p class="pair" aria-hidden="true">${capLogo}<span>×</span><img src="/logo.svg" alt="" width="55" height="44"></p>
+        <h2>Tov at Cap</h2>
+        <p class="intro">Cap, the open-source screen recorder, put Tov on its hardest code.</p>
+      </div>
+      <div class="cap-grid">
+        <article class="cap-card enc">
+          <h3>A video encoder, written in Tov</h3>
+          <p class="cap-big"><b>5.2×</b><span>faster than x264, at the same quality</span></p>
+          ${renderClips()}
+          <dl class="cap-stats">
+            <div><dt>46 MB</dt><dd>peak memory (x264: 377)</dd></div>
+            <div><dt>561 KB</dt><dd>its binary (x264: 1.3 MB)</dd></div>
+          </dl>
+          <p class="cap-fine">capcodec, Cap's H.264 encoder, against x264's veryfast preset on 12 screen recordings at 1080p, one thread. <a href="https://github.com/CapSoftware/Cap/blob/capcodec-encoder-aa45/apps/media-server/capcodec-benchmarks.md">Every result</a>.</p>
+        </article>
+        <article class="cap-card ms">
+          <h3>Cap's media server, unchanged</h3>
+          <p>A Bun app with Hono, zod and FFmpeg's native addon, running on Tov without a line changed. Its npm packages run on JavaScriptCore, built into the binary.</p>
           <pre class="code">${npmExample}</pre>
-        </div>
-        <div>
-          <p class="intro">Cap's media server uses Hono, zod, FFmpeg through a native addon, <code>Bun.serve</code> and <code>Bun.spawn</code>. On Tov, without a line changed:</p>
           <ul class="facts">
-            <li><b>105 ms</b><span>to start, against 132 ms on Bun</span></li>
-            <li><b>23% less</b><span>CPU for each video it probes than on Bun</span></li>
-            <li><b>65 MB</b><span>a second after a burst of load, against 68–70 on Bun</span></li>
+            <li><b>105 ms</b><span>to start (Bun: 132)</span></li>
+            <li><b>23% less</b><span>CPU for each video it probes</span></li>
+            <li><b>65 MB</b><span>after a burst of load (Bun: 68–70)</span></li>
           </ul>
-        </div>
+          <p class="cap-fine">Against Bun 1.4 on an Apple M4 Max. <a href="${repo}/tree/main/bench/cap-media">Method and every result</a>.</p>
+        </article>
       </div>
     </section>
 
@@ -393,8 +440,7 @@ export function renderPage(footer: string): string {
       <div class="start">
         <div>
           <h2>Start with your agent</h2>
-          <p>Paste this to your coding agent. It installs Tov, reads the language from <a href="/llms.txt">llms.txt</a>, and uses <code>tov check --json</code> to fix its own mistakes.</p>
-          <p class="aside">By hand: <code>${installLine}</code> builds Tov from source (it needs git and a C compiler, and installs Rust if it's missing).</p>
+          <p>Paste this to your coding agent. It installs Tov, reads <a href="/llms.txt">llms.txt</a>, and fixes its own mistakes with <code>tov check --json</code>.</p>
         </div>
         <div class="prompt-card">
           <pre>${esc(agentPrompt)}</pre>

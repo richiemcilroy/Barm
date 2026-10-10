@@ -1,6 +1,6 @@
 // Tov's landing page as static files, for a host that serves files (tov.sh, on Vercel): the page
 // rendered once by page.tov, llms.txt (the language for agents, from docs/spec.md), the install
-// script, the logo and the font, in dist/. (server.tov serves the same
+// script, the logo, the social card and the font, in dist/. (server.tov serves the same
 // page, rendering it on every request.)
 //
 //   cd site && tov build.tov        (writes dist/)
@@ -21,7 +21,8 @@ function main() {
   try writeFileSync("dist/index.html", html.split(renderMsMark).join(took))
   try writeFileSync("dist/llms.txt", renderLlms(try readFileSync("../docs/spec.md")))
   try copy("logo.svg")
+  try copy("og.png")
   try copy("install.sh")
   try copy("fonts/schibsted-grotesk.woff2")
-  console.log(`dist/: index.html (${took} ms), llms.txt, install.sh, logo.svg, fonts/schibsted-grotesk.woff2`)
+  console.log(`dist/: index.html (${took} ms), llms.txt, install.sh, logo.svg, og.png, fonts/schibsted-grotesk.woff2`)
 }
