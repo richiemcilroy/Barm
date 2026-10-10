@@ -5,7 +5,7 @@ reports medians.
 
   bench/npm/run.py [--repeat N]
 """
-import argparse, json, os, statistics, subprocess, sys, time
+import argparse, json, os, socket, statistics, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
@@ -42,7 +42,17 @@ def rss_mb(cmd):
 
 def service(cmd, port):
     p = subprocess.Popen(cmd, cwd=HERE, env={**os.environ, "PORT": str(port)}, stdout=subprocess.DEVNULL)
-    time.sleep(1)
+    # (listening: a first run, compiling its JavaScript, can take more than a second)
+    end = time.time() + 20
+    while True:
+        try:
+            socket.create_connection(("127.0.0.1", port), 0.2).close()
+            break
+        except OSError:
+            if p.poll() is not None or time.time() > end:
+                p.kill()
+                raise RuntimeError(f"{cmd[0]} didn't start serving on port {port}")
+            time.sleep(0.05)
     c0 = rusage.cpu(p.pid)
     out = sh([LOAD, "-j", "-c", "64", "-t", "4", "-d", "5", "-w", "1", "-m", "POST", "-b", BODY, f"http://127.0.0.1:{port}/"])
     c1 = rusage.cpu(p.pid)
