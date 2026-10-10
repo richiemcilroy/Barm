@@ -18,6 +18,8 @@ assets.set("/og.png", try asset("og.png", "image/png"))
 assets.set("/apple-touch-icon.png", try asset("apple-touch-icon.png", "image/png"))
 assets.set("/icon-32.png", try asset("icon-32.png", "image/png"))
 assets.set("/fonts/schibsted-grotesk.woff2", try asset("fonts/schibsted-grotesk.woff2", "font/woff2"))
+assets.set("/singalong.js", try asset("singalong.js", "text/javascript;charset=utf-8"))
+assets.set("/fast-with-tov.mp3", try asset("fast-with-tov.mp3", "audio/mpeg"))
 assets.set("/install.sh", try asset("install.sh", "text/plain;charset=utf-8"))
 assets.set("/llms.txt", { body: renderLlms(try readFileSync("../docs/spec.md")), contentType: "text/plain;charset=utf-8" })
 

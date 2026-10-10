@@ -1,7 +1,7 @@
 // Tov's landing page as static files, for a host that serves files (tov.sh, on Vercel): the page
 // rendered once by page.tov, llms.txt (the language for agents, from docs/spec.md), the install
-// script, the logo and icons, the social card and the font, in dist/. (server.tov serves the same
-// page, rendering it on every request.)
+// script, the logo and icons, the social card, the singalong (its script and its song) and the
+// font, in dist/. (server.tov serves the same page, rendering it on every request.)
 //
 //   cd site && tov build.tov        (writes dist/)
 
@@ -25,6 +25,8 @@ function main() {
   try copy("apple-touch-icon.png")
   try copy("icon-32.png")
   try copy("install.sh")
+  try copy("singalong.js")
+  try copy("fast-with-tov.mp3")
   try copy("fonts/schibsted-grotesk.woff2")
-  console.log(`dist/: index.html (${took} ms), llms.txt, install.sh, logo.svg, og.png, icons, fonts/schibsted-grotesk.woff2`)
+  console.log(`dist/: index.html (${took} ms), llms.txt, install.sh, logo.svg, og.png, icons, the singalong, fonts/schibsted-grotesk.woff2`)
 }

@@ -138,6 +138,14 @@ h1 span + span { color: var(--ink-3); }
 .copy.small { padding: 6px 10px; font-size: .8125rem; border-radius: 7px; color: var(--ink-2); }
 .copy.small:hover { color: var(--ink); border-color: var(--ink-3); }
 .copy.done { background: var(--green); border-color: var(--green); color: var(--paper); }
+.sing { display: inline-flex; align-items: center; gap: 9px; font-size: .9375rem; font-weight: 500; line-height: 1.2; padding: 11px 16px; border-radius: 10px; color: var(--ink-2); text-decoration: none; transition: color .2s ease, background .2s ease; }
+.sing svg { width: 16px; height: 16px; flex: none; color: var(--crust); }
+.sing b { font-weight: 600; color: var(--ink); }
+.sing:hover { color: var(--ink); background: var(--sunk); }
+@media (prefers-reduced-motion: no-preference) {
+  .sing:hover svg { animation: sing-bob .5s ease-in-out infinite alternate; }
+}
+@keyframes sing-bob { from { transform: translateY(1px) rotate(-8deg); } to { transform: translateY(-2px) rotate(8deg); } }
 .install { display: flex; align-items: center; gap: 10px; background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; padding: 5px 5px 5px 16px; max-width: 100%; }
 .install code { font-size: .875rem; white-space: nowrap; overflow-x: auto; color: var(--ink); }
 .install .d { color: var(--ink-3); }

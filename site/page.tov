@@ -225,6 +225,8 @@ function esc(s: string): string {
 
 const copyIcon = `<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5" y="5" width="8.5" height="8.5" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10.5 3.5v-.5a1.5 1.5 0 0 0-1.5-1.5H4a1.5 1.5 0 0 0-1.5 1.5v5A1.5 1.5 0 0 0 4 9.5h.5" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>`
 
+const noteIcon = `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 12.5V3.2l7-1.7v9" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><circle cx="4.3" cy="12.5" r="1.9" fill="currentColor"/><circle cx="11.3" cy="10.5" r="1.9" fill="currentColor"/></svg>`
+
 function copyButton(target: string, label: string, done: string, cls: string): string {
   return `<button type="button" class="copy ${cls}" data-copy="${target}" data-done="${done}">${copyIcon}<span class="label">${label}</span></button>`
 }
@@ -276,8 +278,24 @@ const npmExample = [
   `}`,
 ].join("\n")
 
-// small: copying, and the race's balls held still for reduced motion (CSS does the rest)
+// small: copying, and the singalong (singalong.js, with the song, fetched only when it's asked for)
 const script = `
+let sing;
+function loadSing() {
+  sing = sing || new Promise((done, failed) => {
+    const s = document.createElement("script");
+    s.src = "/singalong.js";
+    s.onload = done;
+    s.onerror = () => { sing = undefined; failed(); };
+    document.head.appendChild(s);
+  });
+  return sing;
+}
+for (const a of document.querySelectorAll("[data-sing]")) {
+  a.addEventListener("pointerenter", () => loadSing().catch(() => {}), { once: true });
+  a.addEventListener("click", e => { e.preventDefault(); loadSing().then(() => window.tovSingalong(a)); });
+}
+if (location.hash === "#singalong") loadSing().then(() => window.tovSingalong());
 for (const b of document.querySelectorAll("[data-copy]")) {
   b.addEventListener("click", async () => {
     const text = document.getElementById(b.dataset.copy).textContent;
@@ -355,6 +373,7 @@ export function renderPage(footer: string): string {
       <ul>
         <li class="optional"><a href="#speed">Benchmarks</a></li>
         <li class="optional"><a href="#cap">Cap</a></li>
+        <li class="optional"><a href="#singalong" data-sing>Singalong</a></li>
         <li class="optional"><a href="/llms.txt">llms.txt</a></li>
         <li><a href="${repo}/blob/main/docs/spec.md">Spec</a></li>
         <li><a href="${repo}">GitHub</a></li>
@@ -369,6 +388,7 @@ export function renderPage(footer: string): string {
       <div class="actions">
         ${copyButton("prompt", "Copy the prompt for your agent", "Copied: paste it to your agent", "primary")}
         <div class="install"><code><span class="d">$</span> ${installLine}</code>${copyButton("install", "Copy", "Copied", "small")}</div>
+        <a class="sing" href="#singalong" data-sing>${noteIcon}<span>Sing along: <b>Fast with Tov</b></span></a>
       </div>
 
       ${renderRaces()}
