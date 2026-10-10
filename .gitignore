@@ -11,3 +11,5 @@ bench/fetch/rust-client/target/
 docs/design.md
 docs/research.md
 site/dist/
+.vercel
+.env*
