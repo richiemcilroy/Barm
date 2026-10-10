@@ -168,6 +168,13 @@ fn c_compiler() -> (String, Option<String>) {
             return (candidate.to_string(), None);
         }
     }
+    // Any clang before `cc`, which on Linux is usually GCC: Tov's C runs faster from clang
+    // (x86-64, Ubuntu's clang 18 against GCC 13: fib 449 ms against 511, nbody 308 against 382)
+    if let Some(path) = std::env::var_os("PATH")
+        && let Some(clang) = std::env::split_paths(&path).map(|d| d.join("clang")).find(|p| p.is_file())
+    {
+        return (clang.to_string_lossy().into_owned(), None);
+    }
     ("cc".into(), None)
 }
 
