@@ -1,26 +1,35 @@
 <!doctype html>
-<!-- The social card (og.png, 1200×630). Regenerate after editing:
-     chrome --headless --window-size=1200,630 --screenshot=public/og.png og/og.html -->
 <html><head><meta charset="utf-8"><style>
 @font-face { font-family: "Schibsted Grotesk"; src: url(../public/fonts/schibsted-grotesk.woff2) format("woff2"); font-weight: 400 900; }
 * { box-sizing: border-box; }
-html, body { margin: 0; width: 1200px; height: 630px; overflow: hidden; }
-body { background: #FBFBFA; color: #1D1D20; font-family: "Schibsted Grotesk", sans-serif; position: relative; padding: 56px 72px; }
-body::before { content: ""; position: absolute; inset: -200px -160px auto auto; width: 720px; height: 720px; background: radial-gradient(closest-side, rgba(228,169,90,.12), transparent); }
+html, body { margin: 0; overflow: hidden; }
+body { background: #FBFBFA; color: #1D1D20; font-family: "Schibsted Grotesk", sans-serif; position: relative; }
+html, body { width: 1200px; height: 630px; }
+body { padding: 60px 72px; }
+body::before { content: ""; position: absolute; inset: -260px -200px auto auto; width: 760px; height: 760px; background: radial-gradient(closest-side, rgba(228,169,90,.13), transparent); }
 .top { display: flex; align-items: center; justify-content: space-between; position: relative; }
-.brand { display: flex; align-items: center; gap: 14px; font-weight: 700; font-size: 44px; letter-spacing: -.035em; line-height: 1; }
-.brand small { display: block; font-size: 17px; font-weight: 500; letter-spacing: 0; color: #9B9BA3; margin-top: 6px; }
-.brand .bird { width: 84px; height: 67px; }
-.badge { display: inline-flex; align-items: center; gap: 12px; padding: 10px 22px 10px 18px; border: 1.5px solid #DCE0EA; border-radius: 999px; background: #fff; font-size: 22px; font-weight: 600; color: #545C80; }
-.badge i { width: 12px; height: 12px; border-radius: 50%; background: #E4A95A; box-shadow: 0 0 0 6px rgba(228,169,90,.22); }
-h1 { position: relative; margin: 40px 0 0; font-size: 90px; line-height: 1; white-space: nowrap; letter-spacing: -.045em; font-weight: 700; }
+.brand { display: flex; align-items: center; gap: 14px; font-weight: 700; font-size: 42px; letter-spacing: -.035em; line-height: 1; }
+.brand .bird { width: 78px; height: 62px; }
+.brand small { display: block; font-size: 16px; font-weight: 500; letter-spacing: 0; color: #9B9BA3; margin-top: 6px; }
+.url { font-size: 22px; color: #9B9BA3; }
+h1 { position: relative; margin: 38px 0 0; font-size: 84px; line-height: 1; white-space: nowrap; letter-spacing: -.045em; font-weight: 700; }
 h1 span { display: block; }
 h1 span + span { color: #9B9BA3; }
-.stats { position: absolute; left: 72px; right: 72px; bottom: 52px; display: grid; grid-template-columns: repeat(3, 1fr); background: #fff; border: 1.5px solid #E9E9E6; border-radius: 22px; padding: 24px 36px; }
-.stats div + div { border-left: 1.5px solid #E9E9E6; padding-left: 30px; }
-.stats b { display: block; font-size: 48px; font-weight: 700; letter-spacing: -.045em; line-height: 1; color: #1D1D20; }
-.stats span { display: block; margin-top: 8px; font-size: 21px; color: #5F5F67; }
+.race { position: absolute; left: 72px; right: 72px; bottom: 48px; background: #fff; border: 1.5px solid #E9E9E6; border-radius: 22px; padding: 20px 30px 24px; }
+.race p { margin: 0 0 14px; font-size: 17px; color: #9B9BA3; }
+.lane { display: grid; grid-template-columns: 130px 1fr 110px; gap: 20px; align-items: center; height: 36px; }
+.who { font-size: 20px; color: #5F5F67; }
+.us .who { color: #1D1D20; font-weight: 600; }
+.track { position: relative; height: 24px; border-radius: 999px; background: #F4F4F2; }
+.ball { position: absolute; top: 3px; width: 18px; height: 18px; border-radius: 50%; background: #DCDCE0; left: calc((100% - 24px) * var(--p) + 3px); }
+.us .ball { background: #E4A95A; box-shadow: 0 0 0 5px rgba(228,169,90,.2); }
+.us .ball::before { content: ""; position: absolute; left: 5px; top: 6px; width: 2.6px; height: 2.6px; border-radius: 50%; background: #26262B; box-shadow: 5.4px 0 0 #26262B; }
+.us .ball::after { content: ""; position: absolute; left: 6.5px; top: 9.6px; width: 4.6px; height: 2.4px; border: 1.3px solid #26262B; border-top: 0; border-radius: 0 0 4px 4px; }
+.val { text-align: right; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.lane:not(.us) .val { color: #5F5F67; font-weight: 500; }
 </style></head><body>
+<!-- The social card (og.png, 1200×630): the hero's race, held still. After editing, regenerate:
+     chrome --headless --window-size=1200,630 --screenshot=public/og.png og/og.html -->
 <div class="top"><div class="brand"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 96" class="bird">
   <!-- Tov: a hummingbird, small and very fast -->
   <style>
@@ -55,11 +64,12 @@ h1 span + span { color: #9B9BA3; }
     <ellipse cx="81" cy="45" rx="5" ry="2.8" fill="#F08F8A" opacity=".7"/>
   </g>
 </svg>
-<div>tov<small>v0.0.1 experimental</small></div></div></div>
+<div>tov<small>v0.0.1 experimental</small></div></div><div class="url">tov.sh</div></div>
 <h1><span>Faster than Rust.</span><span>Written like TypeScript.</span></h1>
-<div class="stats">
-<div><b>3×</b><span>faster than Rust</span></div>
-<div><b>42 ms</b><span>to compile (Rust: 98)</span></div>
-<div><b>1.6 MB</b><span>to serve 242k req/s</span></div>
+<div class="race">
+<p>Requests a second, a JSON API on one core</p>
+<div class="lane us" style="--p:1"><span class="who">Tov</span><span class="track"><span class="ball"></span></span><span class="val">242k/s</span></div>
+<div class="lane" style="--p:.896"><span class="who">Rust</span><span class="track"><span class="ball"></span></span><span class="val">216k/s</span></div>
+<div class="lane" style="--p:.458"><span class="who">Bun</span><span class="track"><span class="ball"></span></span><span class="val">111k/s</span></div>
 </div>
 </body></html>

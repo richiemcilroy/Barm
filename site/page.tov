@@ -332,12 +332,14 @@ export function renderPage(footer: string): string {
 <meta property="og:image" content="https://tov.sh/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="Tov, a hummingbird: faster than Rust, written like TypeScript.">
+<meta property="og:image:alt" content="Tov: faster than Rust, written like TypeScript. Tov serves 242k requests a second, Rust 216k and Bun 111k.">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Tov: faster than Rust, written like TypeScript">
 <meta name="twitter:description" content="The programming language for coding agents. Native binaries that beat Rust on speed, compile time and memory.">
 <meta name="twitter:image" content="https://tov.sh/og.png">
 <link rel="icon" href="/logo.svg" type="image/svg+xml">
+<link rel="icon" href="/icon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="preload" href="/fonts/schibsted-grotesk.woff2" as="font" type="font/woff2" crossorigin>
 <style>${css}</style>
 <script>window.va = window.va || function () { (window.vaq = window.vaq || []).push(arguments); };</script>
