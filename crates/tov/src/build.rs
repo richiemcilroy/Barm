@@ -217,6 +217,17 @@ fn linker(cc: &str) -> String {
     cc.to_string()
 }
 
+/// Linux: lld links, when it's installed. It's faster than the system's ld, and `--as-needed`
+/// leaves out a library only the runtime functions it drops would call (GNU ld counts their calls
+/// too, so every program would load libm).
+fn use_lld(cc: &str) -> bool {
+    if cfg!(target_vendor = "apple") || cfg!(windows) {
+        return false;
+    }
+    let beside = Path::new(cc).parent().filter(|d| !d.as_os_str().is_empty()).is_some_and(|d| d.join("ld.lld").is_file());
+    beside || std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|d| d.join("ld.lld").is_file()))
+}
+
 pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, BuildError> {
     prune_cache();
     let t0 = Instant::now();
@@ -284,6 +295,13 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
             c_src.push_str(&format!("__asm__(\".section .rodata.tv_js_blob,\\\"a\\\"\\n.globl tv_js_blob\\n.p2align 3\\ntv_js_blob:\\n.incbin \\\"{p}\\\"\\n.byte 0\\n.text\\n\");\n"));
         }
     }
+    // Linux: BoringSSL's classes with virtual destructors name C++'s sized operator delete, which
+    // nothing calls (it allocates and frees with functions of its own). Defined here as libstdc++
+    // defines it, a program using TLS doesn't load libstdc++ (~1 MB of its memory) for it. (The
+    // JavaScript engine is C++ through and through: a program with npm packages loads it anyway.)
+    if uses_tls && npm.is_empty() && !cfg!(target_vendor = "apple") && !cfg!(windows) {
+        c_src.push_str("void _ZdlPvm(void *p, unsigned long n) { (void)n; free(p); }\n");
+    }
     let t2 = Instant::now();
     if let Some(p) = &opts.emit_c {
         std::fs::write(p, codegen::standalone(&c_src)).map_err(|e| BuildError::Message(format!("can't write {}: {e}", p.display())))?;
@@ -324,7 +342,8 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     };
     // Link flags (see below) are part of what a cached binary was built with.
     let tls_key = tls.as_ref().map(|t| t.key.clone()).unwrap_or_default();
-    let key = hash_hex(&[c_src.as_bytes(), rt_key.as_bytes(), LINK_FLAGS.as_bytes(), tls_key.as_bytes(), js_key.as_bytes()]);
+    let lld = use_lld(&cc);
+    let key = hash_hex(&[c_src.as_bytes(), rt_key.as_bytes(), LINK_FLAGS.as_bytes(), if lld { b"lld" } else { b"ld" }, tls_key.as_bytes(), js_key.as_bytes()]);
     let dir = cache_dir();
     let bin_dir = dir.join("bin");
     let binary = bin_dir.join(&key);
@@ -415,6 +434,15 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         cmd.args(extra.split_whitespace()).arg("-o").arg(&tmp).arg(&obj);
     }
     cmd.arg(&rt_obj);
+    if lld {
+        cmd.arg("-fuse-ld=lld");
+    }
+    if !cfg!(target_vendor = "apple") && !cfg!(windows) {
+        // (a library only if the program calls into it: libm, libstdc++ (see _ZdlPvm above) and
+        // libpthread before glibc 2.34 often aren't, and loading libm alone makes ~300 KB of a
+        // program's memory)
+        cmd.arg("-Wl,--as-needed");
+    }
     if let (Some(jsc), Some(objs)) = (&jsc, &js_objs) {
         cmd.arg(&objs[0]).arg(&objs[1]);
         if native {
@@ -635,7 +663,7 @@ fn sign_for_jit(binary: &Path, c_dir: &Path) -> Result<(), BuildError> {
 /// macOS: the main thread's stack size (the most arm64 allows).
 const LINK_STACK: &str = "-Wl,-stack_size,0x20000000";
 /// Everything that changes how programs are linked, for the binary cache key.
-const LINK_FLAGS: &str = "dead-strip; exported: _main; -x unless -g; sanitizers link without -stack_size; -Wl,-stack_size,0x20000000";
+const LINK_FLAGS: &str = "dead-strip; exported: _main; -x unless -g; sanitizers link without -stack_size; -Wl,-stack_size,0x20000000; Linux: --as-needed after the runtime, lld when installed";
 
 /// The precompiled fixed prefix (`pre-<key>.h`, with its `.pch`/`.gch` beside it) to pass as
 /// `-include`, built on first use; `None` if the compiler can't precompile it (then programs
