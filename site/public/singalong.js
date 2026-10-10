@@ -15,8 +15,9 @@ const SONG = "/fast-with-tov.mp3";
 const INSTALL = "curl -fsSL https://tov.sh/install.sh | sh";
 
 const C = {
-  amber: "#E4A95A", amberHi: "#FFD18A", foam: "#FFF3DC", ink: "#26262B", rust: "#D2542C",
-  green: "#6BE3A4", red: "#FF5D57", cyan: "#5CE1FF", pink: "#FF5FA2", violet: "#9B6BFF",
+  amber: "#FFC233", amberHi: "#FFE45C", foam: "#FFF6E0", ink: "#1E1033", rust: "#F0602A",
+  green: "#5CFF8F", red: "#FF4D5E", cyan: "#26E8FF", pink: "#FF3D9A", violet: "#A35CFF",
+  lime: "#C8FF3D", yellow: "#FFEA3D", blue: "#3D6BFF", orange: "#FF7A1A",
 };
 const FONT = `"Schibsted Grotesk", ui-sans-serif, system-ui, sans-serif`;
 const MONO = `ui-monospace, "SF Mono", Menlo, Consolas, monospace`;
@@ -65,19 +66,19 @@ const L = li => lines[li];
 const until = li => (li + 1 < lines.length ? lines[li + 1].s : lines[li].e + 2);
 
 const NAMES = {
-  intro: "Intro · shout it", chorus: "Chorus · everybody!", verse1: "Verse one", verse2: "Verse two",
-  bridge: "Bridge · arcade mode", final: "Final chorus · louder!", outro: "Outro · all together",
+  intro: "Oi oi!", chorus: "Chorus! Everybody!", verse1: "Verse one", verse2: "Verse two",
+  bridge: "Arcade mode", final: "Last chorus, louder!", outro: "All together now",
 };
+// each section's sky (top, middle, bottom), its sticker colour, and what's drawn behind the stage
 const THEMES = {
-  intro: { top: "#120a07", bot: "#3b1d0c", bg: "pub" },
-  chorus: { top: "#2a1105", bot: "#7d3a0e", bg: "burst" },
-  verse1: { top: "#050918", bot: "#1b2152", bg: "night" },
-  verse2: { top: "#031316", bot: "#0f3e44", bg: "grid" },
-  bridge: { top: "#0e021a", bot: "#4a0f5e", bg: "arcade" },
-  final: { top: "#2e0d03", bot: "#8f3b0b", bg: "burst" },
-  outro: { top: "#0e0906", bot: "#47290e", bg: "burst" },
+  intro: { sky: ["#2B0B6E", "#B5179E", "#FF4D6D"], tag: C.yellow, bg: "pub" },
+  chorus: { sky: ["#FF2E7E", "#FF6A2B", "#FFB627"], tag: C.cyan, bg: "burst" },
+  verse1: { sky: ["#07073A", "#2A1A8F", "#7B2FF7"], tag: C.lime, bg: "night" },
+  verse2: { sky: ["#002E3B", "#00877F", "#00D1A0"], tag: C.pink, bg: "grid" },
+  bridge: { sky: ["#0D0026", "#4B00A8", "#FF2EB5"], tag: C.cyan, bg: "arcade" },
+  final: { sky: ["#FF006E", "#FF4D2E", "#FFC300"], tag: C.lime, bg: "burst" },
+  outro: { sky: ["#2D4BFF", "#B026FF", "#FF2E7E"], tag: C.yellow, bg: "burst" },
 };
-for (const k in THEMES) { THEMES[k].topRgb = hex(THEMES[k].top); THEMES[k].botRgb = hex(THEMES[k].bot); }
 
 const sections = [];
 for (const l of lines) {
@@ -100,91 +101,140 @@ function sectionAt(t) {
 // ---------------------------------------------------------------- the page around it
 
 const css = `
-#ts { position: fixed; inset: 0; z-index: 1000; background: #0d0907; color: ${C.foam}; font-family: ${FONT}; overflow: hidden; touch-action: manipulation; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+#ts { position: fixed; inset: 0; z-index: 1000; background: #1E1033; color: #fff; font-family: ${FONT}; overflow: hidden; touch-action: manipulation; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; contain: strict; }
 #ts[hidden] { display: none; }
-#ts .ts-cv { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 #ts button { font: inherit; color: inherit; cursor: pointer; border: 0; background: none; }
-#ts .ts-top { position: absolute; top: 0; left: 0; right: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px; z-index: 3; pointer-events: none; }
+/* the sky (two layers, crossfading between sections), the stage, then shading and flashes */
+#ts .ts-sky { position: absolute; inset: 0; opacity: 0; visibility: hidden; transition: opacity 1.1s ease, visibility 0s 1.1s; }
+#ts .ts-sky.on { opacity: 1; visibility: visible; transition: opacity 1.1s ease; }
+#ts .ts-cv { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+#ts .ts-scan { position: absolute; inset: 0; pointer-events: none; display: none; background: repeating-linear-gradient(to bottom, rgba(0,0,0,.16) 0 2px, transparent 2px 4px); }
+#ts.is-arcade .ts-scan { display: block; }
+#ts .ts-flash { position: absolute; inset: 0; pointer-events: none; opacity: 0; display: none; }
+#ts .ts-top { position: absolute; top: 0; left: 0; right: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: max(14px, env(safe-area-inset-top)) max(18px, env(safe-area-inset-right)) 14px max(18px, env(safe-area-inset-left)); z-index: 3; pointer-events: none; }
 #ts .ts-top > * { pointer-events: auto; }
-#ts .ts-name { display: flex; align-items: center; gap: 10px; font-weight: 800; letter-spacing: -.02em; font-size: 1.0625rem; line-height: 1.1; }
-#ts .ts-name small { display: block; font-weight: 500; font-size: .75rem; letter-spacing: 0; opacity: .6; }
-#ts .ts-name svg { width: 42px; height: auto; }
-#ts .ts-right { display: flex; align-items: center; gap: 10px; }
-#ts .ts-meter { display: grid; justify-items: end; line-height: 1; padding: 8px 14px; border-radius: 12px; background: rgba(0,0,0,.28); border: 1px solid rgba(255,243,220,.12); min-width: 8.5rem; }
-#ts .ts-meter b { font-size: 1.375rem; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: -.02em; color: ${C.amber}; }
-#ts .ts-meter span { font-size: .625rem; font-weight: 700; letter-spacing: .14em; opacity: .65; margin-top: 4px; }
-#ts .ts-meter i { font-style: normal; font-weight: 800; font-size: .75rem; color: ${C.pink}; margin-top: 3px; min-height: 1em; }
-#ts .ts-meter.pop b { animation: ts-pop .3s cubic-bezier(.3,1.6,.5,1); }
-#ts .ts-x { width: 44px; height: 44px; border-radius: 12px; background: rgba(0,0,0,.28) !important; border: 1px solid rgba(255,243,220,.12) !important; display: grid; place-items: center; }
-#ts .ts-x:hover { background: rgba(255,243,220,.12) !important; }
+#ts .ts-name { display: flex; align-items: center; gap: 10px; font-weight: 900; letter-spacing: -.02em; font-size: 1.125rem; line-height: 1.05; text-shadow: 0 2px 0 rgba(30,16,51,.5); }
+#ts .ts-name small { display: block; font-weight: 600; font-size: .8125rem; letter-spacing: 0; opacity: .8; }
+#ts .ts-name svg { width: 44px; height: auto; filter: drop-shadow(0 2px 0 rgba(30,16,51,.4)); }
+#ts .ts-x { width: 46px; height: 46px; border-radius: 14px; background: ${C.ink} !important; color: #fff; display: grid; place-items: center; box-shadow: 0 4px 0 rgba(0,0,0,.3); transition: transform .15s; }
+#ts .ts-x:hover { transform: rotate(8deg) scale(1.06); }
 #ts .ts-x svg { width: 18px; height: 18px; }
-#ts .ts-sec { position: absolute; top: 76px; left: 50%; transform: translateX(-50%); z-index: 2; font-size: .75rem; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; padding: 6px 12px; border-radius: 99px; background: rgba(0,0,0,.3); border: 1px solid rgba(255,243,220,.14); white-space: nowrap; transition: opacity .3s; }
-#ts .ts-sec.swap { animation: ts-swap .5s cubic-bezier(.2,.8,.2,1); }
-#ts .ts-lyrics { position: absolute; left: 16px; right: 16px; bottom: 92px; z-index: 2; pointer-events: none; height: 0; }
-#ts .ts-l { position: absolute; left: 0; right: 0; bottom: 0; margin: 0 auto; max-width: 21em; text-align: center; font-weight: 800; font-size: clamp(1.6rem, 4.8vw, 3.75rem); line-height: 1.08; letter-spacing: -.035em; text-wrap: balance; transform-origin: 50% 100%; opacity: 0; transform: translateY(.6em) scale(.5); visibility: hidden; transition: transform .55s cubic-bezier(.2,.8,.2,1), opacity .4s ease, visibility 0s .55s; text-shadow: 0 3px 0 rgba(0,0,0,.35), 0 0 30px rgba(0,0,0,.35); }
-#ts .ts-l.is-cur { opacity: 1; visibility: visible; transform: translateY(calc(var(--nh, 0px) * -1 - .2em)) scale(1); transition-delay: 0s; }
-#ts .ts-l.is-next { opacity: .5; visibility: visible; transform: scale(.5); transition-delay: 0s; }
-#ts .ts-l.is-prev { opacity: 0; visibility: visible; transform: translateY(calc(var(--nh, 0px) * -1 - var(--h, 1em) - .4em)) scale(.62); transition-delay: 0s; }
-#ts .ts-w { position: relative; display: inline-block; color: rgba(255,243,220,.36); white-space: pre; transition: transform .3s cubic-bezier(.3,1.7,.5,1), color .2s; }
-#ts .ts-w > i { position: absolute; left: 0; top: 0; font-style: normal; color: #fff; clip-path: inset(-30% calc(100% - var(--p, 0) * 100%) -30% -10%); }
-#ts .ts-w.is-on { transform: translateY(-.07em); }
-#ts .ts-w.is-on > i { text-shadow: 0 0 22px rgba(255,209,138,.75); }
-#ts .ts-w.is-done { transform: none; }
-#ts .ts-w.ts-tov > i { color: ${C.amber}; }
-#ts .ts-w.ts-rust > i { color: #FF8A5C; }
-#ts .ts-w.ts-code { font-family: ${MONO}; font-weight: 700; letter-spacing: -.04em; font-size: .9em; }
-#ts .ts-w.ts-code > i { color: ${C.cyan}; }
-#ts .ts-w.ts-big > i { color: ${C.pink}; }
-#ts .ts-hint { position: absolute; left: 50%; top: 116px; transform: translateX(-50%); z-index: 2; font-size: .9375rem; font-weight: 600; padding: 10px 16px; border-radius: 12px; background: rgba(0,0,0,.35); border: 1px solid rgba(255,243,220,.14); white-space: nowrap; opacity: 0; transition: opacity .5s; pointer-events: none; }
+/* the section's sticker */
+#ts .ts-sec { position: absolute; top: max(78px, calc(env(safe-area-inset-top) + 64px)); left: 50%; z-index: 2; font-size: 1.0625rem; font-weight: 900; letter-spacing: -.01em; padding: 7px 16px 8px; border-radius: 12px; color: ${C.ink}; background: var(--tag, ${C.yellow}); box-shadow: 0 4px 0 rgba(30,16,51,.45); white-space: nowrap; transform: translateX(-50%) rotate(-3deg); transition: opacity .3s; }
+#ts .ts-sec.swap { animation: ts-sticker .6s cubic-bezier(.3,1.7,.5,1); }
+#ts .ts-hint { position: absolute; left: 50%; top: max(128px, calc(env(safe-area-inset-top) + 114px)); transform: translateX(-50%) rotate(1.5deg); z-index: 2; font-size: .9375rem; font-weight: 700; padding: 9px 14px; border-radius: 12px; background: ${C.ink}; box-shadow: 0 4px 0 rgba(0,0,0,.25); white-space: nowrap; opacity: 0; transition: opacity .5s; pointer-events: none; }
 #ts .ts-hint.show { opacity: 1; }
-#ts .ts-hint b { color: ${C.amber}; }
-#ts .ts-bar { position: absolute; left: 0; right: 0; bottom: 0; z-index: 3; display: flex; align-items: center; gap: 14px; padding: 14px 20px 18px; }
-#ts .ts-play { width: 48px; height: 48px; border-radius: 50%; background: ${C.amber} !important; color: ${C.ink} !important; display: grid; place-items: center; flex: none; transition: transform .15s; }
+#ts .ts-hint b { color: ${C.yellow}; }
+/* the lyrics: the line being sung, the next one under it */
+#ts .ts-lyrics { position: absolute; left: max(14px, env(safe-area-inset-left)); right: max(14px, env(safe-area-inset-right)); bottom: calc(92px + env(safe-area-inset-bottom)); z-index: 2; pointer-events: none; height: 0; }
+#ts .ts-l { position: absolute; left: 0; right: 0; bottom: 0; margin: 0 auto; max-width: 19em; text-align: center; font-weight: 900; font-size: clamp(1.5rem, min(5.2vw, 8vh), 6.5rem); line-height: 1.12; letter-spacing: -.035em; text-wrap: balance; transform-origin: 50% 100%; opacity: 0; transform: translateY(.6em) scale(.5); visibility: hidden; transition: transform .5s cubic-bezier(.2,.9,.2,1.15), opacity .35s ease, visibility 0s .5s; text-shadow: 0 .07em 0 rgba(30,16,51,.6); }
+#ts .ts-l.is-cur { opacity: 1; visibility: visible; transform: translateY(calc(var(--nh, 0px) * -1 - .25em)) scale(1); transition-delay: 0s; }
+#ts .ts-l.is-next { opacity: .62; visibility: visible; transform: scale(.5); transition-delay: 0s; }
+#ts .ts-l.is-prev { opacity: 0; visibility: visible; transform: translateY(calc(var(--nh, 0px) * -1 - var(--h, 1em) - .4em)) scale(.62) rotate(-2deg); transition-delay: 0s; }
+#ts .ts-w { position: relative; display: inline-block; color: rgba(255,255,255,.42); white-space: pre; transform-origin: 50% 80%; }
+#ts .ts-w > i { position: absolute; left: 0; top: 0; font-style: normal; color: var(--c, #fff); clip-path: inset(-30% calc(100% - var(--p, 0) * 100%) -30% -10%); }
+#ts .ts-w.is-on { animation: ts-pop .32s cubic-bezier(.3,1.8,.5,1) both; }
+/* words with a voice of their own */
+#ts .ts-w.ts-tov { --c: ${C.yellow}; margin: 0 .16em; }
+#ts .ts-w.ts-tov.is-on { animation: ts-boing .6s cubic-bezier(.3,1.8,.5,1) both; }
+#ts .ts-w.ts-tov.is-done { color: ${C.yellow}; }
+#ts .ts-w.ts-shout { --c: ${C.lime}; margin: 0 .14em; }
+#ts .ts-w.ts-shout.is-on { animation: ts-shout .5s cubic-bezier(.3,1.8,.5,1) both; }
+#ts .ts-w.ts-rust { --c: ${C.rust}; }
+#ts .ts-w.ts-rust.is-on { animation: ts-rusty .5s ease-in-out both; }
+#ts .ts-w.ts-fast { --c: ${C.cyan}; }
+#ts .ts-w.ts-fast.is-on { animation: ts-zoom .45s cubic-bezier(.2,1.6,.4,1) both; }
+#ts .ts-w.ts-code { font-family: ${MONO}; font-weight: 800; letter-spacing: -.05em; font-size: .88em; --c: ${C.cyan}; }
+#ts .ts-w.ts-no { --c: ${C.cyan}; }
+#ts .ts-w.ts-no::after { content: ""; position: absolute; left: -6%; right: -6%; top: 52%; height: .12em; border-radius: .06em; background: ${C.red}; transform: scaleX(0) rotate(-6deg); transform-origin: 0 50%; transition: transform .2s cubic-bezier(.3,1.6,.5,1); }
+#ts .ts-w.ts-no.is-done::after { transform: scaleX(1) rotate(-6deg); }
+#ts .ts-w.ts-good { --c: ${C.green}; }
+#ts .ts-w.ts-good.is-on { animation: ts-jelly .5s cubic-bezier(.3,1.6,.5,1) both; }
+#ts .ts-w.ts-bad { --c: ${C.red}; }
+#ts .ts-w.ts-bad.is-on { animation: ts-shake .4s linear both; }
+#ts .ts-w.ts-small.is-on { animation: ts-shrink .4s cubic-bezier(.3,1.6,.5,1) both; }
+#ts .ts-w.ts-beer { --c: ${C.amber}; }
+#ts .ts-w.ts-night { --c: #C9B8FF; }
+#ts .ts-w.ts-beep { --c: ${C.pink}; }
+#ts .ts-w.ts-beep.is-on { animation: ts-press .3s cubic-bezier(.3,1.6,.5,1) both; }
+#ts .ts-w.ts-big { --c: ${C.pink}; margin: 0 .14em; }
+#ts .ts-w.ts-big.is-on { animation: ts-shout .5s cubic-bezier(.3,1.8,.5,1) both; }
+@keyframes ts-pop { 0% { transform: none; } 40% { transform: translateY(-.12em) scale(1.08); } 100% { transform: translateY(-.04em); } }
+@keyframes ts-boing { 0% { transform: none; } 30% { transform: scale(1.45) rotate(-8deg); } 55% { transform: scale(1.1) rotate(5deg); } 75% { transform: scale(1.22) rotate(-3deg); } 100% { transform: scale(1.16) rotate(-2deg); } }
+@keyframes ts-shout { 0% { transform: none; } 25% { transform: scale(1.28) rotate(4deg); } 45% { transform: scale(1.12) translateX(-.04em) rotate(-3deg); } 65% { transform: scale(1.18) translateX(.04em) rotate(2deg); } 100% { transform: scale(1.12) rotate(0); } }
+@keyframes ts-rusty { 0%, 100% { transform: none; } 20% { transform: rotate(-6deg) translateY(.04em); } 40% { transform: rotate(5deg); } 60% { transform: rotate(-4deg) translateY(.06em); } 80% { transform: rotate(3deg); } }
+@keyframes ts-zoom { 0% { transform: none; } 40% { transform: skewX(-20deg) translateX(.05em); } 100% { transform: skewX(-10deg); } }
+@keyframes ts-jelly { 0% { transform: none; } 30% { transform: scale(1.18, .8); } 55% { transform: scale(.92, 1.15); } 75% { transform: scale(1.04, .96); } 100% { transform: none; } }
+@keyframes ts-shake { 0%, 100% { transform: none; } 20% { transform: translateX(-.06em) rotate(-2deg); } 40% { transform: translateX(.06em) rotate(2deg); } 60% { transform: translateX(-.04em); } 80% { transform: translateX(.04em); } }
+@keyframes ts-shrink { 0% { transform: none; } 50% { transform: scale(.62); } 100% { transform: scale(.78); } }
+@keyframes ts-press { 0% { transform: none; } 35% { transform: translateY(.14em) scale(1.1, .82); } 100% { transform: translateY(-.03em); } }
+@keyframes ts-sticker { 0% { opacity: 0; transform: translateX(-50%) scale(.4) rotate(-14deg); } 100% { opacity: 1; transform: translateX(-50%) rotate(-3deg); } }
+/* the controls */
+#ts .ts-bar { position: absolute; left: 0; right: 0; bottom: 0; z-index: 3; display: flex; align-items: center; gap: 14px; padding: 14px max(20px, env(safe-area-inset-right)) max(18px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left)); }
+#ts .ts-play { width: 50px; height: 50px; border-radius: 50%; background: ${C.yellow} !important; color: ${C.ink} !important; display: grid; place-items: center; flex: none; box-shadow: 0 4px 0 rgba(30,16,51,.5); transition: transform .15s; }
+#ts .ts-play:hover { transform: scale(1.06) rotate(-6deg); }
 #ts .ts-play:active { transform: scale(.94); }
 #ts .ts-play svg { width: 20px; height: 20px; }
 #ts .ts-track { position: relative; flex: 1; height: 28px; cursor: pointer; touch-action: none; }
-#ts .ts-rail { position: absolute; left: 0; right: 0; top: 50%; height: 6px; margin-top: -3px; border-radius: 3px; background: rgba(255,243,220,.16); overflow: hidden; }
-#ts .ts-fill { position: absolute; inset: 0; background: linear-gradient(90deg, ${C.amber}, ${C.amberHi}); transform-origin: 0 50%; transform: scaleX(0); }
-#ts .ts-tick { position: absolute; top: 50%; width: 2px; height: 14px; margin: -7px 0 0 -1px; border-radius: 1px; background: rgba(255,243,220,.4); }
-#ts .ts-knob { position: absolute; top: 50%; width: 16px; height: 16px; margin: -8px 0 0 -8px; border-radius: 50%; background: ${C.foam}; box-shadow: 0 0 0 4px rgba(228,169,90,.35); }
-#ts .ts-time { font-size: .8125rem; font-weight: 600; font-variant-numeric: tabular-nums; opacity: .75; min-width: 5.6em; text-align: right; }
-#ts .ts-card { position: absolute; inset: 0; z-index: 4; display: grid; place-items: center; padding: 24px 16px; background: radial-gradient(ellipse at 50% 40%, rgba(60,28,8,.82), rgba(10,6,4,.94)); text-align: center; transition: opacity .5s ease, transform .5s ease; }
+#ts .ts-rail { position: absolute; left: 0; right: 0; top: 50%; height: 8px; margin-top: -4px; border-radius: 4px; background: rgba(30,16,51,.45); overflow: hidden; }
+#ts .ts-fill { position: absolute; inset: 0; background: linear-gradient(90deg, ${C.yellow}, ${C.pink}, ${C.cyan}); transform-origin: 0 50%; transform: scaleX(0); }
+#ts .ts-tick { position: absolute; top: 50%; width: 3px; height: 14px; margin: -7px 0 0 -1.5px; border-radius: 2px; background: rgba(255,255,255,.55); }
+#ts .ts-knob { position: absolute; top: 50%; width: 18px; height: 18px; margin: -9px 0 0 -9px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 4px ${C.pink}; }
+#ts .ts-time { font-size: .875rem; font-weight: 800; font-variant-numeric: tabular-nums; min-width: 5.6em; text-align: right; text-shadow: 0 2px 0 rgba(30,16,51,.5); }
+/* the cards at the start and the end */
+#ts .ts-card { position: absolute; inset: 0; z-index: 4; display: grid; place-items: center; padding: 24px 16px; overflow-y: auto; background: radial-gradient(ellipse at 50% 35%, #B5179E, #2B0B6E 75%); text-align: center; transition: opacity .45s ease, transform .45s ease; }
 #ts .ts-card[hidden] { display: none; }
-#ts .ts-card.away { opacity: 0; transform: scale(1.06); pointer-events: none; }
-#ts .ts-card h2 { font-size: clamp(2.6rem, 9vw, 5.5rem); line-height: .95; letter-spacing: -.05em; font-weight: 900; margin: 18px 0 10px; color: ${C.foam}; }
-#ts .ts-card h2 em { font-style: normal; color: ${C.amber}; }
-#ts .ts-card p { margin: 0 auto 26px; max-width: 30rem; color: rgba(255,243,220,.72); font-size: 1.0625rem; line-height: 1.5; }
-#ts .ts-card p b { color: ${C.foam}; }
-#ts .ts-go { display: inline-flex; align-items: center; gap: 12px; padding: 16px 30px; border-radius: 99px; background: ${C.amber} !important; color: ${C.ink} !important; font-weight: 800 !important; font-size: 1.25rem !important; letter-spacing: -.01em; box-shadow: 0 10px 40px rgba(228,169,90,.35); transition: transform .15s; }
-#ts .ts-go:hover { transform: scale(1.04); }
-#ts .ts-go:active { transform: scale(.97); }
+#ts .ts-card.away { opacity: 0; transform: scale(1.08); pointer-events: none; }
+#ts .ts-card h2 { font-size: clamp(2.5rem, min(10vw, 12vh), 6rem); line-height: .92; letter-spacing: -.05em; font-weight: 900; margin: 14px 0 12px; color: #fff; text-shadow: 0 .06em 0 ${C.pink}, 0 .12em 0 rgba(30,16,51,.6); transform: rotate(-2deg); }
+#ts .ts-card h2 em { font-style: normal; color: ${C.yellow}; }
+#ts .ts-card p { margin: 0 auto 26px; max-width: 30rem; color: rgba(255,255,255,.85); font-size: 1.125rem; line-height: 1.5; font-weight: 500; }
+#ts .ts-card p b { color: ${C.yellow}; font-weight: 800; }
+#ts .ts-go { display: inline-flex; align-items: center; gap: 12px; padding: 16px 30px; border-radius: 99px; background: ${C.yellow} !important; color: ${C.ink} !important; font-weight: 900 !important; font-size: 1.375rem !important; letter-spacing: -.02em; box-shadow: 0 6px 0 ${C.pink}, 0 14px 40px rgba(255,61,154,.45); transition: transform .15s, box-shadow .15s; }
+#ts .ts-go:hover { transform: scale(1.05) rotate(-2deg); }
+#ts .ts-go:active { transform: translateY(4px); box-shadow: 0 2px 0 ${C.pink}; }
 #ts .ts-go svg { width: 20px; height: 20px; }
-#ts .ts-keys { margin-top: 22px; font-size: .8125rem; color: rgba(255,243,220,.5); }
-#ts .ts-keys kbd { font: inherit; font-weight: 700; padding: 2px 7px; border-radius: 6px; border: 1px solid rgba(255,243,220,.25); color: rgba(255,243,220,.8); }
+#ts .ts-keys { margin-top: 24px; font-size: .875rem; color: rgba(255,255,255,.7); }
+#ts .ts-keys kbd { font: inherit; font-weight: 800; padding: 2px 8px; border-radius: 7px; background: rgba(30,16,51,.45); color: #fff; }
 #ts .ts-row { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
-#ts .ts-ghost { padding: 14px 22px; border-radius: 99px; border: 1px solid rgba(255,243,220,.3) !important; font-weight: 700; }
-#ts .ts-ghost:hover { background: rgba(255,243,220,.1) !important; }
-#ts .ts-birdy { width: 120px; height: auto; animation: ts-hover 1.4s ease-in-out infinite; }
+#ts .ts-ghost { padding: 14px 22px; border-radius: 99px; background: rgba(30,16,51,.45) !important; font-weight: 800; }
+#ts .ts-ghost:hover { background: rgba(30,16,51,.7) !important; }
+#ts .ts-birdy { width: clamp(80px, 16vh, 130px); height: auto; animation: ts-hover 1.4s ease-in-out infinite; filter: drop-shadow(0 6px 0 rgba(30,16,51,.35)); }
 #ts .ts-birdy .hb-wing { transform-box: fill-box; transform-origin: 92% 96%; animation: ts-flap .07s ease-in-out infinite alternate; }
-#ts :focus-visible { outline: 3px solid ${C.amber}; outline-offset: 3px; }
-@keyframes ts-pop { 0% { transform: scale(1.5); } 100% { transform: scale(1); } }
-@keyframes ts-swap { 0% { opacity: 0; transform: translate(-50%, -10px) scale(.9); } 100% { opacity: 1; transform: translate(-50%, 0); } }
+#ts :focus-visible { outline: 3px solid ${C.yellow}; outline-offset: 3px; }
 @keyframes ts-hover { 0%, 100% { transform: translateY(0) rotate(-4deg); } 50% { transform: translateY(-10px) rotate(-1deg); } }
 @keyframes ts-flap { from { transform: rotate(-12deg); } to { transform: rotate(30deg) scale(.92, .55); } }
+/* small screens, and short ones (a phone on its side) */
 @media (max-width: 640px) {
-  #ts .ts-top { padding: 12px 14px; }
   #ts .ts-name small { display: none; }
-  #ts .ts-name svg { width: 34px; }
-  #ts .ts-meter { min-width: 0; padding: 6px 10px; }
-  #ts .ts-meter b { font-size: 1.125rem; }
-  #ts .ts-sec { top: 68px; }
-  #ts .ts-hint { top: 106px; font-size: .8125rem; }
-  #ts .ts-lyrics { bottom: 84px; }
-  #ts .ts-bar { padding: 12px 14px 16px; gap: 10px; }
-  #ts .ts-time { min-width: 0; }
+  #ts .ts-name svg { width: 36px; }
+  #ts .ts-sec { font-size: .9375rem; top: max(70px, calc(env(safe-area-inset-top) + 58px)); }
+  #ts .ts-hint { font-size: .8125rem; top: max(116px, calc(env(safe-area-inset-top) + 104px)); }
+  #ts .ts-lyrics { bottom: calc(80px + env(safe-area-inset-bottom)); }
+  #ts .ts-bar { gap: 10px; padding-top: 10px; }
+  #ts .ts-time { min-width: 0; font-size: .8125rem; }
+}
+@media (max-height: 520px) {
+  #ts .ts-top { padding-top: max(8px, env(safe-area-inset-top)); padding-bottom: 8px; }
+  #ts .ts-name svg { width: 30px; }
+  #ts .ts-name small { display: none; }
+  #ts .ts-x { width: 38px; height: 38px; }
+  #ts .ts-sec { top: 12px; font-size: .875rem; padding: 5px 12px 6px; }
+  #ts .ts-hint { display: none; }
+  #ts .ts-lyrics { bottom: calc(62px + env(safe-area-inset-bottom)); }
+  #ts .ts-l { font-size: clamp(1.25rem, min(4.2vw, 8.5vh), 2.6rem); }
+  #ts .ts-bar { padding-top: 6px; padding-bottom: max(10px, env(safe-area-inset-bottom)); }
+  #ts .ts-play { width: 40px; height: 40px; }
+  #ts .ts-card h2 { margin: 6px 0; }
+  #ts .ts-card p { margin-bottom: 14px; font-size: 1rem; }
+  #ts .ts-keys { display: none; }
+}
+@media (max-width: 360px) {
+  #ts .ts-l { font-size: 1.375rem; }
+  #ts .ts-sec { font-size: .8125rem; }
 }
 @media (prefers-reduced-motion: reduce) {
-  #ts .ts-l, #ts .ts-w { transition-duration: .01s; }
+  #ts .ts-l { transition-duration: .01s; }
+  #ts .ts-w.is-on { animation: none !important; }
   #ts .ts-birdy, #ts .ts-birdy .hb-wing { animation: none; }
 }
 `;
@@ -204,14 +254,32 @@ const ICON = {
   close: `<svg viewBox="0 0 18 18" aria-hidden="true"><path d="M4 4l10 10M14 4L4 14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`,
 };
 
-// which words get a colour of their own
-function wordClass(text) {
-  const w = text.toLowerCase().replace(/[^a-z0-9=-]/g, "");
-  if (w === "tov" || w === "oi") return "ts-tov";
-  if (w === "rust" || w === "rusts") return "ts-rust";
-  if (["any", "null", "try", "json", "typescript", "curl", "pipe", "sh", "s-h"].includes(w)) return "ts-code";
-  if (["ding", "five", "four", "three", "two", "one", "bust"].includes(w) && text.includes("!")) return "ts-big";
-  return "";
+// which words get a colour (and a way of moving) of their own
+const VOICES = {
+  "ts-tov": ["tov"],
+  "ts-shout": ["oi", "agents", "pints", "up", "bust", "oi"],
+  "ts-rust": ["rust", "rusts", "compiling"],
+  "ts-fast": ["faster", "milliseconds", "fortytwo"],
+  "ts-code": ["typescript", "json", "try", "curl", "pipe", "sh", "binary"],
+  "ts-good": ["right", "fix", "fine", "done", "through", "straight", "ship"],
+  "ts-bad": ["error", "never", "guesses", "poor", "missed"],
+  "ts-small": ["little"],
+  "ts-beer": ["pub", "tonight"],
+  "ts-night": ["night", "grafter"],
+  "ts-beep": ["tap", "bleep", "keys", "go"],
+  "ts-big": ["ding", "five", "four", "three", "two", "one"],
+};
+const VOICE = new Map();
+for (const [cls, ws] of Object.entries(VOICES)) for (const w of ws) if (!VOICE.has(w)) VOICE.set(w, cls);
+function wordClass(text, before) {
+  const w = text.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (w === "any" || w === "null" || w === "equals") return "ts-code ts-no";
+  // (an agent that never gets it right isn't right)
+  if (w === "right" && before.includes("never")) return "ts-bad";
+  const cls = VOICE.get(w) || "";
+  // (shouts and the countdown are the words sung with a "!"; "agent's", "one little" aren't)
+  if ((cls === "ts-shout" || cls === "ts-big") && !text.includes("!") && w !== "pints") return "";
+  return cls;
 }
 
 let root, cv, ctx, audio, els = {};
@@ -228,21 +296,21 @@ function build() {
   root.setAttribute("role", "dialog");
   root.setAttribute("aria-modal", "true");
   root.setAttribute("aria-label", "Fast with Tov, a singalong");
-  const lyricHtml = lines.map(l => `<p class="ts-l">${l.words.map(w => {
+  const lyricHtml = lines.map(l => `<p class="ts-l">${l.words.map((w, j) => {
     const shown = w.text.replace(/^\((.*)\)$/, "$1");
-    return `<span class="ts-w ${wordClass(shown)}">${shown}<i aria-hidden="true">${shown}</i></span>`;
+    const before = l.words.slice(0, j).map(x => x.text.toLowerCase());
+    return `<span class="ts-w ${wordClass(shown, before)}">${shown}<i aria-hidden="true">${shown}</i></span>`;
   }).join(" ")}</p>`).join("");
   root.innerHTML = `
+<div class="ts-sky" aria-hidden="true"></div><div class="ts-sky" aria-hidden="true"></div>
 <canvas class="ts-cv" aria-hidden="true"></canvas>
+<div class="ts-scan" aria-hidden="true"></div><div class="ts-flash" aria-hidden="true"></div>
 <div class="ts-top">
   <div class="ts-name">${svgOf(`${BIRD_TAIL}${BIRD_BODY}${BIRD_WING}${BIRD_HEAD}`)}<span>Fast with Tov<small>a singalong</small></span></div>
-  <div class="ts-right">
-    <div class="ts-meter" aria-live="polite"><b>0</b><span>TOV-O-METER</span><i></i></div>
-    <button type="button" class="ts-x" aria-label="Close the singalong">${ICON.close}</button>
-  </div>
+  <button type="button" class="ts-x" aria-label="Close the singalong">${ICON.close}</button>
 </div>
 <div class="ts-sec" aria-hidden="true"></div>
-<div class="ts-hint">Tap, click or hit any key on every <b>TOV!</b></div>
+<div class="ts-hint">Tap, click or mash any key on every <b>TOV!</b></div>
 <div class="ts-lyrics">${lyricHtml}</div>
 <div class="ts-bar">
   <button type="button" class="ts-play" aria-label="Play">${ICON.play}</button>
@@ -253,7 +321,7 @@ function build() {
   <div>
     ${BIRD_SVG}
     <h2>Fast with <em>Tov</em></h2>
-    <p>A singalong for coding agents and the people who buy them pints. The words light up as they're sung. <b>Hit any key, click or tap on every TOV!</b></p>
+    <p>A singalong for coding agents and the people who buy them pints. Follow the words, and <b>tap, click or mash a key on every TOV!</b></p>
     <button type="button" class="ts-go">${ICON.play}Pints up!</button>
     <div class="ts-keys"><kbd>Space</kbd> pause · <kbd>←</kbd> <kbd>→</kbd> skip · <kbd>Esc</kbd> back to the page</div>
   </div>
@@ -261,8 +329,8 @@ function build() {
 <div class="ts-card ts-end" hidden>
   <div>
     ${BIRD_SVG}
-    <h2>That's the <em>build</em> done.</h2>
-    <p class="ts-score"></p>
+    <h2>That's the <em>build</em> done!</h2>
+    <p>Pints down, agents. Now the real thing:</p>
     <div class="ts-row">
       <button type="button" class="ts-go ts-again">${ICON.play}Again!</button>
       <button type="button" class="ts-ghost ts-copy">Copy the install line</button>
@@ -274,9 +342,9 @@ function build() {
 
   const q = s => root.querySelector(s);
   els = {
-    meter: q(".ts-meter"), score: q(".ts-meter b"), combo: q(".ts-meter i"), sec: q(".ts-sec"), hint: q(".ts-hint"),
+    sec: q(".ts-sec"), hint: q(".ts-hint"), skies: [...root.querySelectorAll(".ts-sky")], flash: q(".ts-flash"),
     play: q(".ts-play"), track: q(".ts-track"), fill: q(".ts-fill"), knob: q(".ts-knob"), time: q(".ts-time"),
-    start: q(".ts-start"), lyrics: q(".ts-lyrics"), end: q(".ts-end"), endScore: q(".ts-end .ts-score"),
+    start: q(".ts-start"), lyrics: q(".ts-lyrics"), end: q(".ts-end"),
   };
   root.querySelectorAll(".ts-l").forEach((el, i) => {
     lines[i].el = el;
@@ -363,20 +431,19 @@ function drawGlow(name, x, y, r, a) {
   ctx.globalAlpha = 1;
 }
 
-let vignette = null, shade = null;
+// The canvas is kept to about 2.4 million pixels (a 4K screen gets a softer stage, not a slow one),
+// and `quality` drops it further if frames run long.
+const BUDGET = 2.4e6;
+let quality = 1, sunGrad = null;
 function resize() {
   if (!root || root.hidden) return;
-  dpr = Math.min(window.devicePixelRatio || 1, 2);
   Wd = root.clientWidth; Ht = root.clientHeight;
+  dpr = Math.max(0.5, Math.min(window.devicePixelRatio || 1, 2, Math.sqrt(BUDGET / (Wd * Ht))) * quality);
   cv.width = Math.round(Wd * dpr); cv.height = Math.round(Ht * dpr);
   // (a phone held upright gets a bigger stage: its width is all there is)
   U = Math.max(Math.min(Wd / (Wd < 700 ? 720 : 1100), Ht / 820), 0.42);
-  vignette = ctx.createRadialGradient(Wd / 2, Ht * 0.45, Math.min(Wd, Ht) * 0.3, Wd / 2, Ht * 0.45, Math.max(Wd, Ht) * 0.8);
-  vignette.addColorStop(0, "rgba(0,0,0,0)");
-  vignette.addColorStop(1, "rgba(0,0,0,.6)");
-  shade = ctx.createLinearGradient(0, Ht * 0.5, 0, Ht);
-  shade.addColorStop(0, "rgba(0,0,0,0)");
-  shade.addColorStop(1, "rgba(0,0,0,.55)");
+  sunGrad = null;
+  pintCache.clear();
   drawTicks();
   for (const l of lines) l.el.style.setProperty("--h", `${l.el.offsetHeight}px`);
   lift();
@@ -392,7 +459,8 @@ function lift() {
 const cx = () => Wd / 2;
 // (sideways offsets shrink on a narrow screen, so things stay on it)
 const narrow = () => Math.min(1, Wd / 1000);
-const cy = () => Ht * 0.38;
+// (a short screen, a phone on its side, puts it higher)
+const cy = () => Ht * (Ht < 520 && Wd > Ht ? 0.33 : 0.38);
 
 // ---------------------------------------------------------------- the stage: things in it
 
@@ -531,57 +599,57 @@ function crab(x, y, size, t, mood = 0, walk = 1) {
 }
 
 // a pint: `y` is the bottom of the glass
-function pint(x, y, h, rot = 0, slosh = 0) {
-  const tw = h * 0.62, bw = h * 0.48;
+// a pint, drawn once per size and kept: `y` is the bottom of the glass
+const pintCache = new Map();
+function pint(x, y, h, rot = 0) {
+  const k = Math.max(8, Math.round(h / 4) * 4);
+  let c = pintCache.get(k);
+  if (!c) { c = pintSprite(k); pintCache.set(k, c); }
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(rot);
-  ctx.beginPath();
-  ctx.moveTo(-bw / 2, 0);
-  ctx.lineTo(-tw / 2, -h);
-  ctx.lineTo(tw / 2, -h);
-  ctx.lineTo(bw / 2, 0);
-  ctx.closePath();
-  ctx.save();
-  ctx.clip();
-  const g = ctx.createLinearGradient(0, -h, 0, 0);
-  g.addColorStop(0, "#F6C056");
-  g.addColorStop(1, "#C9781E");
-  ctx.fillStyle = g;
-  ctx.fillRect(-tw, -h, tw * 2, h);
-  ctx.fillStyle = "rgba(255,255,255,.5)";
-  for (let i = 0; i < 5; i++) {
-    const by = -((performance.now() / 1000 * 0.4 + hash(i + h)) % 1) * h * 0.8;
-    ctx.beginPath();
-    ctx.arc((hash(i * 3) - 0.5) * bw * 0.8, by, h * 0.018, 0, TAU);
-    ctx.fill();
-  }
-  ctx.fillStyle = "rgba(255,255,255,.22)";
-  ctx.fillRect(-tw * 0.32, -h, tw * 0.1, h);
+  ctx.drawImage(c, -c.w / 2, -c.h + c.pad, c.w, c.h);
   ctx.restore();
-  // the head
-  ctx.fillStyle = C.foam;
-  ctx.beginPath();
-  ctx.moveTo(-tw / 2 - h * 0.02, -h * 0.84);
-  ctx.lineTo(-tw / 2 - h * 0.02, -h);
-  for (let i = 0; i <= 4; i++) {
-    const fx = -tw / 2 + (tw * i) / 4;
-    ctx.arc(fx, -h - h * 0.02 + Math.sin(slosh + i) * h * 0.015, h * 0.09, Math.PI, 0);
-  }
-  ctx.lineTo(tw / 2 + h * 0.02, -h * 0.84);
-  ctx.closePath();
-  ctx.fill();
-  ctx.strokeStyle = "rgba(255,255,255,.65)";
-  ctx.lineWidth = Math.max(1.5, h * 0.03);
-  ctx.beginPath();
-  ctx.moveTo(-bw / 2, 0);
-  ctx.lineTo(-tw / 2, -h * 0.84);
-  ctx.moveTo(bw / 2, 0);
-  ctx.lineTo(tw / 2, -h * 0.84);
-  ctx.moveTo(-bw / 2, 0);
-  ctx.lineTo(bw / 2, 0);
-  ctx.stroke();
-  ctx.restore();
+}
+function pintSprite(h) {
+  const pad = h * 0.06, w = h * 0.86, hh = h * 1.2 + pad;
+  const c = document.createElement("canvas");
+  c.width = Math.ceil(w * dpr); c.height = Math.ceil(hh * dpr);
+  c.w = w; c.h = hh; c.pad = pad;
+  const g = c.getContext("2d");
+  g.scale(dpr, dpr);
+  g.translate(w / 2, hh - pad);
+  const tw = h * 0.62, bw = h * 0.48;
+  g.beginPath();
+  g.moveTo(-bw / 2, 0); g.lineTo(-tw / 2, -h); g.lineTo(tw / 2, -h); g.lineTo(bw / 2, 0);
+  g.closePath();
+  g.save();
+  g.clip();
+  const lg = g.createLinearGradient(0, -h, 0, 0);
+  lg.addColorStop(0, "#FFD34D");
+  lg.addColorStop(1, "#F08A12");
+  g.fillStyle = lg;
+  g.fillRect(-tw, -h, tw * 2, h);
+  g.fillStyle = "rgba(255,255,255,.55)";
+  for (let i = 0; i < 6; i++) { g.beginPath(); g.arc((hash(i * 3) - 0.5) * bw * 0.8, -hash(i * 7) * h * 0.8, h * 0.02, 0, TAU); g.fill(); }
+  g.fillStyle = "rgba(255,255,255,.25)";
+  g.fillRect(-tw * 0.32, -h, tw * 0.1, h);
+  g.restore();
+  g.fillStyle = C.foam;
+  g.beginPath();
+  g.moveTo(-tw / 2 - h * 0.02, -h * 0.84);
+  g.lineTo(-tw / 2 - h * 0.02, -h);
+  for (let i = 0; i <= 4; i++) g.arc(-tw / 2 + (tw * i) / 4, -h - h * 0.02 + Math.sin(i * 1.7) * h * 0.015, h * 0.09, Math.PI, 0);
+  g.lineTo(tw / 2 + h * 0.02, -h * 0.84);
+  g.closePath();
+  g.fill();
+  g.strokeStyle = C.ink;
+  g.lineWidth = Math.max(1.5, h * 0.035);
+  g.lineJoin = "round";
+  g.beginPath();
+  g.moveTo(-bw / 2, 0); g.lineTo(-tw / 2, -h * 0.84); g.moveTo(bw / 2, 0); g.lineTo(tw / 2, -h * 0.84); g.moveTo(-bw / 2, 0); g.lineTo(bw / 2, 0);
+  g.stroke();
+  return c;
 }
 
 // a coding agent: a little robot. face: "happy", "dots", "?", "x", "type"
@@ -699,13 +767,38 @@ function bigText(text, x, y, size, col, o = {}) {
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.lineJoin = "round";
-  ctx.fillStyle = "rgba(0,0,0,.35)";
-  ctx.fillText(text, size * 0.04, size * 0.07);
+  // (an extruded side in a second colour, then the ink outline, then the face)
+  const depth = o.extrude ? 4 : 1, step = size * (o.extrude ? 0.022 : 0.06);
+  ctx.fillStyle = o.extrude || "rgba(30,16,51,.4)";
+  for (let i = depth; i >= 1; i--) ctx.fillText(text, step * i * 0.6, step * i);
   ctx.lineWidth = size * (o.stroke ?? 0.1);
   ctx.strokeStyle = o.strokeCol || C.ink;
   ctx.strokeText(text, 0, 0);
   ctx.fillStyle = col;
   ctx.fillText(text, 0, 0);
+  ctx.restore();
+}
+
+// a comic-book burst, behind a word that's shouted
+function starburst(x, y, r, col, rot, a = 1) {
+  ctx.save();
+  ctx.globalAlpha = a;
+  ctx.translate(x, y);
+  ctx.rotate(rot);
+  ctx.fillStyle = col;
+  ctx.strokeStyle = C.ink;
+  ctx.lineWidth = Math.max(2, r * 0.035);
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  const n = 14;
+  for (let i = 0; i < n * 2; i++) {
+    const rr = i % 2 ? r * (0.62 + hash(i) * 0.12) : r * (0.92 + hash(i * 3) * 0.16);
+    const ang = (i / (n * 2)) * TAU;
+    ctx.lineTo(Math.cos(ang) * rr, Math.sin(ang) * rr * 0.78);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
   ctx.restore();
 }
 
@@ -740,13 +833,13 @@ function check(x, y, s, col, k = 1) {
 // ---------------------------------------------------------------- particles
 
 const P = [];
-const MAXP = calm ? 120 : 700;
+let MAXP = calm ? 120 : 500;
 function add(p) {
   if (P.length >= MAXP) return;
   p.age = 0;
   P.push(p);
 }
-const CONF = [C.amber, C.pink, C.cyan, C.green, C.foam, C.violet];
+const CONF = [C.yellow, C.pink, C.cyan, C.lime, "#fff", C.violet, C.orange];
 function confetti(n, x, y, spread = 1) {
   for (let i = 0; i < n; i++) {
     const a = Math.random() * TAU, v = (200 + Math.random() * 600) * U * spread;
@@ -844,30 +937,46 @@ function drawParticles() {
 const scenes = [], triggers = [], targets = [];
 function scene(s, e, draw, fade = 0.3) { scenes.push({ s, e, draw, fade }); }
 function on(t, fn) { triggers.push({ t, fn }); }
-function target(t, label) { targets.push({ t, label, done: false }); }
+function target(t, label) { targets.push({ t, label, popped: false }); }
 
-let shakeAmt = 0, flashAmt = 0, flashCol = "#fff";
+let shakeAmt = 0, flashAmt = 0, zoomAmt = 0;
 function shake(n) { if (!calm) shakeAmt = Math.max(shakeAmt, n); }
-function flash(a, col = "#fff") { if (!calm) { flashAmt = Math.max(flashAmt, a); flashCol = col; } }
+function flash(a, col = "#fff") { if (!calm) { flashAmt = Math.max(flashAmt, a); els.flash.style.background = col; } }
+function punch(n) { if (!calm) zoomAmt = Math.max(zoomAmt, n); }
+
+// the colours a stamp comes in, one after another: face, extruded side, burst behind
+const LOUD = [[C.yellow, C.pink, C.cyan], [C.cyan, C.violet, C.yellow], [C.lime, C.blue, C.pink], [C.pink, C.yellow, C.lime], [C.orange, C.cyan, C.violet], ["#fff", C.pink, C.lime]];
+let stamps = 0;
 
 // a word slammed onto the stage
 function stamp(t, text, o = {}) {
   const life = o.life ?? 0.8;
+  const [face, side, back_] = LOUD[stamps++ % LOUD.length];
+  const col = o.col || face, ext = o.extrude || side, burst = o.burst ?? back_;
+  const spin = (hash(stamps) - 0.5) * 0.6;
+  const at = () => [cx() + (o.dx ?? 0) * U * narrow(), (o.y ? Ht * o.y : cy() - 40 * U) + (o.dy ?? 0) * U];
   scene(t, t + life, now => {
     const dt = now - t;
     const k = clamp(dt / 0.11, 0, 1);
-    let sc = lerp(2.8, 1, out3(k));
-    if (k >= 1) sc = 1 + Math.sin((dt - 0.11) * 32) * 0.05 * Math.exp(-(dt - 0.11) * 7);
-    const a = Math.min(k * 3, clamp((life - dt) / 0.25, 0, 1));
-    const x = cx() + (o.dx ?? 0) * U * narrow(), y = (o.y ? Ht * o.y : cy() - 40 * U) + (o.dy ?? 0) * U;
-    if (o.glow !== false) drawGlow(o.glow || "amber", x, y, 260 * U * sc, 0.5 * a);
-    bigText(text, x, y, (o.size ?? 200) * U, o.col || C.amber, { a, rot: o.rot ?? 0, scale: sc, stroke: 0.08 });
+    let sc = lerp(3, 1, out3(k));
+    if (k >= 1) sc = 1 + Math.sin((dt - 0.11) * 30) * 0.07 * Math.exp(-(dt - 0.11) * 6);
+    // (it leaves by shrinking away: fading would show through its extruded layers)
+    const gone = clamp((dt - (life - 0.16)) / 0.16, 0, 1);
+    sc *= 1 - gone * gone;
+    const a = Math.min(k * 3, 1);
+    if (sc <= 0.01) return;
+    const [x, y] = at();
+    const size = (o.size ?? 200) * U;
+    if (burst) starburst(x, y, size * 0.95 * back(dt / 0.25), burst, spin + dt * 0.8, a);
+    bigText(text, x, y, size, col, { a, rot: o.rot ?? 0, scale: sc, stroke: 0.08, extrude: ext });
   }, 0.001);
   on(t, () => {
-    const x = cx() + (o.dx ?? 0) * U * narrow(), y = (o.y ? Ht * o.y : cy() - 40 * U) + (o.dy ?? 0) * U;
+    const [x, y] = at();
     shake(o.shake ?? 14);
-    ring(x, y, o.col || C.amber, 260, 0.5, 10);
-    sparks(o.sparks ?? 18, x, y, o.col || C.amber);
+    punch(0.05);
+    flash(0.14, burst || col);
+    ring(x, y, col, 280, 0.5, 12);
+    sparks(o.sparks ?? 22, x, y, col);
   });
 }
 
@@ -890,7 +999,7 @@ function intro(li) {
       if (raise > 0) {
         const clink = now > up.s ? Math.sin(clamp((now - up.s) / 0.25, 0, 1) * Math.PI) : 0;
         const px = x + 80 * U - clink * 26 * U, py = y - 30 * U - raise * 130 * U;
-        pint(px, py, 80 * U, -0.15 * clink + Math.sin(now * 5 + i) * 0.05, now * 4);
+        pint(px, py, 80 * U, -0.15 * clink + Math.sin(now * 5 + i) * 0.05);
       }
     }
   }, 0.4);
@@ -1086,7 +1195,7 @@ function ship(l) {
       const k2 = out3((now - tonight.s) / 0.3);
       for (const side of [-1, 1]) {
         const clink = Math.sin(clamp((now - tonight.s - 0.15) / 0.3, 0, 1) * Math.PI);
-        pint(cx() + 170 * U + side * (90 - clink * 34) * U, Ht * 0.16 + 330 * U - k2 * 40 * U, 90 * U, -side * 0.2 * clink, now * 4);
+        pint(cx() + 170 * U + side * (90 - clink * 34) * U, Ht * 0.16 + 330 * U - k2 * 40 * U, 90 * U, -side * 0.2 * clink);
       }
     }
   }, 0.25);
@@ -1557,7 +1666,7 @@ function cueAll() {
 // ---------------------------------------------------------------- the stage: backdrops
 
 const STARS = Array.from({ length: 140 }, (_, i) => ({ x: hash(i * 1.3), y: hash(i * 2.7) * 0.75, r: 0.6 + hash(i * 4.1) * 1.8, tw: hash(i * 5.9) * TAU }));
-const BOKEH = Array.from({ length: 22 }, (_, i) => ({ x: hash(i * 3.1), y: hash(i * 7.7), r: 30 + hash(i * 1.9) * 90, sp: 0.02 + hash(i * 6.2) * 0.04, col: ["amber", "amber", "pink", "white", "amber"][i % 5] }));
+const BOKEH = Array.from({ length: 18 }, (_, i) => ({ x: hash(i * 3.1), y: hash(i * 7.7), r: 30 + hash(i * 1.9) * 90, sp: 0.02 + hash(i * 6.2) * 0.04, col: ["amber", "pink", "cyan", "white", "violet"][i % 5] }));
 
 function backdrop(name, a, t, pulse, tension) {
   if (a <= 0.01) return;
@@ -1566,7 +1675,7 @@ function backdrop(name, a, t, pulse, tension) {
   if (name === "pub" || name === "burst") {
     for (const b of BOKEH) {
       const x = ((b.x + t * b.sp) % 1.2 - 0.1) * Wd, y = (b.y * 0.8 + Math.sin(t * 0.5 + b.x * 9) * 0.03) * Ht;
-      drawGlow(b.col, x, y, b.r * U * (1 + pulse * 0.25), a * (name === "pub" ? 0.22 : 0.16));
+      drawGlow(b.col, x, y, b.r * U * (1 + pulse * 0.25), a * (name === "pub" ? 0.3 : 0.22));
     }
     ctx.globalAlpha = a;
   }
@@ -1574,14 +1683,14 @@ function backdrop(name, a, t, pulse, tension) {
     ctx.save();
     ctx.translate(cx(), cy() - 30 * U);
     ctx.rotate(t * 0.12);
-    ctx.fillStyle = `rgba(255,200,120,${0.05 + pulse * 0.07})`;
+    ctx.fillStyle = `rgba(255,240,180,${0.1 + pulse * 0.12})`;
     const R = Math.hypot(Wd, Ht);
     for (let i = 0; i < 18; i++) {
       ctx.rotate(TAU / 18);
       ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(-R * 0.09, -R); ctx.lineTo(R * 0.09, -R); ctx.closePath(); ctx.fill();
     }
     ctx.restore();
-    drawGlow("amber", cx(), cy() - 30 * U, 420 * U * (1 + pulse * 0.2), 0.35 * a);
+    drawGlow("white", cx(), cy() - 30 * U, 380 * U * (1 + pulse * 0.25), 0.3 * a);
   }
   if (name === "night") {
     for (const s of STARS) {
@@ -1592,7 +1701,7 @@ function backdrop(name, a, t, pulse, tension) {
   }
   if (name === "grid") {
     const g = 56 * U, off = (t * 30 * U) % g;
-    ctx.strokeStyle = `rgba(92,225,255,${0.07 + pulse * 0.06})`;
+    ctx.strokeStyle = `rgba(255,255,255,${0.12 + pulse * 0.12})`;
     ctx.lineWidth = 1;
     ctx.beginPath();
     for (let x = -off; x < Wd; x += g) { ctx.moveTo(x, 0); ctx.lineTo(x, Ht); }
@@ -1603,15 +1712,17 @@ function backdrop(name, a, t, pulse, tension) {
     const hz = Ht * 0.58;
     // the sun
     const sr = 170 * U;
-    const sg = ctx.createLinearGradient(0, hz - sr, 0, hz);
-    sg.addColorStop(0, "#FFD18A");
-    sg.addColorStop(1, "#FF5FA2");
-    ctx.fillStyle = sg;
+    if (!sunGrad) {
+      sunGrad = ctx.createLinearGradient(0, hz - sr, 0, hz);
+      sunGrad.addColorStop(0, C.yellow);
+      sunGrad.addColorStop(1, C.pink);
+    }
+    ctx.fillStyle = sunGrad;
     ctx.beginPath(); ctx.arc(cx(), hz, sr * (1 + pulse * 0.05), Math.PI, 0); ctx.fill();
-    ctx.fillStyle = THEMES.bridge.bot;
+    ctx.fillStyle = "#4B00A8";
     for (let i = 0; i < 6; i++) ctx.fillRect(cx() - sr * 1.1, hz - sr * 0.1 - i * sr * 0.14, sr * 2.2, (2 + i * 1.2) * U);
     // the floor
-    ctx.fillStyle = "rgba(10,0,20,.75)";
+    ctx.fillStyle = "rgba(13,0,38,.7)";
     ctx.fillRect(0, hz, Wd, Ht - hz);
     ctx.strokeStyle = mix(hex(C.pink), hex(C.cyan), tension);
     ctx.globalAlpha = a * (0.5 + pulse * 0.4);
@@ -1628,10 +1739,6 @@ function backdrop(name, a, t, pulse, tension) {
       ctx.lineTo(cx() + i * 260 * U, Ht);
     }
     ctx.stroke();
-    // scanlines
-    ctx.globalAlpha = a * 0.12;
-    ctx.fillStyle = "#000";
-    for (let y = 0; y < Ht; y += 4) ctx.fillRect(0, y, Wd, 1.5);
   }
   ctx.restore();
 }
@@ -1647,18 +1754,18 @@ function crowd(t, a, beat, big) {
     const x = (i + 0.5) * Wd / n + (hash(i) - 0.5) * 30 * U;
     const hop = Math.abs(Math.sin((beat + hash(i * 3) * 0.2) * Math.PI)) * (big ? 22 : 12) * U;
     const hr = (22 + hash(i * 2) * 9) * U, y = base - 100 * U - hash(i * 5) * 34 * U - hop;
-    ctx.fillStyle = "#0a0605";
+    ctx.fillStyle = "rgba(30,16,51,.92)";
     ctx.beginPath(); ctx.arc(x, y, hr, 0, TAU); ctx.fill();
     roundRect(x - hr * 1.7, y + hr * 0.8, hr * 3.4, 200 * U, hr); ctx.fill();
     if (i % 2 === 0 || big) {
       const side = i % 4 < 2 ? 1 : -1;
       const sway = Math.sin(beat * Math.PI + i) * 0.25;
       const hx = x + side * hr * 1.6 + sway * 20 * U, hy = y - hr * 1.6;
-      ctx.strokeStyle = "#0a0605";
+      ctx.strokeStyle = "rgba(30,16,51,.92)";
       ctx.lineWidth = hr * 0.6;
       ctx.lineCap = "round";
       ctx.beginPath(); ctx.moveTo(x + side * hr * 1.2, y + hr * 1.2); ctx.lineTo(hx, hy); ctx.stroke();
-      pint(hx, hy + 6 * U, 46 * U, sway * 0.5, t * 3 + i);
+      pint(hx, hy + 6 * U, 46 * U, sway * 0.5);
     }
   }
   ctx.restore();
@@ -1667,12 +1774,15 @@ function crowd(t, a, beat, big) {
 // ---------------------------------------------------------------- the frame
 
 let raf = 0, lastT = -1, lastNow = 0, curLine = -1, nextLine = -1, prevLine = -1;
-let score = 0, combo = 0, best = 0, hits = 0, engaged = false;
+// (a frame that runs long counts against the stage: enough of them, and it drops its resolution
+// and its particles, so a slow machine keeps the beat)
+let slow = 0;
 
 function frame(now) {
   raf = requestAnimationFrame(frame);
   const t = songTime(now);
-  const dt = Math.min(0.05, Math.max(0, (now - lastNow) / 1000));
+  const gap = now - lastNow;
+  const dt = Math.min(0.05, Math.max(0, gap / 1000));
   lastNow = now;
 
   // fire what the song passed (but not what a seek skipped)
@@ -1684,11 +1794,37 @@ function frame(now) {
   lyrics(t);
   hud(t);
   draw(t, dt);
+
+  const work = performance.now() - now;
+  slow = work > 9 || (gap > 45 && gap < 250) ? slow + 1 : Math.max(0, slow - 0.5);
+  if (slow > 45 && quality > 0.5) {
+    quality = Math.max(0.5, quality * 0.75);
+    MAXP = Math.max(120, Math.round(MAXP * 0.6));
+    slow = 0;
+    resize();
+  }
 }
 
+let skySec = -1, skyOn = 0;
+function sky(si) {
+  if (si === skySec) return;
+  skySec = si;
+  const th = THEMES[sections[si].kind];
+  skyOn = 1 - skyOn;
+  els.skies[skyOn].style.background = `linear-gradient(to bottom, rgba(20,0,40,0) 50%, rgba(20,0,40,.5)), radial-gradient(ellipse at 50% 42%, rgba(0,0,0,0) 45%, rgba(20,0,40,.4)), linear-gradient(to bottom, ${th.sky[0]}, ${th.sky[1]} 55%, ${th.sky[2]})`;
+  els.skies[skyOn].classList.add("on");
+  els.skies[1 - skyOn].classList.remove("on");
+  els.sec.style.setProperty("--tag", th.tag);
+  root.classList.toggle("is-arcade", sections[si].kind === "bridge");
+}
+
+let flashShown = 0;
 function draw(t, dt) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, cv.width, cv.height);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   const si = sectionAt(t), sec = sections[si];
+  sky(si);
   const th = THEMES[sec.kind], prev = si > 0 ? THEMES[sections[si - 1].kind] : th;
   const fk = clamp((t - sec.at) / 1.2, 0, 1);
   const beat = (t - BEAT0) / BEAT;
@@ -1698,17 +1834,16 @@ function draw(t, dt) {
   const pulse = playing ? Math.max(bass * 0.9, Math.pow(1 - frac, 5) * 0.5) : 0;
   const tension = bridgeSpan[1] > bridgeSpan[0] ? clamp((t - bridgeSpan[0]) / (bridgeSpan[1] - bridgeSpan[0]), 0, 1) : 0;
 
-  // the sky
-  const g = ctx.createLinearGradient(0, 0, 0, Ht);
-  g.addColorStop(0, mix(prev.topRgb, th.topRgb, fk));
-  g.addColorStop(1, mix(prev.botRgb, th.botRgb, fk));
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, Wd, Ht);
-
-  // shake everything on the stage
+  // shake and punch everything on the stage
   shakeAmt *= Math.exp(-dt * 9);
+  zoomAmt *= Math.exp(-dt * 10);
   ctx.save();
   if (shakeAmt > 0.3) ctx.translate((Math.random() - 0.5) * shakeAmt * U * 1.6, (Math.random() - 0.5) * shakeAmt * U * 1.6);
+  if (zoomAmt > 0.002) {
+    ctx.translate(cx(), cy());
+    ctx.scale(1 + zoomAmt, 1 + zoomAmt);
+    ctx.translate(-cx(), -cy());
+  }
 
   if (prev.bg !== th.bg) backdrop(prev.bg, 1 - fk, t, pulse, tension);
   backdrop(th.bg, prev.bg !== th.bg ? fk : 1, t, pulse, sec.kind === "bridge" ? tension : 0);
@@ -1722,52 +1857,21 @@ function draw(t, dt) {
     const a = Math.min(1, (t - c.s + c.fade) / c.fade, (c.e + c.fade - t) / c.fade);
     if (a <= 0) continue;
     ctx.save();
-    ctx.globalAlpha = 1;
     c.draw(t, a);
     ctx.restore();
   }
 
-  rings(t);
   stepParticles(dt);
   drawParticles();
   ctx.restore();
 
-  // the lyrics' shade, the vignette, the flashes
-  ctx.fillStyle = shade;
-  ctx.fillRect(0, Ht * 0.5, Wd, Ht * 0.5);
-  ctx.fillStyle = vignette;
-  ctx.fillRect(0, 0, Wd, Ht);
-  if (pulse > 0.05 && sec.kind === "bridge") {
-    ctx.fillStyle = `rgba(255,95,162,${pulse * 0.08 * tension})`;
-    ctx.fillRect(0, 0, Wd, Ht);
-  }
-  flashAmt *= Math.exp(-dt * 7);
-  if (flashAmt > 0.01) {
-    ctx.globalAlpha = flashAmt;
-    ctx.fillStyle = flashCol;
-    ctx.fillRect(0, 0, Wd, Ht);
-    ctx.globalAlpha = 1;
-  }
-}
-
-// approach rings for the words to hit: they close in on the stage's centre as the word comes
-function rings(t) {
-  const x = cx(), y = cy() - 40 * U, R = 90 * U;
-  for (const g of targets) {
-    if (g.done) continue;
-    const k = (g.t - t) / 0.9;
-    if (k > 1 || k < -0.15) continue;
-    const a = clamp(1 - k, 0, 1) * (k < 0 ? 1 + k / 0.15 : 1);
-    ctx.save();
-    ctx.globalAlpha = a * 0.9;
-    ctx.strokeStyle = C.foam;
-    ctx.lineWidth = 4 * U;
-    ctx.beginPath(); ctx.arc(x, y, R * (1 + Math.max(0, k) * 2.4), 0, TAU); ctx.stroke();
-    ctx.globalAlpha = a * 0.35;
-    ctx.lineWidth = 2 * U;
-    ctx.setLineDash([6 * U, 8 * U]);
-    ctx.beginPath(); ctx.arc(x, y, R, 0, TAU); ctx.stroke();
-    ctx.restore();
+  // flashes are a layer of their own (a canvas-wide fill each frame would cost more)
+  flashAmt *= Math.exp(-dt * 8);
+  if (flashAmt < 0.01) flashAmt = 0;
+  if (Math.abs(flashAmt - flashShown) > 0.01 || (flashAmt === 0 && flashShown !== 0)) {
+    els.flash.style.display = flashAmt > 0 ? "block" : "none";
+    els.flash.style.opacity = flashAmt.toFixed(2);
+    flashShown = flashAmt;
   }
 }
 
@@ -1805,8 +1909,8 @@ function lyrics(t) {
         w.p = p;
         w.el.style.setProperty("--p", p.toFixed(3));
         const sing = p > 0 && p < 1;
-        w.el.classList.toggle("is-on", sing);
-        w.el.classList.toggle("is-done", p >= 1);
+        if (sing !== w.on) { w.on = sing; w.el.classList.toggle("is-on", sing); }
+        if ((p >= 1) !== w.done) { w.done = p >= 1; w.el.classList.toggle("is-done", w.done); }
       }
     }
   }
@@ -1815,71 +1919,61 @@ function lyrics(t) {
     if (i < 0) continue;
     for (const w of lines[i].words) {
       const p = i === prevLine ? 1 : 0;
-      if (w.p !== p) { w.p = p; w.el.style.setProperty("--p", String(p)); w.el.classList.remove("is-on"); w.el.classList.toggle("is-done", p >= 1); }
+      if (w.p !== p) {
+        w.p = p; w.on = false; w.done = p >= 1;
+        w.el.style.setProperty("--p", String(p));
+        w.el.classList.remove("is-on");
+        w.el.classList.toggle("is-done", w.done);
+      }
     }
   }
 }
 
-// ---------------------------------------------------------------- hits
-
-function judge(t) {
-  let best_ = null;
-  for (const g of targets) {
-    if (g.done) continue;
-    const d = Math.abs(t - g.t);
-    if (d < 0.28 && (!best_ || d < Math.abs(t - best_.t))) best_ = g;
+function resetLyrics() {
+  for (const l of lines) {
+    l.el.className = "ts-l";
+    for (const w of l.words) { w.p = 0; w.on = false; w.done = false; w.el.style.setProperty("--p", "0"); w.el.classList.remove("is-on", "is-done"); }
   }
-  return best_;
+  curLine = nextLine = prevLine = -1;
 }
 
+// ---------------------------------------------------------------- taps
+
+// A tap (or a click, or a key) on a big word blows it up; anywhere else, it clinks a pint or
+// throws a letter.
 function shout(x, y, key) {
   if (!root || root.hidden || audio.paused) return;
   const t = songTime(performance.now());
-  const g = judge(t);
+  const g = targets.find(g => !g.popped && Math.abs(t - g.t) < 0.3);
   if (g) {
-    engaged = true;
-    g.done = true;
-    const d = Math.abs(t - g.t);
-    const [word, pts, col] = d < 0.08 ? ["PERFECT!", 300, C.amberHi] : d < 0.16 ? ["GREAT!", 150, C.green] : ["GOOD", 50, C.cyan];
-    combo += 1; hits += 1;
-    best = Math.max(best, combo);
-    score += pts * Math.min(8, combo);
+    g.popped = true;
     const sx = cx(), sy = cy() - 40 * U;
-    floatText(word, sx, sy - 130 * U, col, 40, 0.8);
-    ring(sx, sy, col, 200, 0.4, 8);
-    sparks(14, sx, sy, col);
-    els.meter.classList.remove("pop");
-    void els.meter.offsetWidth;
-    els.meter.classList.add("pop");
+    const col = CONF[Math.floor(Math.random() * CONF.length)];
+    floatText(`${g.label}!`, sx + (Math.random() - 0.5) * 300 * U * narrow(), sy - 140 * U, col, 54, 0.9);
+    confetti(40, sx, sy, 1.1);
+    ring(sx, sy, col, 320, 0.5, 14);
+    shake(10);
+    punch(0.04);
+    flash(0.12, col);
   } else if (key) {
     lightKey(key, t);
-    floatText(key.toUpperCase(), 40 * U + Math.random() * (Wd - 80 * U), Ht * 0.6, C.foam, 30, 0.7);
+    floatText(key.toUpperCase(), 40 * U + Math.random() * (Wd - 80 * U), Ht * 0.6, CONF[Math.floor(Math.random() * CONF.length)], 36, 0.7);
   } else {
-    // a clink wherever you click
-    foam(12, x, y);
-    floatText(["cheers!", "clink!", "oi!", "pints!"][Math.floor(Math.random() * 4)], x, y - 30 * U, C.foam, 24, 0.8);
+    foam(14, x, y);
+    floatText(["cheers!", "clink!", "oi!", "pints!", "tov!"][Math.floor(Math.random() * 5)], x, y - 30 * U, CONF[Math.floor(Math.random() * CONF.length)], 28, 0.8);
   }
 }
 
 function resetLive() {
-  // a seek: words ahead can be hit again, words behind can't
+  // a seek: the big words ahead can be blown up again
   const t = audio.currentTime;
-  for (const g of targets) g.done = g.t < t;
+  for (const g of targets) g.popped = g.t < t;
   P.length = 0;
   lastT = -1;
 }
 
-let lastScore = -1, lastCombo = -1, lastSec = -2, lastPct = -1;
+let lastSec = -2, lastPct = -1;
 function hud(t) {
-  // misses (only once someone has started playing)
-  for (const g of targets) {
-    if (!g.done && t > g.t + 0.28) {
-      g.done = true;
-      if (engaged && !audio.paused) { combo = 0; floatText("miss", cx(), cy() - 170 * U, "rgba(255,243,220,.6)", 26, 0.6); }
-    }
-  }
-  if (score !== lastScore) { els.score.textContent = score.toLocaleString("en-GB"); lastScore = score; }
-  if (combo !== lastCombo) { els.combo.textContent = combo > 1 ? `×${Math.min(8, combo)} combo` : ""; lastCombo = combo; }
   const si = sectionAt(t);
   const showSec = t > 0.2 ? si : -1;
   if (showSec !== lastSec) {
@@ -1890,9 +1984,10 @@ function hud(t) {
     els.sec.classList.add("swap");
     lastSec = showSec;
   }
-  // the hint shows until the first chorus's first TOV, unless someone's already hitting
+  // the hint shows from the intro's end to the first chorus's first TOV
   const firstTov = targets.length > 1 ? targets[1].t : 10;
-  els.hint.classList.toggle("show", !engaged && !audio.paused && t > 3.6 && t < firstTov + 0.6);
+  const hint = !audio.paused && t > 3.6 && t < firstTov + 0.6;
+  if (hint !== els.hint.shown) { els.hint.shown = hint; els.hint.classList.toggle("show", hint); }
   const d = audio.duration || 0;
   const pct = d ? t / d : 0;
   if (Math.abs(pct - lastPct) > 0.0005) {
@@ -1955,22 +2050,34 @@ function toggle() {
 
 function begin() {
   const p = audio.play();
-  if (p) p.then(() => { els.start.classList.add("away"); setTimeout(() => { els.start.hidden = true; }, 500); }).catch(() => { els.start.hidden = false; els.start.classList.remove("away"); });
+  if (!p) return;
+  p.then(() => { els.start.classList.add("away"); setTimeout(() => { els.start.hidden = true; }, 450); })
+    // (only a browser that won't play without a tap brings the start card back: a pause that
+    // interrupts the play doesn't)
+    .catch(err => { if (err && err.name === "NotAllowedError") { els.start.hidden = false; els.start.classList.remove("away"); } });
+}
+
+// back to the top: the song, the words, the stage
+function restart() {
+  audio.pause();
+  if (audio.readyState > 0) audio.currentTime = 0;
+  anchor(0);
+  resetLyrics();
+  for (const g of targets) g.popped = false;
+  P.length = 0;
+  lastT = -1;
+  shakeAmt = flashAmt = zoomAmt = 0;
+  skySec = lastSec = -2;
+  lastPct = -1;
+  els.end.hidden = true;
 }
 
 function again() {
-  score = 0; combo = 0; best = 0; hits = 0; engaged = false;
-  els.end.hidden = true;
-  audio.currentTime = 0;
-  resetLive();
+  restart();
   begin();
 }
 
 function finish() {
-  const total = targets.length;
-  els.endScore.innerHTML = hits
-    ? `You hit <b>${hits} of ${total}</b>, with a best combo of <b>×${best}</b>: <b>${score.toLocaleString("en-GB")}</b> on the Tov-o-meter. Now the real thing:`
-    : `Next time, hit a key on every <b>TOV!</b> Now the real thing:`;
   els.end.hidden = false;
   els.end.classList.remove("away");
   els.end.querySelector(".ts-again").focus();
@@ -1994,11 +2101,12 @@ function open(from) {
   root.hidden = false;
   document.documentElement.style.overflow = "hidden";
   resize();
+  // (every opening starts the song from the top)
+  restart();
   document.addEventListener("keydown", onKey);
   if (!raf) { lastNow = performance.now(); raf = requestAnimationFrame(frame); }
   els.start.hidden = false;
   els.start.classList.remove("away");
-  els.end.hidden = true;
   root.querySelector(".ts-go").focus();
   if (location.hash !== "#singalong") history.replaceState(null, "", "#singalong");
   // (fonts first, so the stage's words are in the page's typeface)
@@ -2013,6 +2121,7 @@ function close() {
   document.removeEventListener("keydown", onKey);
   cancelAnimationFrame(raf);
   raf = 0;
+  P.length = 0;
   if (location.hash === "#singalong") history.replaceState(null, "", location.pathname + location.search);
   if (opener && opener.focus) opener.focus();
 }
