@@ -1,11 +1,12 @@
 // Tov's landing page as static files, for a host that serves files (tov.sh, on Vercel): the page
-// rendered once by page.tov, beside the logo and the font, in dist/. (server.tov serves the same
+// rendered once by page.tov, llms.txt (the language for agents, from docs/spec.md), the install
+// script, the logo and the font, in dist/. (server.tov serves the same
 // page, rendering it on every request.)
 //
 //   cd site && tov build.tov        (writes dist/)
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs"
-import { renderPage, renderMsMark, repo } from "./page"
+import { renderPage, renderLlms, renderMsMark, repo } from "./page"
 
 function copy(name: string) {
   const body = try readFileSync(`public/${name}`)
@@ -18,7 +19,9 @@ function main() {
   const html = renderPage(`This page is a Tov program: <a href="${repo}/blob/main/site/page.tov">site/page.tov</a> rendered it in <b>${renderMsMark} ms</b> when the site was built, and <a href="${repo}/blob/main/site/server.tov">site/server.tov</a> serves it too.`)
   const took = (performance.now() - t0).toFixed(2)
   try writeFileSync("dist/index.html", html.split(renderMsMark).join(took))
+  try writeFileSync("dist/llms.txt", renderLlms(try readFileSync("../docs/spec.md")))
   try copy("logo.svg")
+  try copy("install.sh")
   try copy("fonts/schibsted-grotesk.woff2")
-  console.log(`dist/: index.html (${took} ms), logo.svg, fonts/schibsted-grotesk.woff2`)
+  console.log(`dist/: index.html (${took} ms), llms.txt, install.sh, logo.svg, fonts/schibsted-grotesk.woff2`)
 }

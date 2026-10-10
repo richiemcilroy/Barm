@@ -4,7 +4,7 @@
 //   cd site && tov dev        (PORT defaults to 4747; `tov dev` restarts on every edit)
 
 import { readFileSync } from "node:fs"
-import { renderPage, renderMsMark, repo } from "./page"
+import { renderPage, renderLlms, renderMsMark, repo } from "./page"
 
 type Asset = { body: string, contentType: string }
 
@@ -15,6 +15,8 @@ function asset(name: string, contentType: string): Asset {
 const assets: Map<string, Asset> = new Map()
 assets.set("/logo.svg", try asset("logo.svg", "image/svg+xml"))
 assets.set("/fonts/schibsted-grotesk.woff2", try asset("fonts/schibsted-grotesk.woff2", "font/woff2"))
+assets.set("/install.sh", try asset("install.sh", "text/plain;charset=utf-8"))
+assets.set("/llms.txt", { body: renderLlms(try readFileSync("../docs/spec.md")), contentType: "text/plain;charset=utf-8" })
 
 // (this program's own size, for the footer)
 let binaryBytes = 0
