@@ -1,5 +1,6 @@
 // Insert N string keys into a string -> int map, then look every key up again.
 // The map is a plain open-addressing hash table (FNV-1a, linear probing, cached hashes, owned keys).
+#define _POSIX_C_SOURCE 200809L // strdup (glibc declares it only for POSIX under -std=c11)
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
