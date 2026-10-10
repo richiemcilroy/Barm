@@ -6,6 +6,9 @@
  * Errors: a failing call throws what Node.js throws, an Error with errno (negative), code,
  * syscall and path, and the message libuv gives ("ENOENT: no such file or directory, open 'x'"). */
 
+#ifndef __APPLE__
+#define _GNU_SOURCE 1   /* n_heap_stats() calls dlsym(RTLD_DEFAULT, ...), declared only under _GNU_SOURCE */
+#endif
 #include "js.h"
 
 #if defined(__APPLE__) && !defined(TV_JSC_OWN)
@@ -1574,8 +1577,18 @@ NATIVE(n_crypto_random_fill) {
     uint8_t *p;
     size_t len;
     if (n < 1 || !tv_js_bytes_view(a[0], &p, &len)) return undef(ctx);
+    /* tv_crypto->random is BoringSSL's RAND_bytes (runtime/crypto.c), linked into every
+     * program that imports an npm package. arc4random_buf() is only reached without it,
+     * and needs glibc 2.36+ (Ubuntu 22.04 ships 2.35, where it is undefined at link time). */
     if (tv_crypto) tv_crypto->random(p, len);
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || \
+    (defined(__GLIBC__) && __GLIBC_PREREQ(2, 36))
     else arc4random_buf(p, len);
+#else
+    else {
+        for (size_t i = 0; i < len; i++) p[i] = (uint8_t)((uint64_t)tv_random() & 0xffu);
+    }
+#endif
     return undef(ctx);
 }
 
