@@ -178,7 +178,7 @@ function renderBench(): string {
 
 // ---------------------------------------------------------------- Cap
 
-// capcodec, Cap's H.264 screen encoder written in Tov, against x264 at its veryfast preset at the
+// capcodec, an experimental H.264 screen encoder for Cap written in Tov, against x264 at its veryfast preset at the
 // same quality (VMAF): how many times faster, wall time on one thread, live preset (Cap's
 // apps/media-server/capcodec-benchmarks.md, main 00fecf7)
 type Clip = { name: string, speedup: f64 }
@@ -526,13 +526,13 @@ export function renderPage(footer: string): string {
     <section id="cap">
       <div class="cap-head">
         <p class="pair" aria-hidden="true">${capLogo}<span>×</span><img src="/logo.svg" alt="" width="55" height="44"></p>
-        <h2>Cap with Tov</h2>
-        <p class="intro">Cap is an open-source screen recorder. Two parts of its video pipeline run on Tov: a new encoder written in Tov, and its media server, compiled by Tov as it is.</p>
+        <h2>Cap with Tov, an experiment</h2>
+        <p class="intro">Cap is an open-source screen recorder. Two parts of its video pipeline have been tried on Tov: a new encoder written in Tov, and its media server, compiled by Tov as it is. Both are experiments: <strong>Cap doesn't run on Tov in production yet.</strong></p>
       </div>
       <div class="cap-grid">
         <article class="cap-card enc">
-          <h3>A faster video encoder</h3>
-          <p>Every Cap recording is encoded to H.264 video. Cap wrote a new encoder for it in Tov, made for what's on a screen, and compared it with x264, the standard encoder, at the same picture quality.</p>
+          <h3>An experimental video encoder</h3>
+          <p>Every Cap recording is encoded to H.264 video. An experimental encoder for it, written in Tov and made for what's on a screen, was compared with x264, the standard encoder, at the same picture quality. <a href="https://github.com/CapSoftware/Cap/tree/capcodec-encoder-aa45/capcodec">The encoder is on GitHub</a>.</p>
           <p class="cap-big"><b>5.2×</b><span>faster than x264, on average</span></p>
           ${renderClips()}
           <dl class="cap-stats">
@@ -542,8 +542,8 @@ export function renderPage(footer: string): string {
           <p class="cap-fine">12 screen recordings at 1080p, on one thread, against x264's veryfast preset. <a href="https://github.com/CapSoftware/Cap/blob/capcodec-encoder-aa45/apps/media-server/capcodec-benchmarks.md">Every result</a>.</p>
         </article>
         <article class="cap-card ms">
-          <h3>The same server, on Tov</h3>
-          <p>Cap's media server reads uploaded videos and pulls out their audio. It's a TypeScript app written for Bun, with npm packages and FFmpeg. Tov runs it without changing its code: this file is the whole port.</p>
+          <h3>Its media server, in a benchmark</h3>
+          <p>Cap's media server reads uploaded videos and pulls out their audio. It's a TypeScript app written for Bun, with npm packages and FFmpeg. In a benchmark, Tov runs it without changing its code (this file is the whole port), though Cap still serves it with Bun.</p>
           <pre class="code">${npmExample}</pre>
           <ul class="facts">
             <li><b>105 ms</b><span>to start (Bun: 132)</span></li>
