@@ -206,6 +206,32 @@ section { padding: 144px 0 0; }
 h2 { font-size: clamp(1.75rem, 3.2vw, 2.375rem); line-height: 1.1; letter-spacing: -.035em; font-weight: 700; margin: 0 0 14px; max-width: 24ch; text-wrap: balance; }
 .intro { color: var(--ink-2); margin: 0 0 40px; max-width: 36rem; }
 
+/* ---- how a build works: the stages, and the picked one */
+.build { position: relative; }
+.stage-pick { position: absolute; opacity: 0; pointer-events: none; }
+.flow { list-style: none; margin: 0 0 14px; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 28px; }
+.flow li { position: relative; min-width: 0; }
+/* (the arrow from each stage to the next) */
+.flow li + li::before { content: ""; position: absolute; left: -24px; top: 50%; width: 20px; height: 1px; background: var(--ink-3); }
+.flow li + li::after { content: ""; position: absolute; left: -9px; top: calc(50% - 3.5px); border: 3.5px solid transparent; border-left: 5px solid var(--ink-3); }
+.flow label { display: grid; grid-template-columns: auto 1fr; grid-template-rows: auto auto; column-gap: 10px; align-items: center; cursor: pointer; padding: 11px 14px; border: 1px solid var(--rule); border-radius: 12px; background: var(--sunk); transition: border-color .2s ease, background .2s ease; }
+.flow label:hover { border-color: var(--ink-3); }
+.fl-n { grid-row: span 2; display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: var(--bar); color: var(--ink-2); font-size: .75rem; font-weight: 600; transition: background .2s ease, color .2s ease; }
+.flow b { font-size: .9375rem; font-weight: 600; line-height: 1.2; }
+.flow i { font-style: normal; font-size: .8125rem; color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fps { background: var(--panel); border: 1px solid var(--rule); border-radius: 16px; overflow: hidden; }
+.fp { display: none; grid-template-columns: minmax(0, .85fr) minmax(0, 1.15fr); }
+.fp-text { padding: 24px 26px; }
+.fp-text h3 { margin: 0 0 10px; font-size: 1rem; font-weight: 600; }
+.fp-text p { margin: 0; color: var(--ink-2); font-size: .9375rem; }
+.fp pre { margin: 0; padding: 24px 26px; border-left: 1px solid var(--rule); background: var(--sunk); white-space: pre; overflow-x: auto; line-height: 1.6; font-size: .8125rem; color: var(--ink); }
+.fp .k { color: var(--blue); }
+.fp .s { color: var(--green); }
+.fp .d { color: var(--ink-3); }
+.fp .e { color: var(--red); }
+.fp .f { color: var(--green); }
+.fp .a { color: var(--crust-ink); }
+
 .loop {
   background: var(--panel); border: 1px solid var(--rule); border-radius: 16px;
   display: grid; grid-template-columns: 1.05fr 1.15fr .9fr; overflow: hidden;
@@ -340,6 +366,10 @@ footer b { color: var(--ink-2); font-variant-numeric: tabular-nums; font-weight:
 
 @media (max-width: 900px) {
   .loop { grid-template-columns: 1fr; }
+  .flow { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .flow li::before, .flow li::after { display: none; }
+  .fp { grid-template-columns: minmax(0, 1fr); }
+  .fp pre { border-left: 0; border-top: 1px solid var(--rule); }
   .step + .step { border-left: 0; border-top: 1px solid var(--rule); }
   .reasons, .cap-grid, .status, .start { grid-template-columns: minmax(0, 1fr); gap: 32px; }
   .cap-grid { gap: 16px; }

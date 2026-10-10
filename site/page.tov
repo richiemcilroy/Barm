@@ -279,6 +279,99 @@ const npmExample = [
   `}`,
 ].join("\n")
 
+// ---------------------------------------------------------------- how a build works
+
+// One program through the compiler, stage by stage: what goes in, what each stage makes of it
+// (real output: tov check, tov build --emit-c trimmed and with its generated names shortened, and
+// tov build --time on an M4 Max).
+type Stage = { id: string, name: string, metric: string, title: string, body: string, art: string }
+
+const stages: Stage[] = [
+  {
+    id: "src",
+    name: "TypeScript",
+    metric: "shapes.tov",
+    title: "Your agent writes TypeScript",
+    body: "Tov reads TypeScript's syntax and types, with <code>int</code> and <code>f64</code> for numbers, and Bun's and Node's APIs. It leaves out what makes a program hard to follow: <code>any</code>, <code>null</code> and <code>==</code>.",
+    art: [
+      `<span class="k">type</span> Shape =`,
+      `  | { kind: <span class="s">"circle"</span>, r: <span class="k">f64</span> }`,
+      `  | { kind: <span class="s">"rect"</span>, w: <span class="k">f64</span>, h: <span class="k">f64</span> }`,
+      ``,
+      `<span class="k">function</span> area(s: Shape): <span class="k">f64</span> {`,
+      `  <span class="k">switch</span> (s.kind) {`,
+      `    <span class="k">case</span> <span class="s">"circle"</span>:`,
+      `      <span class="k">return</span> Math.PI * s.r * s.r`,
+      `    <span class="k">case</span> <span class="s">"rect"</span>:`,
+      `      <span class="k">return</span> s.w * s.h`,
+      `  }`,
+      `}`,
+    ].join("\n"),
+  },
+  {
+    id: "check",
+    name: "Check",
+    metric: "0.3 ms",
+    title: "Tov checks every line",
+    body: "The checker, written in Rust, catches what TypeScript lets through: a call that can fail without <code>try</code>, a value shared where it should be copied, a <code>switch</code> that misses a case. Each error has a code and the edit that fixes it, which <code>tov check --json</code> hands to your agent.",
+    art: [
+      `<span class="d">// without the "rect" case</span>`,
+      `<span class="d">$</span> tov check shapes.tov`,
+      `<span class="e">error[F0301]</span> shapes.tov:6:11: \`switch\` is not`,
+      `  exhaustive: missing <span class="s">"rect"</span>`,
+      `    6 |   switch (s.kind) {`,
+      `  <span class="f">fix</span>: add case <span class="s">"rect"</span>`,
+    ].join("\n"),
+  },
+  {
+    id: "c",
+    name: "C",
+    metric: "0.2 ms",
+    title: "It writes the program as C",
+    body: "The whole program becomes one C file. Records become structs and a union becomes a tagged union, so <code>switch (s.kind)</code> is a switch on an integer. Values are reference-counted, with the counting written into the C, so there's no garbage collector to pause the program.",
+    art: [
+      `<span class="k">struct</span> Shape {`,
+      `    <span class="k">uint32_t</span> tag;`,
+      `    <span class="k">union</span> { Circle m0; Rect m1; } u;`,
+      `};`,
+      ``,
+      `<span class="k">static double</span> area(Shape s) {`,
+      `    <span class="k">switch</span> (s.tag) {`,
+      `    <span class="k">case</span> 0: <span class="k">return</span> 3.141592653589793 * s.u.m0.r * s.u.m0.r;`,
+      `    <span class="k">case</span> 1: <span class="k">return</span> s.u.m1.w * s.u.m1.h;`,
+      `    }`,
+      `}`,
+    ].join("\n"),
+  },
+  {
+    id: "bin",
+    name: "Binary",
+    metric: "55 ms · 34 KB",
+    title: "clang makes one binary",
+    body: "clang compiles that C with Tov's runtime, a C library with the event loop, the HTTP server and client, and Tov's strings, arrays and maps. The runtime is compiled once and cached, so most of a build is clang's. A program that imports an npm package also carries the package and JavaScriptCore, the engine Bun uses, to run it.",
+    art: [
+      `<span class="d">$</span> tov build shapes.tov --time`,
+      `check 0.3 ms, generate 0.2 ms, C compile 55 ms`,
+      `build: shapes`,
+      `<span class="d">$</span> ls -lh shapes`,
+      `<span class="a">34K</span> shapes`,
+      `<span class="d">$</span> ./shapes`,
+      `circle: 3.14`,
+      `rect: 6.00`,
+    ].join("\n"),
+  },
+]
+
+// The pipeline: a row of stages to pick from, and the picked one's story beside what it makes
+// (no script: radio inputs and :checked, as the race does).
+function renderBuild(): string {
+  const inputs = stages.map((st, i) => `<input type="radio" name="stage" id="stage-${st.id}" class="stage-pick"${i === 0 ? " checked" : ""}>`).join("")
+  const flow = stages.map((st, i) => `<li><label for="stage-${st.id}"><span class="fl-n">${i + 1}</span><b>${st.name}</b><i>${st.metric}</i></label></li>`).join("")
+  const panels = stages.map(st => `<div class="fp fp-${st.id}"><div class="fp-text"><h3>${st.title}</h3><p>${st.body}</p></div><pre>${st.art}</pre></div>`).join("")
+  const rules = stages.map(st => `#stage-${st.id}:checked ~ .fps .fp-${st.id} { display: grid; } #stage-${st.id}:checked ~ .flow label[for="stage-${st.id}"] { border-color: var(--crust); background: var(--panel); box-shadow: 0 1px 2px rgba(0,0,0,.06); } #stage-${st.id}:checked ~ .flow label[for="stage-${st.id}"] .fl-n { background: var(--crust); color: #26262B; } #stage-${st.id}:focus-visible ~ .flow label[for="stage-${st.id}"] { outline: 2px solid var(--crust); outline-offset: 2px; }`).join("\n")
+  return `<style>${rules}</style><div class="build">${inputs}<ol class="flow" aria-label="What tov build does">${flow}</ol><div class="fps">${panels}</div></div>`
+}
+
 // small: copying, and the singalong (singalong.js, with the song, fetched only when it's asked for)
 const script = `
 let sing;
@@ -391,6 +484,12 @@ export function renderPage(footer: string): string {
 
       ${renderRaces()}
     </div>
+
+    <section id="how">
+      <h2>What happens when Tov builds a program</h2>
+      <p class="intro">Tov is a compiler. It checks the TypeScript your agent wrote, writes it out as C and hands that to clang, so what you ship is one native binary with nothing to install next to it.</p>
+      ${renderBuild()}
+    </section>
 
     <section id="agents">
       <h2>From your agent's first try to a binary</h2>
