@@ -10,34 +10,35 @@ here first, then `bench/npm/run.py`.
 | `service` | an HTTP server validating each request's JSON body with zod (Tov's server against `Bun.serve`), driven by `bench/http`'s load generator (64 connections, 4 threads, 5 s) |
 
 How Tov runs npm code: the packages are bundled when the program is built (resolved like
-Node.js; ES modules, TypeScript and JSX converted), embedded in the binary, and run on the
-system's JavaScriptCore (the engine Bun uses), each module compiled when it's first required.
+Node.js; ES modules, TypeScript and JSX converted), embedded in the binary, and run on Tov's own
+build of JavaScriptCore (`scripts/jsc`; the engine Bun uses, linked into the program), each
+module compiled when it's first required.
 Calls go through runtime/js.c: numbers, booleans and `undefined` cross without engine calls, and
 a JavaScript expression in Tov code (`User.safeParse({ name, age })`) compiles to one engine call.
 
 ## Results
 
-Apple M4 Max, macOS, Bun 1.3. These runs were on a busy machine (load average 3 to 5), so read
-them as indicative. macOS caps loopback HTTP at about 180k round trips/s, which hides
-differences in req/s; cpu/req is the measure that shows them.
+Medians of 3 runs, Bun 1.4.0, from `bench/results/npm-20261011-013402.json` (macOS) and a run on Linux.
 
-| | Tov | Bun |
-|---|---:|---:|
-| startup | 9.6 ms | 9.9 ms |
-| startup memory (RSS) | 15.1 MB | 16.5 MB |
-| 1M zod calls | 195 ms | 97 ms |
-| service req/s | 162k | 130k |
-| service cpu/req | **6.3 µs** | 8.0 µs |
-| service p99 | 735 µs | 983 µs |
-| service memory (RSS) | 43 MB | 48 MB |
-| binary size | **2.4 MB** | 64 MB (`bun build --compile`) |
-| rebuild after an edit | **83 ms** | 483 ms (`bun build --compile`) |
+| | macOS (M4 Max): Tov | Bun | Linux (x86-64, Ryzen 9950X): Tov | Bun |
+|---|---:|---:|---:|---:|
+| startup | 11.5 ms | **10.1 ms** | 11.3 ms | **8.4 ms** |
+| startup memory (RSS) | 22.5 MB | **16.5 MB** | 26.5 MB | **20.3 MB** |
+| 1M zod calls | 146 ms | **104 ms** | 280 ms | **211 ms** |
+| service req/s | **141k** | 116k | **233k** | 154k |
+| service CPU per request | **7.1 µs** | 8.9 µs | **4.4 µs** | 6.9 µs |
+| service p99 | **810 µs** | 1,071 µs | **517 µs** | 914 µs |
+| service memory (RSS) | 50.6 MB | **47.4 MB** | **47.1 MB** | 52.3 MB |
+| binary size | **30 MB** | 64 MB | **38 MB** | 83 MB (`bun build --compile`) |
+| rebuild after an edit | **132 ms** | 144 ms | **391 ms** | 1,261 ms (`bun build --compile`) |
+
+On macOS the load generator and loopback, not the servers, set the ceiling on req/s; CPU per
+request is the measure that tells the servers apart there.
 
 Where Tov is behind:
 - The call-heavy loop. Each call into JavaScript costs about 40 ns of engine entry and exit,
   and Bun has no such boundary. In a service, a request crosses once or twice, and Tov's
   server more than makes up for it.
-- Startup is at parity. JavaScriptCore's JIT setup (about 1.6 ms at launch) and the system
-  framework's load are the floor. JavaScriptCore's bytecode cache isn't open to programs
-  outside Apple's sandbox ("data vault" directories), so modules are compiled on each run,
-  lazily.
+- Startup and its memory. The engine is linked into the program, so its code is paged in from
+  the binary as it starts (the system's JavaScriptCore, `TOV_JSC=system`, is already in memory:
+  10.4 ms and 15 MB on macOS).

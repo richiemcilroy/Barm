@@ -1,0 +1,38 @@
+{
+ "startup (ms)": {
+  "tov": 11.449625017121434,
+  "bun": 10.066625021863729
+ },
+ "startup rss (MB)": {
+  "tov": 22.5,
+  "bun": 16.453125
+ },
+ "1M zod calls (ms)": {
+  "tov": 146,
+  "bun": 104
+ },
+ "service req/s": {
+  "tov": 141405,
+  "bun": 116303
+ },
+ "service cpu/req (us)": {
+  "tov": 7.095458670721215,
+  "bun": 8.884838166971903
+ },
+ "service p99 (us)": {
+  "tov": 810,
+  "bun": 1071
+ },
+ "service rss (MB)": {
+  "tov": 50.5625,
+  "bun": 47.359375
+ },
+ "binary (MB)": {
+  "tov": 30.139999,
+  "bun": 64.04261
+ },
+ "rebuild after an edit (ms)": {
+  "tov": 131.8661670666188,
+  "bun": 144.08724999520928
+ }
+}
