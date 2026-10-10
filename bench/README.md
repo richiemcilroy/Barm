@@ -18,8 +18,11 @@ Languages: `c`, `rust`, `node` and `bun` (both run `main.ts` directly), `scriptc
 | `nbody` | 10M steps | Benchmarks Game n-body (5 bodies): f64 arithmetic, `sqrt`, in-place mutation of records inside an array (`inout` in Tov). Prints energy before and after to 9 decimals. |
 | `sort` | 3M `f64` | Park–Miller LCG (`state = state * 16807 % 2147483647`, exact in both 64-bit ints and JS doubles), then sort with a comparator. Prints min, max and the sum of every 1000th element. |
 | `strings` | 3M strings | Template literals / formatting, `join(",")`, `split(",")`, `endsWith`, and byte lengths. |
+| `json` | 200k records × 5 | `JSON.stringify` an array of records, then parse it back typed (Tov validates the shape; Rust uses serde and serde_json). |
+| `async_calls` | 30M awaits | `total = await step(total, i)`: calling an async function and awaiting its result. Rust uses tokio's current-thread runtime. |
+| `async_tasks` | 1,000 × 10,000 | 1,000 async tasks each yielding to the event loop 10,000 times (`await Promise.resolve(0)`; Rust: `tokio::task::yield_now()` on the current-thread runtime), then `Promise.all`. |
 
-Each `bench/micro/<name>/` holds `main.c`, `main.rs`, `main.ts`, `main.tov` and `expected.txt` (C's output, used as the reference when C isn't among the selected languages). Sizes are chosen so the C version takes roughly 0.2–1.5 s on an Apple M-series machine. The exception is `array_push`, where C takes about 55 ms. The work is memory-bound, and reaching 200 ms would need about 1 GB of array in C and about 3 GB of heap in Node/Bun.
+Each `bench/micro/<name>/` holds `main.c`, `main.rs`, `main.ts`, `main.tov` and `expected.txt` (C's output, used as the reference when C isn't among the selected languages). Where idiomatic Rust needs crates (tokio, serde), the Rust is a Cargo project in `rust/` instead of `main.rs`, and there's no C. Sizes are chosen so the C version takes roughly 0.2–1.5 s on an Apple M-series machine. The exception is `array_push`, where C takes about 55 ms. The work is memory-bound, and reaching 200 ms would need about 1 GB of array in C and about 3 GB of heap in Node/Bun.
 
 ## Running
 
@@ -39,7 +42,7 @@ How each language is built and run:
 | Lang | Build | Run |
 |---|---|---|
 | c | `cc -std=c11 -O2 main.c -lm` | the binary |
-| rust | `rustc --edition 2021 -C opt-level=3 main.rs` (no Cargo, no deps) | the binary |
+| rust | `rustc --edition 2021 -C opt-level=3 main.rs` (no Cargo, no deps); a `rust/` Cargo project with `cargo build --release` (LTO, one codegen unit), its crates built first and not timed | the binary |
 | rust-checked | as `rust`, plus `-C overflow-checks=on` (Tov's default integer semantics) | the binary |
 | node | — | `node main.ts` (Node ≥ 23.6 strips types natively) |
 | bun | — | `bun main.ts` |

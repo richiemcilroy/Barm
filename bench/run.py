@@ -161,11 +161,34 @@ def build_c(src: Path, out: Path, a) -> Build:
 
 
 def build_rust(src: Path, out: Path, a, checked: bool = False) -> Build:
+    if src.parent.name == "src":
+        return build_cargo(src.parent.parent, out, a, checked)
     rustc = which("rustc")
     if rustc is None:
         raise Skip("skipped", "no `rustc` on PATH")
     extra = ["-C", "overflow-checks=on"] if checked else []
     secs, size = compile_cmd([rustc, "--edition", "2021", "-C", "opt-level=3", *extra, "-o", str(out), str(src)], out, a.build_timeout)
+    return Build([str(out)], secs, size, stripped_size(out))
+
+
+def build_cargo(crate: Path, out: Path, a, checked: bool) -> Build:
+    """A benchmark whose Rust needs crates (tokio, serde): bench/micro/<name>/rust/, built with
+    Cargo. Its crates are built first, untimed, as Tov's runtime is: the time is the program's
+    own release build, as after an edit to it."""
+    cargo = which("cargo")
+    if cargo is None:
+        raise Skip("skipped", "no `cargo` on PATH")
+    target = BUILD_DIR / ("cargo-checked" if checked else "cargo")
+    env = dict(os.environ, CARGO_TARGET_DIR=str(target))
+    if checked:
+        env["CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS"] = "true"
+    cmd = [cargo, "build", "--release", "--quiet", "--manifest-path", str(crate / "Cargo.toml")]
+    built = target / "release" / (crate.parent.name + EXE_SUFFIX)
+    compile_cmd(cmd, built, a.build_timeout, env)
+    os.utime(crate / "src" / "main.rs")
+    secs, size = compile_cmd(cmd, built, a.build_timeout, env)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(built, out)
     return Build([str(out)], secs, size, stripped_size(out))
 
 
@@ -308,8 +331,16 @@ def run_once(cmd: list[str], timeout: float) -> tuple[float, int, int, str, str,
     return elapsed, rss, proc.returncode, stdout, stderr, timed_out.is_set()
 
 
-def bench_one(bench: str, lang: str, a, expected: str | None) -> Result:
+def source(bench: str, lang: str) -> Path:
     src = MICRO_DIR / bench / SOURCE[lang]
+    # (Rust that needs crates is a Cargo project: rust/src/main.rs)
+    if lang.startswith("rust") and not src.exists():
+        return MICRO_DIR / bench / "rust" / "src" / "main.rs"
+    return src
+
+
+def bench_one(bench: str, lang: str, a, expected: str | None) -> Result:
+    src = source(bench, lang)
     r = Result(bench, lang)
     if not src.exists():
         r.status, r.reason = "skipped", f"no {SOURCE[lang]} for this benchmark"
