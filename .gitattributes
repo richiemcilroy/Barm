@@ -1,0 +1,2 @@
+# Use TypeScript syntax highlighting for Tov source files on GitHub.
+*.tov linguist-language=TypeScript
