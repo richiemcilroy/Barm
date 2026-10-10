@@ -137,6 +137,7 @@ static size_t tv_size_mul_add(size_t a, size_t b, size_t c) {
  * big itself.) */
 #if defined(__APPLE__) && !(defined(__SANITIZE_ADDRESS__) || (defined(__has_feature) && __has_feature(address_sanitizer)))
 #include <malloc/malloc.h>
+#define TV_SB_MAPS 1
 #define TV_SB_MAPPED(cap) ((cap) >= ((size_t)128 << 10))
 /* A mapped builder holding this much becomes its string as it is (tv_str_from_sb); the string is
  * unmapped when released (tv_str_release_slow: malloc doesn't own it). Less is copied out. */
@@ -625,7 +626,7 @@ static tv_strbuf *tv_strbuf_new(size_t n) {
 void tv_str_release_slow(tv_str s) {
     size_t size = tv_strbuf_size((size_t)s.p->len);
     if (size <= TV_SMALL_MAX) tv_small_free(s.p, size);
-#ifdef __APPLE__
+#ifdef TV_SB_MAPS
     else if (TV_STR_MAYBE_MAPPED(size) && malloc_size(s.p) == 0) {
         size_t page = (size_t)getpagesize();
         tv_sb_unmap((char *)s.p, (size + page - 1) & ~(page - 1));
