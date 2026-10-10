@@ -3643,14 +3643,19 @@ void tv_native_timerUnref(tv_int id) {
     }
 }
 
+/* A timer that ran for less than this (with its microtasks) isn't the program at work either: it
+ * doesn't put off giving memory back. Programs leave such timers behind (a race's spare timeout,
+ * resolving a promise long settled: Cap's media server leaves one per ffmpeg it runs, firing 5 s
+ * later), and npm code's take tens of µs each (Node.js's timer lists run in JavaScript). */
+#define TV_LOOP_TIMER_WORK_NS 1000000
+
 /* Fires every timer that is due, each followed by the microtasks it queued (as Node). */
 static void tv_fire_timers(void) {
     uint64_t now = tv_loop_update();
     while (tv_ntimers && tv_timers[0].when <= now) {
         tv_timer t = tv_timer_pop();
         if (!t.cb.fn) continue;
-        /* (an unref'd timer firing, like AbortSignal.timeout's, isn't the program at work) */
-        if (!t.weak) tv_loop_work(now);
+        uint64_t t0 = tv_mono_ns();
         void (*fn)(tv_env *) = (void (*)(tv_env *))t.cb.fn;
         if (t.every) {
             tv_env_retain(t.cb.env);   /* the call's own reference: clearInterval may run inside it */
@@ -3665,6 +3670,8 @@ static void tv_fire_timers(void) {
             tv_env_release(t.cb.env);
         }
         tv_run_microtasks();
+        /* (an unref'd timer firing, like AbortSignal.timeout's, isn't the program at work) */
+        if (!t.weak && tv_mono_ns() - t0 >= TV_LOOP_TIMER_WORK_NS) tv_loop_work(now);
     }
 }
 
