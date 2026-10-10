@@ -113,7 +113,7 @@ h1 span + span { color: var(--ink-3); }
 .actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
 
 @media (prefers-reduced-motion: no-preference) {
-  h1 span, .lede, .actions, .race {
+  .sing, h1 span, .lede, .actions, .race {
     animation: rise 1s cubic-bezier(.2, .8, .2, 1) both;
   }
   h1 span + span { animation-delay: .08s; }
@@ -138,29 +138,18 @@ h1 span + span { color: var(--ink-3); }
 .copy.small { padding: 6px 10px; font-size: .8125rem; border-radius: 7px; color: var(--ink-2); }
 .copy.small:hover { color: var(--ink); border-color: var(--ink-3); }
 .copy.done { background: var(--green); border-color: var(--green); color: var(--paper); }
-.sing { display: inline-flex; align-items: center; gap: 12px; padding: 6px 18px 6px 6px; border-radius: 999px; background: var(--panel); border: 1px solid var(--rule); color: var(--ink); text-decoration: none; line-height: 1.15; box-shadow: 0 1px 2px rgba(0,0,0,.04); transition: transform .25s cubic-bezier(.2,.8,.2,1), box-shadow .25s ease, border-color .25s ease; }
-.sing:hover { transform: translateY(-2px); border-color: var(--crust); box-shadow: 0 8px 24px rgba(228,169,90,.22); }
-.sing:active { transform: translateY(0) scale(.98); }
-.sing-disc { position: relative; display: grid; place-items: center; width: 40px; height: 40px; flex: none; border-radius: 50%; background: var(--crust); color: #26262B; transition: transform .3s cubic-bezier(.2,.8,.2,1); }
-.sing-disc svg { width: 15px; height: 15px; margin-left: 2px; }
-/* (a ring that pulses out from the disc, like a beat) */
-.sing-disc::after { content: ""; position: absolute; inset: 0; border-radius: 50%; border: 2px solid var(--crust); opacity: 0; }
-.sing:hover .sing-disc { transform: scale(1.08); }
-.sing-text { display: grid; gap: 2px; }
-.sing-text b { font-weight: 650; font-size: .9375rem; letter-spacing: -.01em; }
-.sing-text small { font-size: .75rem; color: var(--ink-3); }
-.sing-eq { display: flex; align-items: flex-end; gap: 3px; height: 18px; margin-left: 4px; }
-.sing-eq i { width: 3px; height: 100%; border-radius: 2px; background: var(--crust); transform-origin: 50% 100%; transform: scaleY(.3); }
+.sing { display: inline-flex; align-items: center; gap: 9px; margin: 0 0 26px; padding: 6px 14px 6px 12px; border-radius: 999px; border: 1px solid var(--rule); background: var(--panel); color: var(--ink-2); font-size: .875rem; font-weight: 500; line-height: 1.2; text-decoration: none; transition: color .2s ease, border-color .2s ease; }
+.sing:hover { color: var(--ink); border-color: var(--ink-3); }
+.sing-go { color: var(--ink-3); transition: transform .2s ease, color .2s ease; }
+.sing:hover .sing-go { transform: translateX(3px); color: var(--ink); }
+.sing-eq { display: flex; align-items: flex-end; gap: 2px; height: 12px; }
+.sing-eq i { width: 2.5px; height: 100%; border-radius: 1px; background: var(--crust); transform-origin: 50% 100%; transform: scaleY(.45); }
 @media (prefers-reduced-motion: no-preference) {
-  .sing-disc::after { animation: sing-ring 2.4s cubic-bezier(.2,.8,.2,1) infinite; }
   .sing-eq i { animation: sing-eq .9s ease-in-out infinite alternate; }
-  .sing-eq i:nth-child(2) { animation-duration: .7s; animation-delay: -.3s; }
-  .sing-eq i:nth-child(3) { animation-duration: 1.1s; animation-delay: -.5s; }
-  .sing-eq i:nth-child(4) { animation-duration: .8s; animation-delay: -.15s; }
-  .sing:hover .sing-eq i { animation-duration: .32s; }
+  .sing-eq i:nth-child(2) { animation-duration: .65s; animation-delay: -.3s; }
+  .sing-eq i:nth-child(3) { animation-duration: 1.05s; animation-delay: -.5s; }
 }
-@keyframes sing-ring { 0% { opacity: .55; transform: scale(1); } 70%, 100% { opacity: 0; transform: scale(1.7); } }
-@keyframes sing-eq { from { transform: scaleY(.25); } to { transform: scaleY(1); } }
+@keyframes sing-eq { from { transform: scaleY(.3); } to { transform: scaleY(1); } }
 .install { display: flex; align-items: center; gap: 10px; background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; padding: 5px 5px 5px 16px; max-width: 100%; }
 .install code { font-size: .875rem; white-space: nowrap; overflow-x: auto; color: var(--ink); }
 .install .d { color: var(--ink-3); }
