@@ -363,6 +363,8 @@ footer .wrap { display: flex; gap: 14px; align-items: center; }
 footer img { width: 36px; height: auto; flex: none; }
 footer p { margin: 0; color: var(--ink-3); font-size: .875rem; }
 footer b { color: var(--ink-2); font-variant-numeric: tabular-nums; font-weight: 600; }
+footer .foot { display: grid; gap: 4px; }
+footer .by { color: var(--ink-2); }
 
 @media (max-width: 900px) {
   .loop { grid-template-columns: 1fr; }

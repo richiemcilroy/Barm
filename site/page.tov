@@ -599,7 +599,10 @@ export function renderPage(footer: string): string {
 <footer>
   <div class="wrap">
     <img src="/logo.svg" alt="" width="44" height="35">
-    <p>${footer}</p>
+    <div class="foot">
+      <p class="by">From the team behind <a href="https://cap.so">Cap</a>, the open-source screen recorder.</p>
+      <p>${footer}</p>
+    </div>
   </div>
 </footer>
 <script>${script}</script>
