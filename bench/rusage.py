@@ -3,9 +3,10 @@
     argv, report = rusage.wrap(argv)   # run argv instead; on Linux, in a session of its own
     rss_bytes, cpu_s = rusage.read(report, ru)   # after it exits: ru is os.wait4's rusage
 
-On macOS a child's own rusage is right, and argv runs as it is.
+On macOS a child's own rusage is right, and argv runs as it is. For a process that's still
+running: cpu(pid) and resident_mb(pid).
 """
-import os, subprocess, sys, tempfile
+import os, re, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, "rusage.c")
@@ -48,3 +49,24 @@ def read(report, ru):
     finally:
         if os.path.exists(report):
             os.unlink(report)
+
+
+def cpu(pid):
+    """A running process's own CPU seconds (user + system), to the clock tick on Linux (procps's
+    `ps` shows whole seconds there)."""
+    if sys.platform.startswith("linux"):
+        with open(f"/proc/{pid}/stat") as f:
+            fields = f.read().rsplit(")", 1)[1].split()
+        return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+    t = subprocess.run(["ps", "-o", "time=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    secs = 0.0
+    for x in t.replace("-", ":").split(":"):
+        secs = secs * 60 + float(x)
+    return secs
+
+
+def resident_mb(pid, peak=False):
+    """A running Linux process's resident set in MiB (VmRSS), or its peak so far (VmHWM)."""
+    with open(f"/proc/{pid}/status") as f:
+        m = re.search(r"^VmHWM:\s+(\d+) kB" if peak else r"^VmRSS:\s+(\d+) kB", f.read(), re.M)
+    return int(m.group(1)) / 1024 if m else None

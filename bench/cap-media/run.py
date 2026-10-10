@@ -18,6 +18,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 OUT = os.path.join(HERE, "out")
 MS = os.path.join(OUT, "ms")
+sys.path.insert(0, os.path.dirname(HERE))
+import rusage  # noqa: E402
 PORT = 37461
 MEDIA_PORT = 37490
 SECRET = "bench-secret"
@@ -94,7 +96,10 @@ RUNTIMES = {
 
 
 def footprint(pid, peak=False):
-    """The process's physical footprint in MB (macOS: what it costs the machine)."""
+    """The process's memory in MB: on macOS its physical footprint (what it costs the machine),
+    on Linux its resident set."""
+    if sys.platform.startswith("linux"):
+        return rusage.resident_mb(pid, peak)
     out = subprocess.run(["vmmap", "-summary", str(pid)], capture_output=True, text=True).stdout
     m = re.search(r"Physical footprint \(peak\):\s+([\d.]+)([KMG])" if peak else r"Physical footprint:\s+([\d.]+)([KMG])", out)
     if not m:
@@ -108,12 +113,7 @@ OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 def cpu(pid):
     """The process's own CPU time in seconds (user + system; not its children, e.g. ffmpeg)."""
-    t = subprocess.run(["ps", "-o", "time=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
-    parts = [float(x) for x in t.replace("-", ":").split(":")]
-    secs = 0.0
-    for x in parts:
-        secs = secs * 60 + x
-    return secs
+    return rusage.cpu(pid)
 
 
 def get(path, timeout=1):

@@ -5,7 +5,7 @@ reports medians.
 
   bench/npm/run.py [--repeat N]
 """
-import argparse, json, os, re, statistics, subprocess, sys, time
+import argparse, json, os, statistics, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
@@ -40,19 +40,12 @@ def rss_mb(cmd):
     return (rss or 0) / 1024 / 1024
 
 
-def cpu_s(pid):
-    out = subprocess.run(["ps", "-o", "time=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
-    m = re.match(r"(?:(\d+):)?(\d+):(\d+(?:\.\d+)?)", out)
-    h, mm, s = m.groups()
-    return int(h or 0) * 3600 + int(mm) * 60 + float(s)
-
-
 def service(cmd, port):
     p = subprocess.Popen(cmd, cwd=HERE, env={**os.environ, "PORT": str(port)}, stdout=subprocess.DEVNULL)
     time.sleep(1)
-    c0 = cpu_s(p.pid)
+    c0 = rusage.cpu(p.pid)
     out = sh([LOAD, "-j", "-c", "64", "-t", "4", "-d", "5", "-w", "1", "-m", "POST", "-b", BODY, f"http://127.0.0.1:{port}/"])
-    c1 = cpu_s(p.pid)
+    c1 = rusage.cpu(p.pid)
     rss = int(sh(["ps", "-o", "rss=", "-p", str(p.pid)]).strip()) / 1024
     p.kill()
     p.wait()
