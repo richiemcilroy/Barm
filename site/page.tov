@@ -393,7 +393,7 @@ export function renderPage(footer: string): string {
     </div>
 
     <section id="agents">
-      <h2>Your agent writes it. Tov fixes it. You ship it.</h2>
+      <h2>From your agent's first try to a binary</h2>
       <div class="loop" role="group" aria-label="How an agent works with Tov">
         <div class="step"><h3><span>1</span>Your agent writes TypeScript</h3><pre>${written}</pre></div>
         <div class="step"><h3><span>2</span>Tov says exactly what to fix</h3><pre>${checked}</pre></div>
