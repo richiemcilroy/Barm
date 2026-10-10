@@ -160,7 +160,7 @@ Programs that import npm packages link Tov's own build of JavaScriptCore when it
 
 ## Performance
 
-All numbers are from an Apple M4 Max. Each benchmark's README has its method, every result and its caveats.
+All numbers are from an Apple M4 Max. Each benchmark's README has its method, every result, its caveats and, for most, the same benchmark on Linux (x86-64).
 
 ### Programs
 
@@ -168,20 +168,23 @@ Median wall time and peak memory. Every language prints identical output ([bench
 
 | benchmark | C | Rust | Node | Bun | **Tov** |
 |---|---:|---:|---:|---:|---:|
-| binary_trees | 703 ms · 17.9 MB | 801 ms · 18.1 MB | 478 ms · 202 MB | 390 ms · 162 MB | **266 ms · 17.8 MB** |
-| class_trees | 705 ms · 17.9 MB | 812 ms · 18.1 MB | 468 ms · 201 MB | 381 ms · 215 MB | **266 ms · 17.8 MB** |
-| dispatch (virtual calls) | 83 ms · 1.8 MB | 83 ms · 2.0 MB | 211 ms · 81 MB | 113 ms · 25 MB | **39 ms** · 1.9 MB |
-| map_insert | 471 ms · 225 MB | 508 ms · 297 MB | 900 ms · 282 MB | 742 ms · 564 MB | **253 ms · 150 MB** |
-| nbody | 319 ms · 1.8 MB | 229 ms · 2.0 MB | 558 ms · 77 MB | 510 ms · 22 MB | **211 ms · 1.8 MB** |
-| sort | 282 ms · 24.7 MB | 75 ms · 38.5 MB | 1166 ms · 266 MB | 697 ms · 116 MB | **47 ms** · 25.0 MB |
-| strings | 261 ms · 206 MB | 228 ms · 251 MB | 505 ms · 664 MB | 203 ms · 568 MB | **136 ms · 159 MB** |
-| array_push | 54 ms · 233 MB | 64 ms · 233 MB | 360 ms · 742 MB | 221 ms · 579 MB | **49 ms · 231 MB** |
-| fib | 506 ms · 1.8 MB | 454 ms · 1.9 MB | 1505 ms · 75 MB | 970 ms · 18 MB | **425 ms · 1.8 MB** |
-| points | **319 ms** · 1.8 MB | 320 ms · 1.9 MB | 1960 ms · 83 MB | 885 ms · 30 MB | 320 ms · 1.8 MB |
+| binary_trees | 686 ms · 18.7 MB | 793 ms · 19.0 MB | 461 ms · 212 MB | 381 ms · 195 MB | **260 ms · 18.7 MB** |
+| class_trees | 690 ms · 18.7 MB | 793 ms · 19.0 MB | 467 ms · 210 MB | 371 ms · 223 MB | **259 ms · 18.7 MB** |
+| dispatch (virtual calls) | 76 ms · 1.9 MB | 76 ms · 2.1 MB | 201 ms · 82 MB | 109 ms · 27 MB | **39 ms · 1.9 MB** |
+| map_insert | 524 ms · 235 MB | 534 ms · 311 MB | 945 ms · 295 MB | 764 ms · 592 MB | **276 ms · 157 MB** |
+| json (stringify and parse) | — | 260 ms · 241 MB | 444 ms · 491 MB | 267 ms · 327 MB | **226 ms · 143 MB** |
+| nbody | 310 ms · 1.8 MB | 221 ms · 2.0 MB | 556 ms · 81 MB | 505 ms · 23 MB | **206 ms** · 1.9 MB |
+| sort | 268 ms · 26 MB | 73 ms · 40 MB | 1185 ms · 279 MB | 711 ms · 121 MB | **47 ms** · 26 MB |
+| strings | 254 ms · 216 MB | 230 ms · 263 MB | 517 ms · 701 MB | 208 ms · 592 MB | **155 ms · 192 MB** |
+| array_push | 51 ms · 244 MB | 59 ms · 244 MB | 347 ms · 780 MB | 207 ms · 814 MB | **48 ms · 242 MB** |
+| fib | 492 ms · 1.9 MB | 439 ms · 2.0 MB | 1500 ms · 78 MB | 948 ms · 18.8 MB | **427 ms · 1.9 MB** |
+| points | **288 ms** · 1.9 MB | 299 ms · 2.0 MB | 1891 ms · 87 MB | 815 ms · 32 MB | **288 ms · 1.8 MB** |
+| async_calls (awaited calls) | — | **14 ms** · 2.0 MB | 643 ms · 81 MB | 525 ms · 30 MB | 17 ms · 1.9 MB |
+| async_tasks (1,000 tasks) | — | **136 ms** · 2.3 MB | 353 ms · 97 MB | 179 ms · 31 MB | 137 ms · 2.5 MB |
 
-Tov checks for integer overflow by default (fib above); Rust with overflow checks takes 592 ms on fib. `points` is bound by floating-point add latency in all three compiled languages. Some differences are the libraries': Rust's `HashMap` hashes with SipHash (DoS-resistant and slower), and C's `qsort` calls its comparator through a function pointer.
+Tov checks for integer overflow by default; Rust's release builds don't. `points` is bound by floating-point add latency in all three compiled languages. The async benchmarks' Rust runs on tokio's single-threaded runtime, one core like the others. Some differences are the libraries': Rust's `HashMap` hashes with SipHash (DoS-resistant and slower), and C's `qsort` calls its comparator through a function pointer.
 
-Binaries are 34–35 KB (33 KB stripped, the same as C; Rust's are about 470 KB), and a build takes 0.04–0.07 s (C 0.04–0.05 s, Rust 0.08–0.16 s). Run them yourself with `python3 bench/run.py`.
+Binaries are 33 KB for most of these, the same as C (83 KB at most; Rust's are 330–370 KB stripped), and a build takes 0.04–0.11 s (C 0.04–0.06 s, Rust 0.08–0.23 s, or about 2 s with tokio or serde). Run them yourself with `python3 bench/run.py`.
 
 ### HTTP server
 
@@ -246,19 +249,19 @@ Requests per second on Linux (Docker), 128 keep-alive connections, JSON route, w
 
 | | Bun 1.4 | **Tov** |
 |---|---:|---:|
-| startup (exec to first `/health`) | 120 ms | **105 ms** |
-| idle memory | 50 MB | 51 MB |
-| `/health` (64 connections) | **35.3k req/s** | 33.3k req/s |
-| `/video/probe` (4 in flight) | **2,409/s** | 2,084/s |
-| CPU per probe | 794 µs | **579 µs** |
-| `/audio/extract` (an ffmpeg subprocess, streamed) | 25.5/s | 25.5/s |
-| peak memory under load | 143 MB | **129 MB** |
-| memory 3 s after the load | **64 MB** | 76 MB |
+| startup (exec to first `/health`) | 128 ms | **107 ms** |
+| idle memory | 50 MB | 50 MB |
+| `/health` (64 connections) | 33.1k req/s | **35.5k req/s** |
+| `/video/probe` (4 in flight) | **1,468/s** | 1,353/s |
+| CPU per probe | 1,248 µs | **881 µs** |
+| `/audio/extract` (an ffmpeg subprocess, streamed) | 19.6/s | 19.0/s |
+| peak memory under load | 136 MB | **126 MB** |
+| memory 3 s after the load | 65 MB | 66 MB |
 | failed requests | 0 | 0 |
 
-Tov does the media work on about a quarter less CPU than Bun, but with 4 probes in flight Bun finishes more of them each second: its `fetch()` client runs on a thread of its own, and Tov's runs on the event loop. Tov's binary is 34 MB with its engine and takes 3.8 s to build.
+Tov does the media work on less CPU than Bun (29% less per probe), but with 4 probes in flight Bun finishes 8% more of them each second: its `fetch()` client runs on a thread of its own, and Tov's runs on the event loop. Tov's binary is 36 MB with its engine and builds in 1.3 s with nothing cached.
 
-Where Tov is behind: a million calls from Tov into a small npm function (zod's `safeParse`) take 195 ms, against 97 ms when Bun runs the same program in JavaScript, because every call crosses from native code into the engine ([bench/npm/README.md](bench/npm/README.md)).
+Where Tov is behind: a million calls from Tov into a small npm function (zod's `safeParse`) take 146 ms, against 104 ms when Bun runs the same program in JavaScript, because every call crosses from native code into the engine; and a program using npm packages starts in 11.5 ms, against Bun's 10.1 ([bench/npm/README.md](bench/npm/README.md)).
 
 ## Development
 
