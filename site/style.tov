@@ -68,8 +68,34 @@ p code, li code, dd code { background: var(--track); padding: .1em .35em; border
 /* ---- header */
 header.top { display: flex; align-items: center; justify-content: space-between; padding: 22px 0; }
 .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font-weight: 800; font-size: 1.5rem; letter-spacing: -.035em; }
-.brand img { width: 50px; height: auto; transition: transform .5s cubic-bezier(.3, 1.6, .5, 1); }
-.brand:hover img { transform: translateX(4px) rotate(8deg); }
+/* the mascot (inline: its parts move on hover) */
+.hb { width: 50px; height: auto; overflow: visible; color: #1E2A66; }
+.hb-bird, .hb-wing, .hb-eye { transform-box: fill-box; }
+.hb-bird { transform-origin: 60% 60%; transition: transform .45s cubic-bezier(.3, 1.5, .5, 1); }
+.hb-wing { transform-origin: 92% 96%; }
+.hb-eye { transform-origin: center; }
+.hb-blur { opacity: 0; transition: opacity .2s ease; }
+.hb-lines path { stroke-dasharray: 20 0; }
+@media (prefers-color-scheme: dark) { .hb { color: #A8AECB; } }
+@media (prefers-reduced-motion: no-preference) {
+  .brand:hover .hb-bird { animation: hb-dart .5s cubic-bezier(.2, 1.4, .4, 1) both, hb-hover 1.2s ease-in-out .5s infinite; }
+  .brand:hover .hb-wing { animation: hb-flap .06s ease-in-out infinite alternate; }
+  .brand:hover .hb-blur { opacity: 1; }
+  .brand:hover .hb-lines path { stroke-dasharray: 7 5; animation: hb-stream .3s linear infinite; }
+  .brand:hover .hb-eye { animation: hb-blink 2.6s ease-in-out .9s infinite; }
+}
+@keyframes hb-dart {
+  0% { transform: translate(0, 0) rotate(0deg); }
+  45% { transform: translate(12px, -9px) rotate(-9deg); }
+  100% { transform: translate(8px, -6px) rotate(-5deg); }
+}
+@keyframes hb-hover {
+  0%, 100% { transform: translate(8px, -6px) rotate(-5deg); }
+  50% { transform: translate(8px, -11px) rotate(-2deg); }
+}
+@keyframes hb-flap { from { transform: rotate(-12deg) scale(1, 1); } to { transform: rotate(30deg) scale(.92, .55); } }
+@keyframes hb-stream { to { stroke-dashoffset: 24; } }
+@keyframes hb-blink { 0%, 90%, 100% { transform: scaleY(1); } 94% { transform: scaleY(.1); } }
 nav ul { display: flex; gap: 28px; list-style: none; margin: 0; padding: 0; font-size: 1rem; font-weight: 500; }
 nav a { text-decoration: none; color: var(--ink-2); }
 nav a:hover { color: var(--ink); }

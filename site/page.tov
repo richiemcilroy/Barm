@@ -202,6 +202,25 @@ for (const b of document.querySelectorAll("[data-copy]")) {
   });
 }`
 
+// The mascot, inline in the header so its parts can move: on hover it darts forward and hovers,
+// its wing beating too fast to see, its speed lines streaming and its eye blinking (style.tov).
+const bird = `<svg class="hb" viewBox="0 0 120 96" width="50" height="40" aria-hidden="true">
+<defs><filter id="hb-r" x="-20%" y="-20%" width="140%" height="140%"><feTurbulence type="fractalNoise" baseFrequency="0.022" numOctaves="2" seed="3"/><feDisplacementMap in="SourceGraphic" scale="1.6"/></filter></defs>
+<g filter="url(#hb-r)" stroke-linecap="round" stroke-linejoin="round">
+<g class="hb-lines"><path d="M6 50h12M2 62h14M10 74h8" fill="none" stroke="currentColor" stroke-width="4" opacity=".8"/></g>
+<g class="hb-bird">
+<path d="M40 68 L22 74 Q24 79 30 78 L26 84 Q31 87 35 83 L46 72 Z" fill="#E4A95A" stroke="#1E2A66" stroke-width="3"/>
+<g class="hb-blur"><path d="M58 40 Q44 20 48 6" fill="none" stroke="#1E2A66" stroke-width="2.4" opacity=".22"/><path d="M60 41 Q54 22 62 8" fill="none" stroke="#1E2A66" stroke-width="2.4" opacity=".22"/></g>
+<path d="M97 40 C97 27 89 21 79 21 C69 21 63 27 61 35 C53 42 42 52 37 63 C35 70 39 74 47 72 C62 70 80 63 93 50 C96 47 97 44 97 40 Z" fill="#E4A95A" stroke="#1E2A66" stroke-width="3.4"/>
+<path d="M48 69 C62 67 78 60 89 50" fill="none" stroke="#F4D6A2" stroke-width="5"/>
+<g class="hb-wing"><path d="M66 39 C54 35 40 26 33 12 C39 11 44 14 47 17 C46 11 47 7 50 5 C56 10 60 18 62 24 C64 20 67 18 70 18 C71 26 70 32 68 37 Z" fill="#FFF3DC" stroke="#1E2A66" stroke-width="3.1"/><path d="M47 18 C52 25 57 30 64 34 M62 25 C63 29 64 32 66 35" fill="none" stroke="#1E2A66" stroke-width="1.8" opacity=".35"/></g>
+<path d="M96 36 L118 30" fill="none" stroke="#1E2A66" stroke-width="3.6"/>
+<g class="hb-eye"><circle cx="84" cy="35" r="4.6" fill="#1E2A66"/><circle cx="85.7" cy="33.4" r="1.5" fill="#fff"/></g>
+<ellipse cx="81" cy="45" rx="5" ry="2.8" fill="#F08F8A" opacity=".7"/>
+</g>
+</g>
+</svg>`
+
 // ---------------------------------------------------------------- the page
 
 // The page, with `footer` (HTML) saying how it was made: served by site/server.tov, or written
@@ -225,7 +244,7 @@ export function renderPage(footer: string): string {
 <pre id="install" hidden>${installLine}</pre>
 <div class="wrap">
   <header class="top">
-    <a class="brand" href="/"><img src="/logo.svg" alt="" width="50" height="40">tov</a>
+    <a class="brand" href="/" aria-label="Tov, home">${bird}tov</a>
     <nav aria-label="Main">
       <ul>
         <li class="optional"><a href="#speed">Benchmarks</a></li>
