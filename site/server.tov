@@ -4,7 +4,7 @@
 //   cd site && tov dev        (PORT defaults to 4747; `tov dev` restarts on every edit)
 
 import { readFileSync } from "node:fs"
-import { renderPage, renderMsMark } from "./page"
+import { renderPage, renderMsMark, repo } from "./page"
 
 type Asset = { body: string, contentType: string }
 
@@ -26,10 +26,15 @@ try {
 
 let pagesServed = 0
 
+function kb(bytes: int): string {
+  return `${Math.round(bytes / 1024)} KB`
+}
+
 function page(): Response {
   pagesServed += 1
+  const pages = pagesServed === 1 ? "1 page" : `${pagesServed} pages`
   const t0 = performance.now()
-  const html = renderPage({ binaryBytes: binaryBytes, pagesServed: pagesServed })
+  const html = renderPage(`This page is a Tov program. <a href="${repo}/tree/main/site">site/server.tov</a> rendered it in <b>${renderMsMark} ms</b>, in a <b>${kb(binaryBytes)}</b> binary that has served <b>${pages}</b> since it started.`)
   const took = (performance.now() - t0).toFixed(2)
   return new Response(html.split(renderMsMark).join(took), {
     headers: { "content-type": "text/html;charset=utf-8", "cache-control": "no-cache" },
