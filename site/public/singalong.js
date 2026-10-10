@@ -51,7 +51,7 @@ const lines = LYRICS.map(([sec, ws], i) => {
   return { i, sec, words, s: words[0].s, e: words[words.length - 1].e, el: null };
 });
 // A line takes the stage a little before its first word (once the line before has mostly sung
-// its last), and leaves when the next one comes, or a second and a half after it ends.
+// its last), and leaves when the next one comes, or just after its last word.
 lines.forEach((l, i) => {
   const before = lines[i - 1];
   if (!before) { l.show = -1; return; }
@@ -60,7 +60,7 @@ lines.forEach((l, i) => {
   l.show = Math.max(after, Math.min(l.s - 0.6, l.s - 0.05));
   if (l.show > l.s - 0.05) l.show = Math.max(last.s + 0.1, l.s - 0.05);
 });
-lines.forEach((l, i) => { l.hide = i + 1 < lines.length ? Math.min(lines[i + 1].show, l.e + 1.5) : l.e + 4; });
+lines.forEach((l, i) => { l.hide = i + 1 < lines.length ? Math.min(lines[i + 1].show, l.e + 0.35) : l.e + 2; });
 const W = (li, wi) => lines[li].words[wi];
 const L = li => lines[li];
 // when the line after this one starts (a scene for this line is gone by then)
@@ -130,14 +130,14 @@ const css = `
 /* the lyrics: the line being sung, the next one under it */
 #ts .ts-lyrics { position: absolute; left: max(14px, env(safe-area-inset-left)); right: max(14px, env(safe-area-inset-right)); bottom: calc(92px + env(safe-area-inset-bottom)); z-index: 2; pointer-events: none; height: 0; }
 #ts .ts-l { position: absolute; left: 0; right: 0; bottom: 0; margin: 0 auto; max-width: 18em; text-align: center; font-weight: 800; font-size: clamp(1.5rem, min(5vw, 7.5vh), 6rem); line-height: 1.12; letter-spacing: -.03em; text-wrap: balance; transform-origin: 50% 100%; opacity: 0; transform: translateY(.5em) scale(.5); visibility: hidden; transition: transform .7s cubic-bezier(.2,.8,.2,1), opacity .5s ease, visibility 0s .7s; -webkit-font-smoothing: antialiased; }
-#ts .ts-l.is-cur { opacity: 1; visibility: visible; transform: translateY(calc(var(--nh, 0px) * -1 - .3em)) scale(1); transition-delay: 0s; }
-#ts .ts-l.is-next { opacity: .5; visibility: visible; transform: scale(.5); transition-delay: 0s; }
-#ts .ts-l.is-prev { opacity: 0; visibility: visible; transform: translateY(calc(var(--nh, 0px) * -1 - var(--h, 1em) - .5em)) scale(.7); transition-delay: 0s; }
-/* a word: dim until it's sung, then filled left to right in time with the voice */
-#ts .ts-w { position: relative; display: inline-block; color: rgba(255,255,255,.3); white-space: pre; transform-origin: 50% 90%; transition: transform .5s cubic-bezier(.2,.8,.2,1); }
-#ts .ts-w > i { position: absolute; left: 0; top: 0; font-style: normal; color: var(--c, #fff); clip-path: inset(-30% calc(100% - var(--p, 0) * 100%) -30% -10%); }
-#ts .ts-w.is-on { transform: translateY(-.05em); transition-duration: .25s; }
-#ts .ts-w.is-on > i { text-shadow: 0 0 .5em color-mix(in srgb, var(--c, #fff) 45%, transparent); }
+#ts .ts-l.is-cur { opacity: 1; visibility: visible; transform: translateY(calc(var(--nh, 0px) * -1 - .35em)) scale(1); transition-delay: 0s; }
+#ts .ts-l.is-next { opacity: .3; visibility: visible; transform: scale(.42); transition-delay: 0s; }
+/* (a sung line clears out quickly, up and away) */
+#ts .ts-l.is-prev { opacity: 0; visibility: visible; transform: translateY(calc(var(--nh, 0px) * -1 - var(--h, 1em) - .3em)) scale(.85); transition: transform .35s cubic-bezier(.4,0,.6,1), opacity .2s ease, visibility 0s .35s; }
+/* a word: dim until it's sung, then filled left to right in time with the voice, through a soft
+   edge (the fill is the text's own background, so nothing sits on top of it to be cut off) */
+#ts .ts-w { position: relative; display: inline-block; white-space: pre; transform-origin: 50% 90%; transition: transform .5s cubic-bezier(.2,.8,.2,1); color: transparent; -webkit-background-clip: text; background-clip: text; background-image: linear-gradient(90deg, var(--c, #fff) calc(var(--p, 0) * (100% + .4em) - .4em), rgba(255,255,255,.34) calc(var(--p, 0) * (100% + .4em))); }
+#ts .ts-w.is-on { transform: translateY(-.04em); transition-duration: .25s; }
 /* a few words have a colour of their own, and the shouted ones swell as they're sung */
 #ts .ts-w.ts-tov { --c: ${C.amber}; }
 #ts .ts-w.ts-rust { --c: ${C.rust}; }
@@ -146,8 +146,8 @@ const css = `
 #ts .ts-w.ts-bad { --c: ${C.red}; }
 #ts .ts-w.ts-no::after { content: ""; position: absolute; left: -4%; right: -4%; top: 54%; height: .07em; border-radius: .04em; background: ${C.red}; transform: scaleX(0); transform-origin: 0 50%; transition: transform .35s cubic-bezier(.2,.8,.2,1); }
 #ts .ts-w.ts-no.is-done::after { transform: scaleX(1); }
-#ts .ts-w.ts-big { margin: 0 .06em; }
-#ts .ts-w.ts-big.is-on, #ts .ts-w.ts-tov.is-on { transform: translateY(-.05em) scale(1.1); }
+#ts .ts-w.ts-big, #ts .ts-w.ts-tov { margin: 0 .05em; }
+#ts .ts-w.ts-big.is-on, #ts .ts-w.ts-tov.is-on { transform: translateY(-.04em) scale(1.06); }
 @keyframes ts-in { 0% { opacity: 0; transform: translate(-50%, -6px); } 100% { opacity: 1; transform: translateX(-50%); } }
 /* the controls */
 #ts .ts-bar { position: absolute; left: 0; right: 0; bottom: 0; z-index: 3; display: flex; align-items: center; gap: 14px; padding: 14px max(20px, env(safe-area-inset-right)) max(18px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left)); }
@@ -273,7 +273,7 @@ function build() {
   const lyricHtml = lines.map(l => `<p class="ts-l">${l.words.map((w, j) => {
     const shown = w.text.replace(/^\((.*)\)$/, "$1");
     const before = l.words.slice(0, j).map(x => x.text.toLowerCase());
-    return `<span class="ts-w ${wordClass(shown, before)}">${shown}<i aria-hidden="true">${shown}</i></span>`;
+    return `<span class="ts-w ${wordClass(shown, before)}">${shown}</span>`;
   }).join(" ")}</p>`).join("");
   root.innerHTML = `
 <div class="ts-sky" aria-hidden="true"></div><div class="ts-sky" aria-hidden="true"></div>
@@ -1687,20 +1687,23 @@ function crowd(t, a, beat, big) {
   ctx.globalAlpha = a;
   for (let i = 0; i < n; i++) {
     const x = (i + 0.5) * Wd / n + (hash(i) - 0.5) * 30 * U;
-    const hop = Math.abs(Math.sin((beat + hash(i * 3) * 0.2) * Math.PI)) * (big ? 22 : 12) * U;
-    const hr = (22 + hash(i * 2) * 9) * U, y = base - 100 * U - hash(i * 5) * 34 * U - hop;
+    // (the crowd stands low, at the foot of the stage, so its pints stay under the lyrics)
+    const hop = Math.abs(Math.sin((beat + hash(i * 3) * 0.2) * Math.PI)) * (big ? 12 : 7) * U;
+    const hr = (20 + hash(i * 2) * 8) * U, y = base - 52 * U - hash(i * 5) * 18 * U - hop;
     ctx.fillStyle = "rgba(12,8,20,.78)";
     ctx.beginPath(); ctx.arc(x, y, hr, 0, TAU); ctx.fill();
     roundRect(x - hr * 1.7, y + hr * 0.8, hr * 3.4, 200 * U, hr); ctx.fill();
     if (i % 2 === 0 || big) {
       const side = i % 4 < 2 ? 1 : -1;
       const sway = Math.sin(beat * Math.PI + i) * 0.25;
-      const hx = x + side * hr * 1.6 + sway * 20 * U, hy = y - hr * 1.6;
+      const hx = x + side * hr * 1.6 + sway * 16 * U, hy = y - hr * 1.05;
       ctx.strokeStyle = "rgba(12,8,20,.78)";
       ctx.lineWidth = hr * 0.6;
       ctx.lineCap = "round";
       ctx.beginPath(); ctx.moveTo(x + side * hr * 1.2, y + hr * 1.2); ctx.lineTo(hx, hy); ctx.stroke();
-      pint(hx, hy + 6 * U, 46 * U, sway * 0.5);
+      ctx.globalAlpha = a * 0.75;
+      pint(hx, hy + 6 * U, 36 * U, sway * 0.5);
+      ctx.globalAlpha = a;
     }
   }
   ctx.restore();
@@ -1746,7 +1749,7 @@ function sky(si) {
   skySec = si;
   const th = THEMES[sections[si].kind];
   skyOn = 1 - skyOn;
-  els.skies[skyOn].style.background = `linear-gradient(to bottom, rgba(20,0,40,0) 50%, rgba(20,0,40,.5)), radial-gradient(ellipse at 50% 42%, rgba(0,0,0,0) 45%, rgba(20,0,40,.4)), linear-gradient(to bottom, ${th.sky[0]}, ${th.sky[1]} 55%, ${th.sky[2]})`;
+  els.skies[skyOn].style.background = `linear-gradient(to bottom, rgba(8,4,16,0) 45%, rgba(8,4,16,.62) 88%), radial-gradient(ellipse at 50% 42%, rgba(0,0,0,0) 45%, rgba(8,4,16,.4)), linear-gradient(to bottom, ${th.sky[0]}, ${th.sky[1]} 55%, ${th.sky[2]})`;
   els.skies[skyOn].classList.add("on");
   els.skies[1 - skyOn].classList.remove("on");
   els.sec.style.setProperty("--tag", th.tag);
