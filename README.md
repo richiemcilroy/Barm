@@ -1,11 +1,13 @@
 # Tov
 
-**A programming language for coding agents.** Tov looks like TypeScript, so your agent already knows how to write it. The compiler checks every line and hands back the exact fix for each error. What comes out is a small native binary that keeps pace with Rust.
+**A programming language for coding agents.** Tov looks like TypeScript, so your agent already knows how to write it. The compiler checks every line and hands back the exact fix for each error. What comes out is a native binary that beats Rust: faster to run, faster to compile, in a fraction of the memory ([the numbers](#performance)).
+
+Start with your agent: give it the prompt on [tov.sh](https://tov.sh), or install by hand with `curl -fsSL https://tov.sh/install.sh | sh` (builds from source; needs git and a C compiler). The language, for agents: [tov.sh/llms.txt](https://tov.sh/llms.txt).
 
 - **Nothing new to learn.** TypeScript's syntax with Bun's and Node's APIs: `Bun.serve`, `fetch`, `node:fs`, `async`/`await`. If code looks like TypeScript it behaves like TypeScript, or it doesn't compile.
 - **Nothing hidden.** No `any`, `null` or `==`. Every call that can fail is marked `try`, integer overflow stops the program, and arrays and records are values, so nothing changes behind the agent's back.
 - **Errors that come with the fix.** Every error has a code, a reason and a fix. `tov check --json` returns the exact edit and marks the ones that are safe to apply as they are.
-- **Fast feedback, fast programs.** Builds take about 0.1 s. A web server is a 150 KB binary with no runtime to install, and it outruns Rust's axum and Bun.
+- **Faster than Rust, in less of everything.** A program compiles in about 40 ms (Rust: 98), runs up to 3× faster than Rust's, and a web server serves 242,000 requests a second on one core in 1.6 MB (Rust's axum: 216,000 in 4.4 MB; Bun: 111,000 in 17 MB; macOS, M4 Max).
 - **Your npm packages still work.** Tov programs import npm packages, and apps written for Bun run on Tov unchanged.
 
 The landing page, [site/](site/), is a Tov program: `cd site && tov dev`.

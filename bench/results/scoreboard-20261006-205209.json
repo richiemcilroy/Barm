@@ -1,0 +1,985 @@
+{
+ "load": [
+  6.47119140625,
+  6.2333984375,
+  6.39208984375
+ ],
+ "rows": [
+  {
+   "section": "micro",
+   "metric": "array_push time",
+   "unit": "ms",
+   "better": "lower",
+   "values": {
+    "c": 47.59404098149389,
+    "rust": 55.4407499730587,
+    "node": 335.52679093554616,
+    "bun": 201.71070902142674,
+    "tov": 43.64499996881932
+   },
+   "win": true
+  },
+  {
+   "section": "micro",
+   "metric": "array_push peak memory",
+   "unit": "MB",
+   "better": "lower",
+   "values": {
+    "c": 244.056064,
+    "rust": 244.269056,
+    "node": 778.272768,
+    "bun": 607.862784,
+    "tov": 241.893376
+   },
+   "win": true
+  },
+  {
+   "section": "micro",
+   "metric": "async_calls time",
+   "unit": "ms",
+   "better": "lower",
+   "values": {
+    "node": 622.450084076263,
+    "bun": 512.3372500529513,
+    "tov": 119.53516700305045
+   },
+   "win": true
+  },
+  {
+   "section": "micro",
+   "metric": "async_calls peak memory",
+   "unit": "MB",
+   "better": "lower",
+   "values": {
+    "node": 81.297408,
+    "bun": 29.868032,
+    "tov": 1.900544
+   },
+   "win": true
+  },
+  {
+   "section": "micro",
+   "metric": "async_tasks time",
+   "unit": "ms",
+   "better": "lower",
+   "values": {
+    "node": 339.438832947053,
+    "bun": 179.3349999934435,
+    "tov": 128.8465829566121
+   },
+   "win": true
+  },
+  {
+   "section": "micro",
+   "metric": "async_tasks peak memory",
+   "unit": "MB",
+   "better": "lower",
+   "values": {
+    "node": 94.6176,
+    "bun": 30.96576,
+    "tov": 2.523136
+   },
+   "win": true
+  },
+  {
+   "section": "micro",
+   "metric": "binary_trees time",
+   "unit": "ms",
+   "better": "lower",
+   "values": {
+    "c": 687.5936669530347,
+    "rust": 790.5041249468923,
+    "node": 448.49516707472503,
+    "bun": 375.9271668968722,
+    "tov": 259.6681249560788
+   },
+   "win": true
+  },
+  {
+   "section": "micro",
+   "metric": "binary_trees peak memory",
+   "unit": "MB",
+   "better": "lower",
+   "values": {
+    "c": 18.75968,
+    "rust": 18.972672,
+    "node": 212.025344,
+    "bun": 193.363968,
+    "tov": 18.694144
+   },
+   "win": true
+  },
+  {
+   "section": "micro",
+   "metric": "class_trees time",
+   "unit": "ms",
+   "better": "lower",
+   "values": {
+    "c": 687.8820420242846,
+    "rust": 789.4809159915894,
+    "node": 467.0395830180496,
+    "bun": 365.450874902308,
+    "tov": 261.2354999873787
+   },
+   "win": true
+  },
+  {
+   "section": "micro",
+   "metric": "class_trees peak memory",
+   "unit": "MB",
+   "better": "lower",
+   "values": {
+    "c": 18.75968,
+    "rust": 18.972672,
+    "node": 210.583552,
+    "bun": 221.888512,
+    "tov": 18.694144
+   },
+   "win": true
+  },
+  {
+   "section": "micro",
+   "metric": "dispatch time",
+   "unit": "ms",
+   "better": "lower",
+   "values": {
+    "c": 75.88370807934552,
+    "rust": 76.89250004477799,
+    "node": 191.15362502634525,
+    "bun": 109.38570904545486,
+    "tov": 36.4510000217706
+   },
+   "win": true
+  },
+  {
+   "section": "micro",
+   "metric": "dispatch peak memory",
+   "unit": "MB",
+   "better": "lower",
+   "values": {
+    "c": 1.900544,
+    "rust": 2.113536,
+    "node": 82.280448,
+    "bun": 26.722304,
+    "tov": 1.933312
+   },
+   "win": false
+  },
+  {
+   "section": "micro",
+   "metric": "fib time",
+   "unit": "ms",
+   "better": "lower",
+   "values": {
+    "c": 490.10087503120303,
+    "rust": 444.15520795155317,
+    "node": 1484.5602919813246,
+    "bun": 942.1685420675203,
+    "tov": 416.2996250670403
+   },
+   "win": true
+  },
+  {
+   "section": "micro",
+   "metric": "fib peak memory",
+   "unit": "MB",
+   "better": "lower",
+   "values": {
+    "c": 1.867776,
+    "rust": 2.031616,
+    "node": 77.856768,
+    "bun": 18.776064,
+    "tov": 1.867776
+   },
+   "win": true
+  },
+  {
+   "section": "micro",
+   "metric": "json time",
+   "unit": "ms",
+   "better": "lower",
+   "values": {
+    "node": 440.98083407152444,
+    "bun": 256.77941704634577,
+    "tov": 229.21699995640665
+   },
+   "win": true
+  },
+  {
+   "section": "micro",
+   "metric": "json peak memory",
+   "unit": "MB",
+   "better": "lower",
+   "values": {
+    "node": 477.937664,
+    "bun": 323.534848,
+    "tov": 133.169152
+   },
+   "win": true
+  },
+  {
+   "section": "micro",
+   "metric": "map_insert time",
+   "unit": "ms",
+   "better": "lower",
+   "values": {
+    "c": 476.26195801422,
+    "rust": 490.3768340591341,
+    "node": 1177.9030839679763,
+    "bun": 822.517208987847,
+    "tov": 283.5755000123754
+   },
+   "win": true
+  },
+  {
+   "section": "micro",
+   "metric": "map_insert peak memory",
+   "unit": "MB",
+   "better": "lower",
+   "values": {
+    "c": 235.470848,
+    "rust": 311.410688,
+    "node": 295.632896,
+    "bun": 590.839808,
+    "tov": 157.36832
+   },
+   "win": true
+  },
+  {
+   "section": "micro",
+   "metric": "nbody time",
+   "unit": "ms",
+   "better": "lower",
+   "values": {
+    "c": 312.4280000338331,
+    "rust": 223.74308307189494,
+    "node": 553.6319999955595,
+    "bun": 512.4488750007004,
+    "tov": 210.01954202074558
+   },
+   "win": true
+  },
+  {
+   "section": "micro",
+   "metric": "nbody peak memory",
+   "unit": "MB",
+   "better": "lower",
+   "values": {
+    "c": 1.851392,
+    "rust": 2.064384,
+    "node": 82.640896,
+    "bun": 23.085056,
+    "tov": 1.867776
+   },
+   "win": false
+  },
+  {
+   "section": "micro",
+   "metric": "points time",
+   "unit": "ms",
+   "better": "lower",
+   "values": {
+    "c": 292.30941692367196,
+    "rust": 290.8044590149075,
+    "node": 1941.147750010714,
+    "bun": 831.5667079295963,
+    "tov": 291.5379999903962
+   },
+   "win": false
+  },
+  {
+   "section": "micro",
+   "metric": "points peak memory",
+   "unit": "MB",
+   "better": "lower",
+   "values": {
+    "c": 1.867776,
+    "rust": 2.031616,
+    "node": 86.654976,
+    "bun": 31.86688,
+    "tov": 1.867776
+   },
+   "win": true
+  },
+  {
+   "section": "micro",
+   "metric": "sort time",
+   "unit": "ms",
+   "better": "lower",
+   "values": {
+    "c": 274.5192499132827,
+    "rust": 73.91587505117059,
+    "node": 1174.6277089696378,
+    "bun": 695.8175000036135,
+    "tov": 45.00041692517698
+   },
+   "win": true
+  },
+  {
+   "section": "micro",
+   "metric": "sort peak memory",
+   "unit": "MB",
+   "better": "lower",
+   "values": {
+    "c": 25.870336,
+    "rust": 40.321024,
+    "node": 279.330816,
+    "bun": 121.356288,
+    "tov": 26.198016
+   },
+   "win": false
+  },
+  {
+   "section": "micro",
+   "metric": "strings time",
+   "unit": "ms",
+   "better": "lower",
+   "values": {
+    "c": 253.16741701681167,
+    "rust": 224.03316700365394,
+    "node": 519.0759579418227,
+    "bun": 202.64937507454306,
+    "tov": 143.36704195011407
+   },
+   "win": true
+  },
+  {
+   "section": "micro",
+   "metric": "strings peak memory",
+   "unit": "MB",
+   "better": "lower",
+   "values": {
+    "c": 216.465408,
+    "rust": 263.077888,
+    "node": 696.123392,
+    "bun": 593.395712,
+    "tov": 185.909248
+   },
+   "win": true
+  },
+  {
+   "section": "micro",
+   "metric": "binary size (stripped, median)",
+   "unit": "KB",
+   "better": "lower",
+   "values": {
+    "tov": 33.4921875,
+    "c": 32.8046875,
+    "rust": 350.6640625
+   },
+   "win": false
+  },
+  {
+   "section": "micro",
+   "metric": "compile time (median)",
+   "unit": "ms",
+   "better": "lower",
+   "values": {
+    "tov": 42.016084073111415,
+    "c": 49.216374987736344,
+    "rust": 97.63543744338676
+   },
+   "win": true
+  },
+  {
+   "section": "http",
+   "metric": "hello req/s",
+   "unit": "req/s",
+   "better": "higher",
+   "values": {
+    "tov": 237272,
+    "rust": 195363,
+    "bun": 183234
+   },
+   "win": true
+  },
+  {
+   "section": "http",
+   "metric": "hello p99",
+   "unit": "\u00b5s",
+   "better": "lower",
+   "values": {
+    "tov": 474,
+    "rust": 524,
+    "bun": 637
+   },
+   "win": true
+  },
+  {
+   "section": "http",
+   "metric": "hello CPU per request",
+   "unit": "\u00b5s",
+   "better": "lower",
+   "values": {
+    "tov": 4.2233526641716415,
+    "rust": 5.118676515000282,
+    "bun": 5.6394191762082
+   },
+   "win": true
+  },
+  {
+   "section": "http",
+   "metric": "hello memory",
+   "unit": "MB",
+   "better": "lower",
+   "values": {
+    "tov": 1.5472183227539062,
+    "rust": 4.3128204345703125,
+    "bun": 17.344276428222656
+   },
+   "win": true
+  },
+  {
+   "section": "http",
+   "metric": "json req/s",
+   "unit": "req/s",
+   "better": "higher",
+   "values": {
+    "tov": 241689,
+    "rust": 216499,
+    "bun": 110644
+   },
+   "win": true
+  },
+  {
+   "section": "http",
+   "metric": "json p99",
+   "unit": "\u00b5s",
+   "better": "lower",
+   "values": {
+    "tov": 470,
+    "rust": 508,
+    "bun": 4239
+   },
+   "win": true
+  },
+  {
+   "section": "http",
+   "metric": "json CPU per request",
+   "unit": "\u00b5s",
+   "better": "lower",
+   "values": {
+    "tov": 4.146168560974366,
+    "rust": 4.6382046414379134,
+    "bun": 7.531663111721679
+   },
+   "win": true
+  },
+  {
+   "section": "http",
+   "metric": "json memory",
+   "unit": "MB",
+   "better": "lower",
+   "values": {
+    "tov": 1.5940933227539062,
+    "rust": 4.375343322753906,
+    "bun": 16.60992431640625
+   },
+   "win": true
+  },
+  {
+   "section": "http",
+   "metric": "echo req/s",
+   "unit": "req/s",
+   "better": "higher",
+   "values": {
+    "tov": 220721,
+    "rust": 189157,
+    "bun": 81785
+   },
+   "win": true
+  },
+  {
+   "section": "http",
+   "metric": "echo p99",
+   "unit": "\u00b5s",
+   "better": "lower",
+   "values": {
+    "tov": 509,
+    "rust": 560,
+    "bun": 5760
+   },
+   "win": true
+  },
+  {
+   "section": "http",
+   "metric": "echo CPU per request",
+   "unit": "\u00b5s",
+   "better": "lower",
+   "values": {
+    "tov": 4.530606512293802,
+    "rust": 5.2976275439626,
+    "bun": 9.80721811253082
+   },
+   "win": true
+  },
+  {
+   "section": "http",
+   "metric": "echo memory",
+   "unit": "MB",
+   "better": "lower",
+   "values": {
+    "tov": 1.5784683227539062,
+    "rust": 4.594093322753906,
+    "bun": 17.12554931640625
+   },
+   "win": true
+  },
+  {
+   "section": "fetch",
+   "metric": "hello-1 req/s",
+   "unit": "req/s",
+   "better": "higher",
+   "values": {
+    "tov": 44251.185554954594,
+    "bun": 25734.48497748149,
+    "node": 15745.242494259208,
+    "rust": 36542.76234002422,
+    "rust-mt": 35660.6408424789
+   },
+   "win": true
+  },
+  {
+   "section": "fetch",
+   "metric": "hello-1 CPU",
+   "unit": "s",
+   "better": "lower",
+   "values": {
+    "tov": 0.17145699999999997,
+    "bun": 0.679737,
+    "node": 1.587042,
+    "rust": 0.25896299999999994,
+    "rust-mt": 0.270304
+   },
+   "win": true
+  },
+  {
+   "section": "fetch",
+   "metric": "hello-1 peak memory",
+   "unit": "MB",
+   "better": "lower",
+   "values": {
+    "tov": 2.490368,
+    "bun": 39.288832,
+    "node": 222.478336,
+    "rust": 4.030464,
+    "rust-mt": 4.620288
+   },
+   "win": true
+  },
+  {
+   "section": "fetch",
+   "metric": "hello-64 req/s",
+   "unit": "req/s",
+   "better": "higher",
+   "values": {
+    "tov": 176827.44172771813,
+    "bun": 128760.23488030906,
+    "node": 30282.358775964323,
+    "rust": 126056.36542298936,
+    "rust-mt": 162415.84920015483
+   },
+   "win": true
+  },
+  {
+   "section": "fetch",
+   "metric": "hello-64 CPU",
+   "unit": "s",
+   "better": "lower",
+   "values": {
+    "tov": 0.5475939999999999,
+    "bun": 1.2878569999999998,
+    "node": 5.0134229999999995,
+    "rust": 0.783531,
+    "rust-mt": 3.1730859999999996
+   },
+   "win": true
+  },
+  {
+   "section": "fetch",
+   "metric": "hello-64 peak memory",
+   "unit": "MB",
+   "better": "lower",
+   "values": {
+    "tov": 3.145728,
+    "bun": 41.45152,
+    "node": 251.314176,
+    "rust": 7.979008,
+    "rust-mt": 12.156928
+   },
+   "win": true
+  },
+  {
+   "section": "fetch",
+   "metric": "json-64 req/s",
+   "unit": "req/s",
+   "better": "higher",
+   "values": {
+    "tov": 174121.21917919794,
+    "bun": 122329.12190350116,
+    "node": 29764.04147418122,
+    "rust": 116988.1745360841,
+    "rust-mt": 158919.5062858465
+   },
+   "win": true
+  },
+  {
+   "section": "fetch",
+   "metric": "json-64 CPU",
+   "unit": "s",
+   "better": "lower",
+   "values": {
+    "tov": 0.5684689999999999,
+    "bun": 1.3484509999999998,
+    "node": 5.06855,
+    "rust": 0.84495,
+    "rust-mt": 3.188236
+   },
+   "win": true
+  },
+  {
+   "section": "fetch",
+   "metric": "json-64 peak memory",
+   "unit": "MB",
+   "better": "lower",
+   "values": {
+    "tov": 3.129344,
+    "bun": 39.23968,
+    "node": 251.74016,
+    "rust": 7.979008,
+    "rust-mt": 12.009472
+   },
+   "win": true
+  },
+  {
+   "section": "npm",
+   "metric": "startup (ms)",
+   "unit": "",
+   "better": "lower",
+   "values": {
+    "tov": 11.207604431547225,
+    "bun": 9.519082959741354
+   },
+   "win": false
+  },
+  {
+   "section": "npm",
+   "metric": "startup rss (MB)",
+   "unit": "",
+   "better": "lower",
+   "values": {
+    "tov": 22.578125,
+    "bun": 16.59375
+   },
+   "win": false
+  },
+  {
+   "section": "npm",
+   "metric": "1M zod calls (ms)",
+   "unit": "",
+   "better": "lower",
+   "values": {
+    "tov": 141,
+    "bun": 96
+   },
+   "win": false
+  },
+  {
+   "section": "npm",
+   "metric": "service req/s",
+   "unit": "",
+   "better": "higher",
+   "values": {
+    "tov": 195651,
+    "bun": 148976
+   },
+   "win": true
+  },
+  {
+   "section": "npm",
+   "metric": "service cpu/req (us)",
+   "unit": "",
+   "better": "lower",
+   "values": {
+    "tov": 5.151970264302077,
+    "bun": 6.969802742276161
+   },
+   "win": true
+  },
+  {
+   "section": "npm",
+   "metric": "service p99 (us)",
+   "unit": "",
+   "better": "lower",
+   "values": {
+    "tov": 589,
+    "bun": 834
+   },
+   "win": true
+  },
+  {
+   "section": "npm",
+   "metric": "service rss (MB)",
+   "unit": "",
+   "better": "lower",
+   "values": {
+    "tov": 49.890625,
+    "bun": 48.28125
+   },
+   "win": false
+  },
+  {
+   "section": "npm",
+   "metric": "binary (MB)",
+   "unit": "",
+   "better": "lower",
+   "values": {
+    "tov": 30.140749,
+    "bun": 64.04261
+   },
+   "win": true
+  },
+  {
+   "section": "npm",
+   "metric": "rebuild after an edit (ms)",
+   "unit": "",
+   "better": "lower",
+   "values": {
+    "tov": 130.21504203788936,
+    "bun": 78.00991693511605
+   },
+   "win": false
+  },
+  {
+   "section": "cap",
+   "metric": "startup_ms",
+   "unit": "",
+   "better": "lower",
+   "values": {
+    "bun": 144.56892013549805,
+    "tov": 92.29087829589844
+   },
+   "win": true
+  },
+  {
+   "section": "cap",
+   "metric": "idle_mb",
+   "unit": "",
+   "better": "lower",
+   "values": {
+    "bun": 50.1,
+    "tov": 50.5
+   },
+   "win": false
+  },
+  {
+   "section": "cap",
+   "metric": "health_rps",
+   "unit": "",
+   "better": "higher",
+   "values": {
+    "bun": 38180,
+    "tov": 38141
+   },
+   "win": false
+  },
+  {
+   "section": "cap",
+   "metric": "health_p50_us",
+   "unit": "",
+   "better": "lower",
+   "values": {
+    "bun": 1625,
+    "tov": 1608
+   },
+   "win": true
+  },
+  {
+   "section": "cap",
+   "metric": "health_p99_us",
+   "unit": "",
+   "better": "lower",
+   "values": {
+    "bun": 3232,
+    "tov": 3216
+   },
+   "win": true
+  },
+  {
+   "section": "cap",
+   "metric": "health_cpu_us",
+   "unit": "",
+   "better": "lower",
+   "values": {
+    "bun": 29.47775162769024,
+    "tov": 29.638597787718457
+   },
+   "win": false
+  },
+  {
+   "section": "cap",
+   "metric": "probe_ops",
+   "unit": "",
+   "better": "higher",
+   "values": {
+    "bun": 321.69586086816486,
+    "tov": 272.6678561923375
+   },
+   "win": false
+  },
+  {
+   "section": "cap",
+   "metric": "probe_p50_ms",
+   "unit": "",
+   "better": "lower",
+   "values": {
+    "bun": 1.4327080000002752,
+    "tov": 1.6299160000000938
+   },
+   "win": false
+  },
+  {
+   "section": "cap",
+   "metric": "probe_p99_ms",
+   "unit": "",
+   "better": "lower",
+   "values": {
+    "bun": 15.765083000000232,
+    "tov": 21.96225000000004
+   },
+   "win": false
+  },
+  {
+   "section": "cap",
+   "metric": "probe_cpu_us",
+   "unit": "",
+   "better": "lower",
+   "values": {
+    "bun": 972.3926380368098,
+    "tov": 813.397129186603
+   },
+   "win": true
+  },
+  {
+   "section": "cap",
+   "metric": "extract_ops",
+   "unit": "",
+   "better": "higher",
+   "values": {
+    "bun": 20.755385125216474,
+    "tov": 20.38534628387819
+   },
+   "win": false
+  },
+  {
+   "section": "cap",
+   "metric": "extract_p50_ms",
+   "unit": "",
+   "better": "lower",
+   "values": {
+    "bun": 74.84054199999991,
+    "tov": 75.45583299999998
+   },
+   "win": false
+  },
+  {
+   "section": "cap",
+   "metric": "extract_p99_ms",
+   "unit": "",
+   "better": "lower",
+   "values": {
+    "bun": 155.5336669999997,
+    "tov": 423.6635
+   },
+   "win": false
+  },
+  {
+   "section": "cap",
+   "metric": "extract_cpu_us",
+   "unit": "",
+   "better": "lower",
+   "values": {
+    "bun": 7857.1428571428505,
+    "tov": 7272.727272727273
+   },
+   "win": true
+  },
+  {
+   "section": "cap",
+   "metric": "after_mb",
+   "unit": "",
+   "better": "lower",
+   "values": {
+    "bun": 65.85,
+    "tov": 74.5
+   },
+   "win": false
+  },
+  {
+   "section": "cap",
+   "metric": "peak_mb",
+   "unit": "",
+   "better": "lower",
+   "values": {
+    "bun": 157.1,
+    "tov": 125.0
+   },
+   "win": true
+  },
+  {
+   "section": "cap",
+   "metric": "shutdown_ms",
+   "unit": "",
+   "better": "lower",
+   "values": {
+    "bun": 3.8361549377441406,
+    "tov": 8.453845977783203
+   },
+   "win": false
+  },
+  {
+   "section": "build",
+   "metric": "media server, nothing cached",
+   "unit": "ms",
+   "better": "lower",
+   "values": {
+    "tov": 1272.091833059676,
+    "bun": 120.96150009892881
+   },
+   "win": false
+  },
+  {
+   "section": "build",
+   "metric": "media server, nothing changed",
+   "unit": "ms",
+   "better": "lower",
+   "values": {
+    "tov": 37.250416935421526,
+    "bun": 120.96150009892881
+   },
+   "win": true
+  },
+  {
+   "section": "build",
+   "metric": "media server, after a JavaScript edit",
+   "unit": "ms",
+   "better": "lower",
+   "values": {
+    "tov": 45.480249915272,
+    "bun": 120.96150009892881
+   },
+   "win": true
+  },
+  {
+   "section": "build",
+   "metric": "media server binary",
+   "unit": "MB",
+   "better": "lower",
+   "values": {
+    "tov": 35.978316,
+    "bun": 66.651506
+   },
+   "win": true
+  }
+ ]
+}
