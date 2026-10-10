@@ -172,7 +172,7 @@ function renderBench(): string {
   const programs = programRows.map((r, i) => item(r, i)).join("")
   const systems = systemRows.map((r, i) => item(r, programRows.length + i)).join("")
   const charts = rows.map((r, i) => renderChart(ids[i]!, r)).join("")
-  const rules = ids.map(id => `#pick-${id}:checked ~ .bx .cp-${id} { display: block; } #pick-${id}:checked ~ .bx label[for="pick-${id}"] { background: rgba(228,169,90,.14); border-color: var(--crust); color: #fff; } #pick-${id}:focus-visible ~ .bx label[for="pick-${id}"] { outline: 3px solid var(--crust); outline-offset: 2px; }`).join("\n")
+  const rules = ids.map(id => `#pick-${id}:checked ~ .bx .cp-${id} { display: block; } #pick-${id}:checked ~ .bx label[for="pick-${id}"] { background: var(--panel); border-color: var(--ink-3); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.06); } #pick-${id}:focus-visible ~ .bx label[for="pick-${id}"] { outline: 3px solid var(--crust); outline-offset: 2px; }`).join("\n")
   return `<style>${rules}</style><div class="explorer">${inputs}<div class="bx"><nav class="bx-list" aria-label="Benchmarks"><p>Programs</p><ul>${programs}</ul><p>Servers and builds</p><ul>${systems}</ul></nav><div class="bx-charts">${charts}</div></div></div>`
 }
 
@@ -299,13 +299,13 @@ const bird = `<svg class="hb" viewBox="0 0 120 96" width="50" height="40" aria-h
 <g filter="url(#hb-r)" stroke-linecap="round" stroke-linejoin="round">
 <g class="hb-lines"><path d="M6 50h12M2 62h14M10 74h8" fill="none" stroke="currentColor" stroke-width="4" opacity=".8"/></g>
 <g class="hb-bird">
-<path d="M40 68 L22 74 Q24 79 30 78 L26 84 Q31 87 35 83 L46 72 Z" fill="#E4A95A" stroke="#1E2A66" stroke-width="3"/>
-<g class="hb-blur"><path d="M58 40 Q44 20 48 6" fill="none" stroke="#1E2A66" stroke-width="2.4" opacity=".22"/><path d="M60 41 Q54 22 62 8" fill="none" stroke="#1E2A66" stroke-width="2.4" opacity=".22"/></g>
-<path d="M97 40 C97 27 89 21 79 21 C69 21 63 27 61 35 C53 42 42 52 37 63 C35 70 39 74 47 72 C62 70 80 63 93 50 C96 47 97 44 97 40 Z" fill="#E4A95A" stroke="#1E2A66" stroke-width="3.4"/>
+<path d="M40 68 L22 74 Q24 79 30 78 L26 84 Q31 87 35 83 L46 72 Z" fill="#E4A95A" stroke="#26262B" stroke-width="3"/>
+<g class="hb-blur"><path d="M58 40 Q44 20 48 6" fill="none" stroke="#26262B" stroke-width="2.4" opacity=".22"/><path d="M60 41 Q54 22 62 8" fill="none" stroke="#26262B" stroke-width="2.4" opacity=".22"/></g>
+<path d="M97 40 C97 27 89 21 79 21 C69 21 63 27 61 35 C53 42 42 52 37 63 C35 70 39 74 47 72 C62 70 80 63 93 50 C96 47 97 44 97 40 Z" fill="#E4A95A" stroke="#26262B" stroke-width="3.4"/>
 <path d="M48 69 C62 67 78 60 89 50" fill="none" stroke="#F4D6A2" stroke-width="5"/>
-<g class="hb-wing"><path d="M66 39 C54 35 40 26 33 12 C39 11 44 14 47 17 C46 11 47 7 50 5 C56 10 60 18 62 24 C64 20 67 18 70 18 C71 26 70 32 68 37 Z" fill="#FFF3DC" stroke="#1E2A66" stroke-width="3.1"/><path d="M47 18 C52 25 57 30 64 34 M62 25 C63 29 64 32 66 35" fill="none" stroke="#1E2A66" stroke-width="1.8" opacity=".35"/></g>
-<path d="M96 36 L118 30" fill="none" stroke="#1E2A66" stroke-width="3.6"/>
-<g class="hb-eye"><circle cx="84" cy="35" r="4.6" fill="#1E2A66"/><circle cx="85.7" cy="33.4" r="1.5" fill="#fff"/></g>
+<g class="hb-wing"><path d="M66 39 C54 35 40 26 33 12 C39 11 44 14 47 17 C46 11 47 7 50 5 C56 10 60 18 62 24 C64 20 67 18 70 18 C71 26 70 32 68 37 Z" fill="#FFF3DC" stroke="#26262B" stroke-width="3.1"/><path d="M47 18 C52 25 57 30 64 34 M62 25 C63 29 64 32 66 35" fill="none" stroke="#26262B" stroke-width="1.8" opacity=".35"/></g>
+<path d="M96 36 L118 30" fill="none" stroke="#26262B" stroke-width="3.6"/>
+<g class="hb-eye"><circle cx="84" cy="35" r="4.6" fill="#26262B"/><circle cx="85.7" cy="33.4" r="1.5" fill="#fff"/></g>
 <ellipse cx="81" cy="45" rx="5" ry="2.8" fill="#F08F8A" opacity=".7"/>
 </g>
 </g>
@@ -323,7 +323,7 @@ export function renderPage(footer: string): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Tov, the programming language for coding agents</title>
 <meta name="description" content="Faster than Rust, written like TypeScript. Tov is the programming language for coding agents: the syntax they know, the exact fix for every error, and native binaries that beat Rust on speed, compile time and memory.">
-<meta name="theme-color" content="#F5F6F9">
+<meta name="theme-color" content="#FBFBFA">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://tov.sh/">
 <meta property="og:site_name" content="Tov">
@@ -348,7 +348,7 @@ export function renderPage(footer: string): string {
 <pre id="install" hidden>${installLine}</pre>
 <div class="wrap">
   <header class="top">
-    <a class="brand" href="/" aria-label="Tov, home">${bird}tov</a>
+    <a class="brand" href="/" aria-label="Tov, home">${bird}<span class="name">tov<small>v0.0.1 experimental</small></span></a>
     <nav aria-label="Main">
       <ul>
         <li class="optional"><a href="#speed">Benchmarks</a></li>
@@ -362,7 +362,6 @@ export function renderPage(footer: string): string {
 
   <main>
     <div class="hero">
-      <p class="badge"><span class="dot" aria-hidden="true"></span>Experimental: under active development</p>
       <h1><span>Faster than Rust.</span> <span>Written like TypeScript.</span></h1>
       <p class="lede">The programming language for coding agents. They already know the syntax, every error comes with its fix, and the binaries <strong>beat Rust's</strong> on speed, compile time and memory.</p>
       <div class="actions">

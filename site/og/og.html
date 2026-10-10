@@ -5,20 +5,21 @@
 @font-face { font-family: "Schibsted Grotesk"; src: url(../public/fonts/schibsted-grotesk.woff2) format("woff2"); font-weight: 400 900; }
 * { box-sizing: border-box; }
 html, body { margin: 0; width: 1200px; height: 630px; overflow: hidden; }
-body { background: #F5F6F9; color: #18204A; font-family: "Schibsted Grotesk", sans-serif; position: relative; padding: 56px 72px; }
-body::before { content: ""; position: absolute; inset: -200px -160px auto auto; width: 720px; height: 720px; background: radial-gradient(closest-side, rgba(228,169,90,.22), transparent); }
+body { background: #FBFBFA; color: #1D1D20; font-family: "Schibsted Grotesk", sans-serif; position: relative; padding: 56px 72px; }
+body::before { content: ""; position: absolute; inset: -200px -160px auto auto; width: 720px; height: 720px; background: radial-gradient(closest-side, rgba(228,169,90,.12), transparent); }
 .top { display: flex; align-items: center; justify-content: space-between; position: relative; }
-.brand { display: flex; align-items: center; gap: 14px; font-weight: 800; font-size: 46px; letter-spacing: -.035em; }
+.brand { display: flex; align-items: center; gap: 14px; font-weight: 700; font-size: 44px; letter-spacing: -.035em; line-height: 1; }
+.brand small { display: block; font-size: 17px; font-weight: 500; letter-spacing: 0; color: #9B9BA3; margin-top: 6px; }
 .brand .bird { width: 84px; height: 67px; }
 .badge { display: inline-flex; align-items: center; gap: 12px; padding: 10px 22px 10px 18px; border: 1.5px solid #DCE0EA; border-radius: 999px; background: #fff; font-size: 22px; font-weight: 600; color: #545C80; }
 .badge i { width: 12px; height: 12px; border-radius: 50%; background: #E4A95A; box-shadow: 0 0 0 6px rgba(228,169,90,.22); }
-h1 { position: relative; margin: 40px 0 0; font-size: 90px; line-height: .98; white-space: nowrap; letter-spacing: -.05em; font-weight: 800; }
+h1 { position: relative; margin: 40px 0 0; font-size: 90px; line-height: 1; white-space: nowrap; letter-spacing: -.045em; font-weight: 700; }
 h1 span { display: block; }
-h1 span + span { color: #545C80; }
-.stats { position: absolute; left: 72px; right: 72px; bottom: 52px; display: grid; grid-template-columns: repeat(3, 1fr); background: #141A3C; border-radius: 26px; padding: 24px 36px; }
-.stats div + div { border-left: 1px solid rgba(255,255,255,.12); padding-left: 30px; }
-.stats b { display: block; font-size: 50px; font-weight: 800; letter-spacing: -.05em; line-height: 1; color: #E4A95A; }
-.stats span { display: block; margin-top: 8px; font-size: 21px; color: #A8AECB; }
+h1 span + span { color: #9B9BA3; }
+.stats { position: absolute; left: 72px; right: 72px; bottom: 52px; display: grid; grid-template-columns: repeat(3, 1fr); background: #fff; border: 1.5px solid #E9E9E6; border-radius: 22px; padding: 24px 36px; }
+.stats div + div { border-left: 1.5px solid #E9E9E6; padding-left: 30px; }
+.stats b { display: block; font-size: 48px; font-weight: 700; letter-spacing: -.045em; line-height: 1; color: #1D1D20; }
+.stats span { display: block; margin-top: 8px; font-size: 21px; color: #5F5F67; }
 </style></head><body>
 <div class="top"><div class="brand"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 96" class="bird">
   <!-- Tov: a hummingbird, small and very fast -->
@@ -33,28 +34,28 @@ h1 span + span { color: #545C80; }
   </defs>
   <g filter="url(#r)" stroke-linecap="round" stroke-linejoin="round">
     <!-- speed lines -->
-    <path class="lines" d="M6 50h12M2 62h14M10 74h8" fill="none" stroke="#1E2A66" stroke-width="4" opacity=".8"/>
+    <path class="lines" d="M6 50h12M2 62h14M10 74h8" fill="none" stroke="#26262B" stroke-width="4" opacity=".8"/>
     <!-- tail, fanned -->
-    <path d="M40 68 L22 74 Q24 79 30 78 L26 84 Q31 87 35 83 L46 72 Z" fill="#E4A95A" stroke="#1E2A66" stroke-width="3"/>
+    <path d="M40 68 L22 74 Q24 79 30 78 L26 84 Q31 87 35 83 L46 72 Z" fill="#E4A95A" stroke="#26262B" stroke-width="3"/>
     <!-- wing beats: the blur behind the wing -->
-    <path d="M58 40 Q44 20 48 6" fill="none" stroke="#1E2A66" stroke-width="2.4" opacity=".22"/>
-    <path d="M60 41 Q54 22 62 8" fill="none" stroke="#1E2A66" stroke-width="2.4" opacity=".22"/>
+    <path d="M58 40 Q44 20 48 6" fill="none" stroke="#26262B" stroke-width="2.4" opacity=".22"/>
+    <path d="M60 41 Q54 22 62 8" fill="none" stroke="#26262B" stroke-width="2.4" opacity=".22"/>
     <!-- body and head, one shape -->
-    <path d="M97 40 C97 27 89 21 79 21 C69 21 63 27 61 35 C53 42 42 52 37 63 C35 70 39 74 47 72 C62 70 80 63 93 50 C96 47 97 44 97 40 Z" fill="#E4A95A" stroke="#1E2A66" stroke-width="3.4"/>
+    <path d="M97 40 C97 27 89 21 79 21 C69 21 63 27 61 35 C53 42 42 52 37 63 C35 70 39 74 47 72 C62 70 80 63 93 50 C96 47 97 44 97 40 Z" fill="#E4A95A" stroke="#26262B" stroke-width="3.4"/>
     <!-- belly -->
     <path d="M48 69 C62 67 78 60 89 50" fill="none" stroke="#F4D6A2" stroke-width="5"/>
     <!-- wing, swept back -->
-    <path d="M66 39 C54 35 40 26 33 12 C39 11 44 14 47 17 C46 11 47 7 50 5 C56 10 60 18 62 24 C64 20 67 18 70 18 C71 26 70 32 68 37 Z" fill="#FFF3DC" stroke="#1E2A66" stroke-width="3.1"/>
-    <path d="M47 18 C52 25 57 30 64 34 M62 25 C63 29 64 32 66 35" fill="none" stroke="#1E2A66" stroke-width="1.8" opacity=".35"/>
+    <path d="M66 39 C54 35 40 26 33 12 C39 11 44 14 47 17 C46 11 47 7 50 5 C56 10 60 18 62 24 C64 20 67 18 70 18 C71 26 70 32 68 37 Z" fill="#FFF3DC" stroke="#26262B" stroke-width="3.1"/>
+    <path d="M47 18 C52 25 57 30 64 34 M62 25 C63 29 64 32 66 35" fill="none" stroke="#26262B" stroke-width="1.8" opacity=".35"/>
     <!-- beak -->
-    <path d="M96 36 L118 30" fill="none" stroke="#1E2A66" stroke-width="3.6"/>
+    <path d="M96 36 L118 30" fill="none" stroke="#26262B" stroke-width="3.6"/>
     <!-- face -->
-    <circle cx="84" cy="35" r="4.6" fill="#1E2A66"/>
+    <circle cx="84" cy="35" r="4.6" fill="#26262B"/>
     <circle cx="85.7" cy="33.4" r="1.5" fill="#fff"/>
     <ellipse cx="81" cy="45" rx="5" ry="2.8" fill="#F08F8A" opacity=".7"/>
   </g>
 </svg>
-tov</div><div class="badge"><i></i>Experimental</div></div>
+<div>tov<small>v0.0.1 experimental</small></div></div></div>
 <h1><span>Faster than Rust.</span><span>Written like TypeScript.</span></h1>
 <div class="stats">
 <div><b>3×</b><span>faster than Rust</span></div>
