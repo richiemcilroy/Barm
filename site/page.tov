@@ -84,36 +84,81 @@ function renderRaces(): string {
   return `<div class="race" aria-label="Tov against Rust, Bun and Node">${inputs}<div class="tabs" role="presentation">${tabs}</div><div class="boards">${boards}</div></div>`
 }
 
-// ---------------------------------------------------------------- charts
+// ---------------------------------------------------------------- the dot plot
 
-type Bar = { who: string, value: f64, label: string }
-type Group = { name: string, bars: Bar[] }
+// Each benchmark a row; each runtime a dot, placed by how many times longer (or more) it takes
+// than Tov, on a log scale from Tov (1×) to 32×. (The first entry of a row is Tov's.)
+type Entry = { who: string, value: f64, label: string }
+type Row = { name: string, what: string, higher: bool, less: bool, entries: Entry[] }
 
-function ms(who: string, value: f64): Bar {
+const scaleMax = 32.0
+
+function e(who: string, value: f64, label: string): Entry {
+  return { who: who, value: value, label: label }
+}
+
+function t(who: string, value: f64): Entry {
   return { who: who, value: value, label: `${Math.round(value)} ms` }
 }
 
-const programs: Group[] = [
-  { name: "binary_trees", bars: [ms("Tov", 260), ms("Rust", 791), ms("C", 688), ms("Bun", 376)] },
-  { name: "map_insert", bars: [ms("Tov", 284), ms("Rust", 490), ms("C", 476), ms("Bun", 823)] },
-  { name: "sort", bars: [ms("Tov", 45), ms("Rust", 74), ms("C", 275), ms("Bun", 696)] },
-  { name: "dispatch", bars: [ms("Tov", 36), ms("Rust", 77), ms("C", 76), ms("Bun", 109)] },
-  { name: "strings", bars: [ms("Tov", 143), ms("Rust", 224), ms("C", 253), ms("Bun", 203)] },
-  { name: "nbody", bars: [ms("Tov", 210), ms("Rust", 224), ms("C", 312), ms("Bun", 512)] },
+// bench/results/scoreboard-20261006-205209.json
+const programRows: Row[] = [
+  { name: "binary_trees", what: "millions of small objects", higher: false, less: false, entries: [t("Tov", 260), t("Bun", 376), t("Node", 449), t("C", 688), t("Rust", 791)] },
+  { name: "sort", what: "3M floats, with a comparator", higher: false, less: false, entries: [t("Tov", 45), t("Rust", 74), t("C", 275), t("Bun", 696), t("Node", 1175)] },
+  { name: "map_insert", what: "2M string keys", higher: false, less: false, entries: [t("Tov", 284), t("C", 476), t("Rust", 490), t("Bun", 823), t("Node", 1178)] },
+  { name: "dispatch", what: "50M virtual calls", higher: false, less: false, entries: [t("Tov", 36), t("C", 76), t("Rust", 77), t("Bun", 109), t("Node", 191)] },
+  { name: "strings", what: "format, join, split", higher: false, less: false, entries: [t("Tov", 143), t("Bun", 203), t("Rust", 224), t("C", 253), t("Node", 519)] },
+  { name: "fib", what: "recursive calls, overflow-checked", higher: false, less: false, entries: [t("Tov", 416), t("Rust", 444), t("C", 490), t("Bun", 942), t("Node", 1485)] },
+  { name: "nbody", what: "floating point", higher: false, less: false, entries: [t("Tov", 210), t("Rust", 224), t("C", 312), t("Bun", 512), t("Node", 554)] },
 ]
 
-function renderGroup(g: Group): string {
-  let max = 0.0
-  for (const b of g.bars) {
-    max = Math.max(max, b.value)
-  }
-  const rows = g.bars.map(b => {
-    const width = (b.value / max * 100).toFixed(1)
-    const us = b.who === "Tov" ? " us" : ""
-    return `<li class="bar${us}"><span class="who">${b.who}</span><span class="track"><span class="fill" style="--w:${width}%"></span></span><span class="val">${b.label}</span></li>`
-  })
-  return `<div class="group"><h4>${g.name}</h4><ul class="bars">${rows.join("")}</ul></div>`
+const systemRows: Row[] = [
+  { name: "web server", what: "JSON API, one core", higher: true, less: false, entries: [e("Tov", 241689, "242k req/s"), e("Rust", 216499, "216k req/s"), e("Bun", 110644, "111k req/s")] },
+  { name: "server memory", what: "serving that API", higher: false, less: true, entries: [e("Tov", 1.6, "1.6 MB"), e("Rust", 4.4, "4.4 MB"), e("Bun", 16.6, "16.6 MB")] },
+  { name: "fetch()", what: "64 requests at once", higher: true, less: false, entries: [e("Tov", 176827, "177k req/s"), e("Rust", 162416, "162k req/s"), e("Bun", 128760, "129k req/s"), e("Node", 30282, "30k req/s")] },
+  { name: "compile", what: "a program to a binary", higher: false, less: false, entries: [t("Tov", 42), t("C", 49), t("Rust", 98)] },
+]
+
+function ratioOf(r: Row, x: Entry): f64 {
+  const tov = r.entries[0]!.value
+  return r.higher ? tov / x.value : x.value / tov
 }
+
+function renderRow(r: Row): string {
+  const dots = r.entries.map(x => {
+    const ratio = ratioOf(r, x)
+    const at = Math.log(Math.min(ratio, scaleMax)) / Math.log(scaleMax) * 100
+    const word = r.less ? "more" : "slower"
+    const tip = x.who === "Tov" ? `Tov: ${x.label}` : `${x.who}: ${x.label}, ${ratio.toFixed(1)}× ${word}`
+    return `<span class="dot dot-${x.who.toLowerCase()}" style="--x:${at.toFixed(1)}%" data-tip="${tip}" tabindex="0" aria-label="${tip}"></span>`
+  })
+  // the punchline: against Rust, else against the best of the rest
+  let rival = r.entries[1]!
+  for (const x of r.entries) {
+    if (x.who === "Rust") rival = x
+  }
+  if (rival.who !== "Rust") {
+    for (const x of r.entries) {
+      if (x.who !== "Tov" && ratioOf(r, x) < ratioOf(r, rival)) rival = x
+    }
+  }
+  const lead = `${ratioOf(r, rival).toFixed(1)}× ${r.less ? "less" : "faster"}`
+  return `<li class="row"><div class="row-name"><code>${r.name}</code><span>${r.what}</span></div><div class="row-plot">${dots.reverse().join("")}</div><div class="row-lead"><b>${lead}</b><span>than ${rival.who}</span></div></li>`
+}
+
+function renderAxis(): string {
+  const ticks = [1, 2, 4, 8, 16, 32].map(n => {
+    const at = Math.log(n * 1.0) / Math.log(scaleMax) * 100
+    return `<span style="--x:${at.toFixed(1)}%">${n === 1 ? "Tov" : `${n}×`}</span>`
+  })
+  return `<div class="axis" aria-hidden="true"><span></span><div class="axis-ticks">${ticks.join("")}</div><span></span></div>`
+}
+
+function renderPlot(title: string, rows: Row[]): string {
+  return `<div class="plot"><h3>${title}</h3>${renderAxis()}<ul>${rows.map(renderRow).join("")}</ul></div>`
+}
+
+const legend = ["Tov", "Rust", "C", "Bun", "Node"].map(w => `<li><span class="dot dot-${w.toLowerCase()}"></span>${w}</li>`).join("")
 
 // ---------------------------------------------------------------- the agent
 
@@ -266,7 +311,6 @@ export function renderPage(footer: string): string {
       <p class="note">Tov is early. It runs on macOS and Linux.</p>
 
       ${renderRaces()}
-      <p class="race-caption">Each ball crosses its lane in time with its result: Tov's sets the pace, the others take as many times longer as they're slower. Measured on an Apple M4 Max; <a href="#speed">more below</a>, <a href="${repo}/tree/main/bench">method and every result on GitHub</a>.</p>
     </div>
 
     <section id="agents">
@@ -298,19 +342,20 @@ export function renderPage(footer: string): string {
     </section>
 
     <section id="speed">
-      <h2>Faster than Rust, in less of everything</h2>
-      <p class="intro">Tov compiles to C and hands it to your system's compiler. Memory is reference-counted, so there are no garbage collection pauses, and a program is one small file.</p>
-      <dl class="stats">
-        <div><dt>3×</dt><dd>faster than Rust on <code>binary_trees</code>: 260 ms, against 791</dd></div>
-        <div><dt>42 ms</dt><dd>to compile a program to a native binary (Rust: 98 ms)</dd></div>
-        <div><dt>1.6 MB</dt><dd>to serve 242,000 requests a second (Rust: 4.4 MB, Bun: 17 MB)</dd></div>
-        <div><dt>33 KB</dt><dd>a binary, stripped (Rust: 351 KB)</dd></div>
-      </dl>
-      <div class="chart">
-        <p class="how">Median wall time on an Apple M4 Max; every language prints the same output. Shorter is faster.</p>
-        <div class="groups">${programs.map(renderGroup).join("")}</div>
+      <div class="bench">
+        <h2>Faster than Rust, in less of everything</h2>
+        <p class="intro">Tov compiles to C and hands it to your system's compiler. Memory is reference-counted, so there are no garbage collection pauses, and a program is one small file.</p>
+        <dl class="stats">
+          <div><dt>3×</dt><dd>faster than Rust on <code>binary_trees</code></dd></div>
+          <div><dt>42 ms</dt><dd>to compile a program (Rust: 98)</dd></div>
+          <div><dt>1.6 MB</dt><dd>to serve 242k requests a second (Rust: 4.4)</dd></div>
+          <div><dt>33 KB</dt><dd>a binary (Rust: 351)</dd></div>
+        </dl>
+        <ul class="legend" aria-label="Runtimes">${legend}</ul>
+        ${renderPlot("Programs: how long each takes, against Tov", programRows)}
+        ${renderPlot("Servers, clients and the compiler", systemRows)}
+        <p class="fine">Apple M4 Max; every language prints the same output. From <code>bench/results/scoreboard-20261006-205209.json</code>, in which Tov beat Rust on every measurement but one, a tie (<code>points</code>: 292 ms against 291). Tov checks integer overflow by default; Rust's release builds don't. <a href="${repo}/tree/main/bench">Method, every result and caveats</a>.</p>
       </div>
-      <p class="fine">In the scoreboard run these numbers come from (<code>bench/results/scoreboard-20261006-205209.json</code>), Tov beat Rust on every measurement but one, a tie (<code>points</code>: 292 ms against 291). Tov checks integer overflow by default; Rust's release builds don't. <a href="${repo}/tree/main/bench">Method, every result and caveats</a>.</p>
     </section>
 
     <section id="npm">
