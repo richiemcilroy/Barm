@@ -4,5 +4,8 @@
   "scripts": {
     "dev": "tov --watch server.tov",
     "start": "tov server.tov"
+  },
+  "dependencies": {
+    "@vercel/analytics": "^2.0.1"
   }
 }

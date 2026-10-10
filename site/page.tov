@@ -298,6 +298,10 @@ export function renderPage(footer: string): string {
 <link rel="icon" href="/logo.svg" type="image/svg+xml">
 <link rel="preload" href="/fonts/schibsted-grotesk.woff2" as="font" type="font/woff2" crossorigin>
 <style>${css}</style>
+<script>
+  window.va = window.va || function () { (window.vaq = window.vaq || []).push(arguments); };
+</script>
+<script defer src="/_vercel/insights/script.js"></script>
 </head>
 <body>
 <pre id="prompt" hidden>${esc(agentPrompt)}</pre>
