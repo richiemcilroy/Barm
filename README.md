@@ -284,3 +284,7 @@ scripts/sanitize.sh run file.tov # run under ASan/UBSan in a Linux container
 - `bench/`: benchmarks against C, Rust, Node and Bun, and Cap's media server on Bun and Tov
 - `site/`: the landing page, a Tov program (`cd site && tov dev`)
 - `docs/`: the [language spec](docs/spec.md)
+
+## License
+
+MIT, see [LICENSE](LICENSE). The vendored libraries in `vendor/` and Node's built-ins in `runtime/node/` keep their own licenses.
