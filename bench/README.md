@@ -54,6 +54,57 @@ Tov builds use a cache private to each benchmark session, so every program is re
 
 A missing toolchain is reported as `skipped`. A failed build is `build failed` with the compiler's message kept in the JSON; for scriptc a rejected program is `unsupported` (the TS isn't rewritten to suit it). A run past `--timeout` (default 60 s) is `timeout`, a non-zero exit is `crashed`, and output that differs from C is `mismatch`. Binaries go to `bench/.build/`.
 
+## Results
+
+Median wall time and peak memory of 5 runs (after a warmup run). Every language prints the same output. The JSON behind each table is in `bench/results/`.
+
+### macOS, Apple M4 Max
+
+Load average about 3. Apple clang 17, Rust 1.98, Node 26.3, Bun 1.4.0.
+
+| benchmark | C | Rust | Node | Bun | **Tov** |
+|---|---:|---:|---:|---:|---:|
+| array_push | 51 ms · 244 MB | 59 ms · 244 MB | 347 ms · 780 MB | 207 ms · 814 MB | **48 ms** · 242 MB |
+| async_calls | — | 14 ms · 2.0 MB | 643 ms · 81.1 MB | 525 ms · 29.9 MB | **17 ms** · 1.9 MB |
+| async_tasks | — | 136 ms · 2.3 MB | 353 ms · 97.4 MB | 179 ms · 30.9 MB | **137 ms** · 2.5 MB |
+| binary_trees | 686 ms · 18.7 MB | 793 ms · 19.0 MB | 461 ms · 212 MB | 381 ms · 195 MB | **260 ms** · 18.7 MB |
+| class_trees | 690 ms · 18.7 MB | 793 ms · 19.0 MB | 467 ms · 210 MB | 371 ms · 223 MB | **259 ms** · 18.7 MB |
+| dispatch | 76 ms · 1.9 MB | 76 ms · 2.1 MB | 201 ms · 81.9 MB | 109 ms · 26.7 MB | **39 ms** · 1.9 MB |
+| fib | 492 ms · 1.9 MB | 439 ms · 2.0 MB | 1500 ms · 78.1 MB | 948 ms · 18.8 MB | **427 ms** · 1.9 MB |
+| json | — | 260 ms · 241 MB | 444 ms · 491 MB | 267 ms · 327 MB | **226 ms** · 143 MB |
+| map_insert | 524 ms · 235 MB | 534 ms · 311 MB | 945 ms · 295 MB | 764 ms · 592 MB | **276 ms** · 157 MB |
+| nbody | 310 ms · 1.8 MB | 221 ms · 2.0 MB | 556 ms · 80.9 MB | 505 ms · 23.1 MB | **206 ms** · 1.9 MB |
+| points | 288 ms · 1.9 MB | 299 ms · 2.0 MB | 1891 ms · 86.7 MB | 815 ms · 32.0 MB | **288 ms** · 1.8 MB |
+| sort | 268 ms · 25.9 MB | 73 ms · 40.3 MB | 1185 ms · 279 MB | 711 ms · 121 MB | **47 ms** · 26.2 MB |
+| strings | 254 ms · 216 MB | 230 ms · 263 MB | 517 ms · 701 MB | 208 ms · 592 MB | **155 ms** · 192 MB |
+
+### Linux, x86-64 (AMD Ryzen 9 9950X, 8 vCPUs, a cloud VM)
+
+Ubuntu 24.04, load average about 1. C with GCC 13, Tov's C with clang 18, Rust 1.97, Node 24.18, Bun 1.4.0. `map_insert`'s C, Rust and Tov are from a second run (its C didn't build on Linux the first time); the VM's timings vary by up to a third between runs.
+
+| benchmark | C | Rust | Node | Bun | **Tov** |
+|---|---:|---:|---:|---:|---:|
+| array_push | 97 ms · 242 MB | 89 ms · 242 MB | 507 ms · 781 MB | 334 ms · 606 MB | **99 ms** · 242 MB |
+| async_calls | — | 24 ms · 2.1 MB | 879 ms · 73.8 MB | 701 ms · 34.3 MB | **18 ms** · 1.8 MB |
+| async_tasks | — | 309 ms · 2.6 MB | 524 ms · 104 MB | 226 ms · 35.5 MB | **132 ms** · 2.2 MB |
+| binary_trees | 791 ms · 35.1 MB | 893 ms · 35.7 MB | 994 ms · 313 MB | 664 ms · 176 MB | **222 ms** · 18.6 MB |
+| class_trees | 997 ms · 35.1 MB | 986 ms · 35.7 MB | 641 ms · 270 MB | 748 ms · 204 MB | **242 ms** · 18.6 MB |
+| dispatch | 120 ms · 1.8 MB | 123 ms · 2.4 MB | 117 ms · 73.0 MB | 78 ms · 29.6 MB | **24 ms** · 1.8 MB |
+| fib | 235 ms · 1.6 MB | 451 ms · 2.1 MB | 1572 ms · 68.9 MB | 1054 ms · 23.6 MB | **480 ms** · 1.8 MB |
+| json | — | 370 ms · 138 MB | 663 ms · 453 MB | 439 ms · 308 MB | **248 ms** · 90.2 MB |
+| map_insert | 633 ms · 194 MB | 1456 ms · 256 MB | 2035 ms · 331 MB | 1531 ms · 643 MB | **579 ms** · 101 MB |
+| nbody | 358 ms · 1.7 MB | 261 ms · 2.2 MB | 484 ms · 72.7 MB | 666 ms · 27.3 MB | **318 ms** · 1.8 MB |
+| points | 235 ms · 1.7 MB | 236 ms · 2.2 MB | 2116 ms · 73.6 MB | 826 ms · 37.2 MB | **230 ms** · 1.8 MB |
+| sort | 320 ms · 49.3 MB | 96 ms · 38.1 MB | 2097 ms · 335 MB | 666 ms · 125 MB | **49 ms** · 25.8 MB |
+| strings | 289 ms · 309 MB | 257 ms · 262 MB | 962 ms · 834 MB | 421 ms · 540 MB | **186 ms** · 158 MB |
+
+Where Tov is behind:
+
+- `async_calls` on macOS: Rust with tokio takes 14 ms and Tov 17. Tov checks every `+` for overflow and Rust's release builds don't; on Linux Tov is ahead (18 ms against 24).
+- `nbody` on Linux: 318 ms against Rust's 261. On macOS Tov is ahead (206 against 221).
+- `fib` on Linux: GCC turns C's recursion into a loop and runs it in 235 ms. Tov's overflow-checked additions can't be reordered that way; Rust takes 451 ms and Tov 480.
+- Memory floor: a program that allocates little peaks at 1.8–1.9 MB, the same as C's on macOS and about 0.1–0.2 MB above it on Linux, and below Rust's (2.0–2.4 MB) on both.
+
 ## How the versions correspond
 
 - The TS and Tov files are nearly line-for-line identical. They differ only where the spec requires it:

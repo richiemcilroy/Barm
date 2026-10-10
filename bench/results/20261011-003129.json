@@ -1,0 +1,1946 @@
+{
+  "started": "2026-10-11T00:31:29",
+  "machine": {
+    "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+    "machine": "arm64",
+    "processor": "arm",
+    "cpu_count": 16,
+    "load_average": [
+      2.8076171875,
+      2.6982421875,
+      3.07568359375
+    ]
+  },
+  "settings": {
+    "runs": 5,
+    "warmup": 1,
+    "timeout_s": 60.0,
+    "scriptc_cache": false
+  },
+  "toolchains": {
+    "c": "Apple clang version 17.0.0 (clang-1700.6.3.2)",
+    "rust": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "node": "v26.3.0",
+    "bun": "1.4.0",
+    "scriptc": "0.1.7",
+    "tov": "tov 0.0.1",
+    "rust-checked": null,
+    "tov-unchecked": null
+  },
+  "results": [
+    {
+      "bench": "array_push",
+      "lang": "c",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.060005499981343746,
+      "binary_bytes": 33600,
+      "stripped_bytes": 33608,
+      "source_lines": 33,
+      "times_s": [
+        0.05094745894894004,
+        0.051456332905218005,
+        0.05048304202500731,
+        0.051558083039708436,
+        0.0528323749313131
+      ],
+      "rss_bytes": [
+        244056064,
+        244056064,
+        244056064,
+        244056064,
+        244056064
+      ],
+      "median_s": 0.051456332905218005,
+      "min_s": 0.05048304202500731,
+      "peak_rss_bytes": 244056064,
+      "output_matches": true,
+      "stdout": "30000000 224999992500000.0 224999992500000.0\n",
+      "note": ""
+    },
+    {
+      "bench": "array_push",
+      "lang": "rust",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.09663008304778486,
+      "binary_bytes": 489560,
+      "stripped_bytes": 359096,
+      "source_lines": 16,
+      "times_s": [
+        0.0591006251052022,
+        0.059157000039704144,
+        0.06120720901526511,
+        0.05837425007484853,
+        0.05710225005168468
+      ],
+      "rss_bytes": [
+        244269056,
+        244269056,
+        244269056,
+        244269056,
+        244269056
+      ],
+      "median_s": 0.0591006251052022,
+      "min_s": 0.05710225005168468,
+      "peak_rss_bytes": 244269056,
+      "output_matches": true,
+      "stdout": "30000000 224999992500000.0 224999992500000.0\n",
+      "note": ""
+    },
+    {
+      "bench": "array_push",
+      "lang": "node",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 17,
+      "times_s": [
+        0.3470264580100775,
+        0.33903366699814796,
+        0.3375052090268582,
+        0.3471291250316426,
+        0.35208987502846867
+      ],
+      "rss_bytes": [
+        778043392,
+        777961472,
+        777781248,
+        778108928,
+        780419072
+      ],
+      "median_s": 0.3470264580100775,
+      "min_s": 0.3375052090268582,
+      "peak_rss_bytes": 780419072,
+      "output_matches": true,
+      "stdout": "30000000 224999992500000.0 224999992500000.0\n",
+      "note": ""
+    },
+    {
+      "bench": "array_push",
+      "lang": "bun",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 17,
+      "times_s": [
+        0.21927641704678535,
+        0.20668370800558478,
+        0.21304583293385804,
+        0.20037445798516273,
+        0.19880220806226134
+      ],
+      "rss_bytes": [
+        813973504,
+        607567872,
+        813973504,
+        607502336,
+        607453184
+      ],
+      "median_s": 0.20668370800558478,
+      "min_s": 0.19880220806226134,
+      "peak_rss_bytes": 813973504,
+      "output_matches": true,
+      "stdout": "30000000 224999992500000.0 224999992500000.0\n",
+      "note": ""
+    },
+    {
+      "bench": "array_push",
+      "lang": "tov",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.04208337492309511,
+      "binary_bytes": 34440,
+      "stripped_bytes": 34424,
+      "source_lines": 16,
+      "times_s": [
+        0.049786416930146515,
+        0.047937957919202745,
+        0.04738687502685934,
+        0.04757004196289927,
+        0.04862675000913441
+      ],
+      "rss_bytes": [
+        241876992,
+        241876992,
+        241876992,
+        241876992,
+        241876992
+      ],
+      "median_s": 0.047937957919202745,
+      "min_s": 0.04738687502685934,
+      "peak_rss_bytes": 241876992,
+      "output_matches": true,
+      "stdout": "30000000 224999992500000.0 224999992500000.0\n",
+      "note": ""
+    },
+    {
+      "bench": "async_calls",
+      "lang": "c",
+      "status": "skipped",
+      "reason": "no main.c for this benchmark",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": null,
+      "times_s": [],
+      "rss_bytes": [],
+      "median_s": null,
+      "min_s": null,
+      "peak_rss_bytes": null,
+      "output_matches": false,
+      "stdout": "",
+      "note": ""
+    },
+    {
+      "bench": "async_calls",
+      "lang": "rust",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 1.7425588340265676,
+      "binary_bytes": 417248,
+      "stripped_bytes": 336232,
+      "source_lines": 11,
+      "times_s": [
+        0.014902292052283883,
+        0.014536875067278743,
+        0.014159958926029503,
+        0.013596458011306822,
+        0.013444541953504086
+      ],
+      "rss_bytes": [
+        2015232,
+        2015232,
+        1998848,
+        2015232,
+        2015232
+      ],
+      "median_s": 0.014159958926029503,
+      "min_s": 0.013444541953504086,
+      "peak_rss_bytes": 2015232,
+      "output_matches": true,
+      "stdout": "89999995\n",
+      "note": ""
+    },
+    {
+      "bench": "async_calls",
+      "lang": "node",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 11,
+      "times_s": [
+        0.6360317079816014,
+        0.6412342090625316,
+        0.6505208339076489,
+        0.6594969579018652,
+        0.6433778329519555
+      ],
+      "rss_bytes": [
+        80953344,
+        80855040,
+        81133568,
+        80805888,
+        80789504
+      ],
+      "median_s": 0.6433778329519555,
+      "min_s": 0.6360317079816014,
+      "peak_rss_bytes": 81133568,
+      "output_matches": true,
+      "stdout": "89999995\n",
+      "note": ""
+    },
+    {
+      "bench": "async_calls",
+      "lang": "bun",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 11,
+      "times_s": [
+        0.5236048749648035,
+        0.5281982920132577,
+        0.5254336250945926,
+        0.5149783750530332,
+        0.5253537080716342
+      ],
+      "rss_bytes": [
+        29818880,
+        29769728,
+        29769728,
+        29802496,
+        29917184
+      ],
+      "median_s": 0.5253537080716342,
+      "min_s": 0.5149783750530332,
+      "peak_rss_bytes": 29917184,
+      "output_matches": true,
+      "stdout": "89999995\n",
+      "note": ""
+    },
+    {
+      "bench": "async_calls",
+      "lang": "tov",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.04270554194226861,
+      "binary_bytes": 85224,
+      "stripped_bytes": 85208,
+      "source_lines": 10,
+      "times_s": [
+        0.020616833004169166,
+        0.018212165916338563,
+        0.016626249998807907,
+        0.015433375025168061,
+        0.014871582970954478
+      ],
+      "rss_bytes": [
+        1884160,
+        1884160,
+        1884160,
+        1884160,
+        1884160
+      ],
+      "median_s": 0.016626249998807907,
+      "min_s": 0.014871582970954478,
+      "peak_rss_bytes": 1884160,
+      "output_matches": true,
+      "stdout": "89999995\n",
+      "note": ""
+    },
+    {
+      "bench": "async_tasks",
+      "lang": "c",
+      "status": "skipped",
+      "reason": "no main.c for this benchmark",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": null,
+      "times_s": [],
+      "rss_bytes": [],
+      "median_s": null,
+      "min_s": null,
+      "peak_rss_bytes": null,
+      "output_matches": false,
+      "stdout": "",
+      "note": ""
+    },
+    {
+      "bench": "async_tasks",
+      "lang": "rust",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 1.7862038750899956,
+      "binary_bytes": 421920,
+      "stripped_bytes": 336280,
+      "source_lines": 17,
+      "times_s": [
+        0.1358438329771161,
+        0.13679833291098475,
+        0.1357774999924004,
+        0.13605791702866554,
+        0.1367964589735493
+      ],
+      "rss_bytes": [
+        2293760,
+        2310144,
+        2293760,
+        2293760,
+        2293760
+      ],
+      "median_s": 0.13605791702866554,
+      "min_s": 0.1357774999924004,
+      "peak_rss_bytes": 2310144,
+      "output_matches": true,
+      "stdout": "9999999\n",
+      "note": ""
+    },
+    {
+      "bench": "async_tasks",
+      "lang": "node",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 21,
+      "times_s": [
+        0.3381005839910358,
+        0.35257783299311996,
+        0.3614560409914702,
+        0.35379562503658235,
+        0.3370578329777345
+      ],
+      "rss_bytes": [
+        93945856,
+        94142464,
+        94044160,
+        97419264,
+        93749248
+      ],
+      "median_s": 0.35257783299311996,
+      "min_s": 0.3370578329777345,
+      "peak_rss_bytes": 97419264,
+      "output_matches": true,
+      "stdout": "9999999\n",
+      "note": ""
+    },
+    {
+      "bench": "async_tasks",
+      "lang": "bun",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 21,
+      "times_s": [
+        0.1799659999087453,
+        0.17880333308130503,
+        0.17749912501312792,
+        0.1773661250481382,
+        0.17939987499266863
+      ],
+      "rss_bytes": [
+        30883840,
+        30883840,
+        30900224,
+        30900224,
+        30932992
+      ],
+      "median_s": 0.17880333308130503,
+      "min_s": 0.1773661250481382,
+      "peak_rss_bytes": 30932992,
+      "output_matches": true,
+      "stdout": "9999999\n",
+      "note": ""
+    },
+    {
+      "bench": "async_tasks",
+      "lang": "tov",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.05439612502232194,
+      "binary_bytes": 85272,
+      "stripped_bytes": 85256,
+      "source_lines": 20,
+      "times_s": [
+        0.1361625409917906,
+        0.13655545795336366,
+        0.13668262504506856,
+        0.13662408292293549,
+        0.1364128750283271
+      ],
+      "rss_bytes": [
+        2457600,
+        2457600,
+        2473984,
+        2457600,
+        2457600
+      ],
+      "median_s": 0.13655545795336366,
+      "min_s": 0.1361625409917906,
+      "peak_rss_bytes": 2473984,
+      "output_matches": true,
+      "stdout": "9999999\n",
+      "note": ""
+    },
+    {
+      "bench": "binary_trees",
+      "lang": "c",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.050129791954532266,
+      "binary_bytes": 33616,
+      "stripped_bytes": 33560,
+      "source_lines": 50,
+      "times_s": [
+        0.683094208012335,
+        0.6950353329302743,
+        0.6907469170400873,
+        0.6789678750792518,
+        0.6862175830174237
+      ],
+      "rss_bytes": [
+        18743296,
+        18726912,
+        18743296,
+        18726912,
+        18743296
+      ],
+      "median_s": 0.6862175830174237,
+      "min_s": 0.6789678750792518,
+      "peak_rss_bytes": 18743296,
+      "output_matches": true,
+      "stdout": "stretch tree of depth 19\t check: 1048575\n262144\t trees of depth 4\t check: 8126464\n65536\t trees of depth 6\t check: 8323072\n16384\t trees of depth 8\t check: 8372224\n4096\t trees of depth 10\t check: 8384512\n1024\t trees of depth 12\t check: 8387584\n256\t trees of depth 14\t check: 8388352\n64\t trees of depth 16\t check: 8388544\n16\t trees of depth 18\t check: 8388592\nlong lived tree of depth 18\t check: 524287\n",
+      "note": ""
+    },
+    {
+      "bench": "binary_trees",
+      "lang": "rust",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.09124587499536574,
+      "binary_bytes": 470040,
+      "stripped_bytes": 342184,
+      "source_lines": 36,
+      "times_s": [
+        0.7840032080421224,
+        0.7927175830118358,
+        0.7933934170287102,
+        0.7974066250026226,
+        0.7938392090145499
+      ],
+      "rss_bytes": [
+        18956288,
+        18939904,
+        18956288,
+        18939904,
+        18956288
+      ],
+      "median_s": 0.7933934170287102,
+      "min_s": 0.7840032080421224,
+      "peak_rss_bytes": 18956288,
+      "output_matches": true,
+      "stdout": "stretch tree of depth 19\t check: 1048575\n262144\t trees of depth 4\t check: 8126464\n65536\t trees of depth 6\t check: 8323072\n16384\t trees of depth 8\t check: 8372224\n4096\t trees of depth 10\t check: 8384512\n1024\t trees of depth 12\t check: 8387584\n256\t trees of depth 14\t check: 8388352\n64\t trees of depth 16\t check: 8388544\n16\t trees of depth 18\t check: 8388592\nlong lived tree of depth 18\t check: 524287\n",
+      "note": ""
+    },
+    {
+      "bench": "binary_trees",
+      "lang": "node",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 29,
+      "times_s": [
+        0.465375000028871,
+        0.46283862506970763,
+        0.46073404198978096,
+        0.45651545794680715,
+        0.4513344999868423
+      ],
+      "rss_bytes": [
+        211976192,
+        211615744,
+        211828736,
+        211959808,
+        211812352
+      ],
+      "median_s": 0.46073404198978096,
+      "min_s": 0.4513344999868423,
+      "peak_rss_bytes": 211976192,
+      "output_matches": true,
+      "stdout": "stretch tree of depth 19\t check: 1048575\n262144\t trees of depth 4\t check: 8126464\n65536\t trees of depth 6\t check: 8323072\n16384\t trees of depth 8\t check: 8372224\n4096\t trees of depth 10\t check: 8384512\n1024\t trees of depth 12\t check: 8387584\n256\t trees of depth 14\t check: 8388352\n64\t trees of depth 16\t check: 8388544\n16\t trees of depth 18\t check: 8388592\nlong lived tree of depth 18\t check: 524287\n",
+      "note": ""
+    },
+    {
+      "bench": "binary_trees",
+      "lang": "bun",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 29,
+      "times_s": [
+        0.3818051250418648,
+        0.3751604170538485,
+        0.38063983304891735,
+        0.3869994590058923,
+        0.378231875016354
+      ],
+      "rss_bytes": [
+        159039488,
+        150749184,
+        159186944,
+        195166208,
+        151126016
+      ],
+      "median_s": 0.38063983304891735,
+      "min_s": 0.3751604170538485,
+      "peak_rss_bytes": 195166208,
+      "output_matches": true,
+      "stdout": "stretch tree of depth 19\t check: 1048575\n262144\t trees of depth 4\t check: 8126464\n65536\t trees of depth 6\t check: 8323072\n16384\t trees of depth 8\t check: 8372224\n4096\t trees of depth 10\t check: 8384512\n1024\t trees of depth 12\t check: 8387584\n256\t trees of depth 14\t check: 8388352\n64\t trees of depth 16\t check: 8388544\n16\t trees of depth 18\t check: 8388592\nlong lived tree of depth 18\t check: 524287\n",
+      "note": ""
+    },
+    {
+      "bench": "binary_trees",
+      "lang": "tov",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.04076224996242672,
+      "binary_bytes": 34104,
+      "stripped_bytes": 34088,
+      "source_lines": 28,
+      "times_s": [
+        0.2647888329811394,
+        0.2605493339942768,
+        0.25992650003172457,
+        0.25966375006828457,
+        0.2578877080231905
+      ],
+      "rss_bytes": [
+        18677760,
+        18677760,
+        18677760,
+        18677760,
+        18677760
+      ],
+      "median_s": 0.25992650003172457,
+      "min_s": 0.2578877080231905,
+      "peak_rss_bytes": 18677760,
+      "output_matches": true,
+      "stdout": "stretch tree of depth 19\t check: 1048575\n262144\t trees of depth 4\t check: 8126464\n65536\t trees of depth 6\t check: 8323072\n16384\t trees of depth 8\t check: 8372224\n4096\t trees of depth 10\t check: 8384512\n1024\t trees of depth 12\t check: 8387584\n256\t trees of depth 14\t check: 8388352\n64\t trees of depth 16\t check: 8388544\n16\t trees of depth 18\t check: 8388592\nlong lived tree of depth 18\t check: 524287\n",
+      "note": ""
+    },
+    {
+      "bench": "class_trees",
+      "lang": "c",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.04725608299486339,
+      "binary_bytes": 33616,
+      "stripped_bytes": 33560,
+      "source_lines": 50,
+      "times_s": [
+        0.6936583749484271,
+        0.6871272090356797,
+        0.7063132079783827,
+        0.6900368749629706,
+        0.6849468339933082
+      ],
+      "rss_bytes": [
+        18743296,
+        18743296,
+        18743296,
+        18743296,
+        18743296
+      ],
+      "median_s": 0.6900368749629706,
+      "min_s": 0.6849468339933082,
+      "peak_rss_bytes": 18743296,
+      "output_matches": true,
+      "stdout": "stretch tree of depth 19\t check: 1048575\n262144\t trees of depth 4\t check: 8126464\n65536\t trees of depth 6\t check: 8323072\n16384\t trees of depth 8\t check: 8372224\n4096\t trees of depth 10\t check: 8384512\n1024\t trees of depth 12\t check: 8387584\n256\t trees of depth 14\t check: 8388352\n64\t trees of depth 16\t check: 8388544\n16\t trees of depth 18\t check: 8388592\nlong lived tree of depth 18\t check: 524287\n",
+      "note": ""
+    },
+    {
+      "bench": "class_trees",
+      "lang": "rust",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.09302925004158169,
+      "binary_bytes": 470040,
+      "stripped_bytes": 342184,
+      "source_lines": 36,
+      "times_s": [
+        0.7911154159810394,
+        0.7980100830318406,
+        0.7974850829923525,
+        0.7798945419490337,
+        0.7927603330463171
+      ],
+      "rss_bytes": [
+        18956288,
+        18956288,
+        18956288,
+        18956288,
+        18956288
+      ],
+      "median_s": 0.7927603330463171,
+      "min_s": 0.7798945419490337,
+      "peak_rss_bytes": 18956288,
+      "output_matches": true,
+      "stdout": "stretch tree of depth 19\t check: 1048575\n262144\t trees of depth 4\t check: 8126464\n65536\t trees of depth 6\t check: 8323072\n16384\t trees of depth 8\t check: 8372224\n4096\t trees of depth 10\t check: 8384512\n1024\t trees of depth 12\t check: 8387584\n256\t trees of depth 14\t check: 8388352\n64\t trees of depth 16\t check: 8388544\n16\t trees of depth 18\t check: 8388592\nlong lived tree of depth 18\t check: 524287\n",
+      "note": ""
+    },
+    {
+      "bench": "class_trees",
+      "lang": "node",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 36,
+      "times_s": [
+        0.45415487501304597,
+        0.4682161669479683,
+        0.4672088749939576,
+        0.4777907090028748,
+        0.46179754100739956
+      ],
+      "rss_bytes": [
+        210436096,
+        210419712,
+        210255872,
+        210436096,
+        210485248
+      ],
+      "median_s": 0.4672088749939576,
+      "min_s": 0.45415487501304597,
+      "peak_rss_bytes": 210485248,
+      "output_matches": true,
+      "stdout": "stretch tree of depth 19\t check: 1048575\n262144\t trees of depth 4\t check: 8126464\n65536\t trees of depth 6\t check: 8323072\n16384\t trees of depth 8\t check: 8372224\n4096\t trees of depth 10\t check: 8384512\n1024\t trees of depth 12\t check: 8387584\n256\t trees of depth 14\t check: 8388352\n64\t trees of depth 16\t check: 8388544\n16\t trees of depth 18\t check: 8388592\nlong lived tree of depth 18\t check: 524287\n",
+      "note": ""
+    },
+    {
+      "bench": "class_trees",
+      "lang": "bun",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 36,
+      "times_s": [
+        0.36697120894677937,
+        0.3836864170152694,
+        0.3688609169330448,
+        0.37333475006744266,
+        0.3714139999356121
+      ],
+      "rss_bytes": [
+        199901184,
+        223100928,
+        211812352,
+        203505664,
+        216498176
+      ],
+      "median_s": 0.3714139999356121,
+      "min_s": 0.36697120894677937,
+      "peak_rss_bytes": 223100928,
+      "output_matches": true,
+      "stdout": "stretch tree of depth 19\t check: 1048575\n262144\t trees of depth 4\t check: 8126464\n65536\t trees of depth 6\t check: 8323072\n16384\t trees of depth 8\t check: 8372224\n4096\t trees of depth 10\t check: 8384512\n1024\t trees of depth 12\t check: 8387584\n256\t trees of depth 14\t check: 8388352\n64\t trees of depth 16\t check: 8388544\n16\t trees of depth 18\t check: 8388592\nlong lived tree of depth 18\t check: 524287\n",
+      "note": ""
+    },
+    {
+      "bench": "class_trees",
+      "lang": "tov",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.04095345793757588,
+      "binary_bytes": 34104,
+      "stripped_bytes": 34088,
+      "source_lines": 30,
+      "times_s": [
+        0.2599986670538783,
+        0.25831120798829943,
+        0.2588401249377057,
+        0.25947700010146946,
+        0.2616972499527037
+      ],
+      "rss_bytes": [
+        18677760,
+        18677760,
+        18677760,
+        18677760,
+        18677760
+      ],
+      "median_s": 0.25947700010146946,
+      "min_s": 0.25831120798829943,
+      "peak_rss_bytes": 18677760,
+      "output_matches": true,
+      "stdout": "stretch tree of depth 19\t check: 1048575\n262144\t trees of depth 4\t check: 8126464\n65536\t trees of depth 6\t check: 8323072\n16384\t trees of depth 8\t check: 8372224\n4096\t trees of depth 10\t check: 8384512\n1024\t trees of depth 12\t check: 8387584\n256\t trees of depth 14\t check: 8388352\n64\t trees of depth 16\t check: 8388544\n16\t trees of depth 18\t check: 8388592\nlong lived tree of depth 18\t check: 524287\n",
+      "note": ""
+    },
+    {
+      "bench": "dispatch",
+      "lang": "c",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.045560958911664784,
+      "binary_bytes": 33792,
+      "stripped_bytes": 33672,
+      "source_lines": 30,
+      "times_s": [
+        0.07525041699409485,
+        0.07901616697199643,
+        0.07837399991694838,
+        0.07585825002752244,
+        0.07597416604403406
+      ],
+      "rss_bytes": [
+        1884160,
+        1884160,
+        1884160,
+        1884160,
+        1884160
+      ],
+      "median_s": 0.07597416604403406,
+      "min_s": 0.07525041699409485,
+      "peak_rss_bytes": 1884160,
+      "output_matches": true,
+      "stdout": "3125333626.079\n",
+      "note": ""
+    },
+    {
+      "bench": "dispatch",
+      "lang": "rust",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.09971304202917963,
+      "binary_bytes": 490152,
+      "stripped_bytes": 359096,
+      "source_lines": 54,
+      "times_s": [
+        0.07618541701231152,
+        0.07709045906085521,
+        0.07611995795741677,
+        0.0762291660066694,
+        0.07568941707722843
+      ],
+      "rss_bytes": [
+        2113536,
+        2113536,
+        2113536,
+        2113536,
+        2113536
+      ],
+      "median_s": 0.07618541701231152,
+      "min_s": 0.07568941707722843,
+      "peak_rss_bytes": 2113536,
+      "output_matches": true,
+      "stdout": "3125333626.079\n",
+      "note": ""
+    },
+    {
+      "bench": "dispatch",
+      "lang": "node",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 63,
+      "times_s": [
+        0.1994749589357525,
+        0.20517683296930045,
+        0.20450320898089558,
+        0.2010262080002576,
+        0.19279837503563613
+      ],
+      "rss_bytes": [
+        81772544,
+        81805312,
+        81920000,
+        81920000,
+        81756160
+      ],
+      "median_s": 0.2010262080002576,
+      "min_s": 0.19279837503563613,
+      "peak_rss_bytes": 81920000,
+      "output_matches": true,
+      "stdout": "3125333626.079\n",
+      "note": ""
+    },
+    {
+      "bench": "dispatch",
+      "lang": "bun",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 63,
+      "times_s": [
+        0.10825187503360212,
+        0.11040966701693833,
+        0.1088101250352338,
+        0.10908179101534188,
+        0.1082546670222655
+      ],
+      "rss_bytes": [
+        26607616,
+        26656768,
+        26705920,
+        26640384,
+        26705920
+      ],
+      "median_s": 0.1088101250352338,
+      "min_s": 0.10825187503360212,
+      "peak_rss_bytes": 26705920,
+      "output_matches": true,
+      "stdout": "3125333626.079\n",
+      "note": ""
+    },
+    {
+      "bench": "dispatch",
+      "lang": "tov",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.05000954202841967,
+      "binary_bytes": 34440,
+      "stripped_bytes": 34424,
+      "source_lines": 52,
+      "times_s": [
+        0.03888291597831994,
+        0.03888604196254164,
+        0.036287665949203074,
+        0.03879595792386681,
+        0.039587208069860935
+      ],
+      "rss_bytes": [
+        1900544,
+        1900544,
+        1900544,
+        1900544,
+        1900544
+      ],
+      "median_s": 0.03888291597831994,
+      "min_s": 0.036287665949203074,
+      "peak_rss_bytes": 1900544,
+      "output_matches": true,
+      "stdout": "3125333626.079\n",
+      "note": ""
+    },
+    {
+      "bench": "fib",
+      "lang": "c",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.0419889580225572,
+      "binary_bytes": 33440,
+      "stripped_bytes": 33432,
+      "source_lines": 10,
+      "times_s": [
+        0.49156175006646663,
+        0.47863537492230535,
+        0.48379383399151266,
+        0.5025427920045331,
+        0.49745554104447365
+      ],
+      "rss_bytes": [
+        1851392,
+        1851392,
+        1851392,
+        1851392,
+        1851392
+      ],
+      "median_s": 0.49156175006646663,
+      "min_s": 0.47863537492230535,
+      "peak_rss_bytes": 1851392,
+      "output_matches": true,
+      "stdout": "267914296\n",
+      "note": ""
+    },
+    {
+      "bench": "fib",
+      "lang": "rust",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.08038591593503952,
+      "binary_bytes": 469624,
+      "stripped_bytes": 342184,
+      "source_lines": 9,
+      "times_s": [
+        0.44747137499507517,
+        0.4395940840477124,
+        0.43666754104197025,
+        0.4391735839890316,
+        0.43315408402122557
+      ],
+      "rss_bytes": [
+        2015232,
+        2015232,
+        2015232,
+        2015232,
+        2015232
+      ],
+      "median_s": 0.4391735839890316,
+      "min_s": 0.43315408402122557,
+      "peak_rss_bytes": 2015232,
+      "output_matches": true,
+      "stdout": "267914296\n",
+      "note": ""
+    },
+    {
+      "bench": "fib",
+      "lang": "node",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 8,
+      "times_s": [
+        1.5059402500046417,
+        1.4938672500429675,
+        1.4913489579921588,
+        1.5009296670323238,
+        1.500454334076494
+      ],
+      "rss_bytes": [
+        77594624,
+        77545472,
+        78086144,
+        77578240,
+        77529088
+      ],
+      "median_s": 1.500454334076494,
+      "min_s": 1.4913489579921588,
+      "peak_rss_bytes": 78086144,
+      "output_matches": true,
+      "stdout": "267914296\n",
+      "note": ""
+    },
+    {
+      "bench": "fib",
+      "lang": "bun",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 8,
+      "times_s": [
+        0.9470988750690594,
+        0.9481397080235183,
+        0.9627005000365898,
+        0.9457799580413848,
+        0.9484937089728191
+      ],
+      "rss_bytes": [
+        18776064,
+        18776064,
+        18726912,
+        18776064,
+        18776064
+      ],
+      "median_s": 0.9481397080235183,
+      "min_s": 0.9457799580413848,
+      "peak_rss_bytes": 18776064,
+      "output_matches": true,
+      "stdout": "267914296\n",
+      "note": ""
+    },
+    {
+      "bench": "fib",
+      "lang": "tov",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.042615832993760705,
+      "binary_bytes": 34104,
+      "stripped_bytes": 34088,
+      "source_lines": 7,
+      "times_s": [
+        0.42342454206664115,
+        0.43767704209312797,
+        0.4271133749280125,
+        0.4292023340240121,
+        0.42596812499687076
+      ],
+      "rss_bytes": [
+        1851392,
+        1851392,
+        1851392,
+        1851392,
+        1851392
+      ],
+      "median_s": 0.4271133749280125,
+      "min_s": 0.42342454206664115,
+      "peak_rss_bytes": 1851392,
+      "output_matches": true,
+      "stdout": "267914296\n",
+      "note": ""
+    },
+    {
+      "bench": "json",
+      "lang": "c",
+      "status": "skipped",
+      "reason": "no main.c for this benchmark",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": null,
+      "times_s": [],
+      "rss_bytes": [],
+      "median_s": null,
+      "min_s": null,
+      "peak_rss_bytes": null,
+      "output_matches": false,
+      "stdout": "",
+      "note": ""
+    },
+    {
+      "bench": "json",
+      "lang": "rust",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 2.2515883749583736,
+      "binary_bytes": 450624,
+      "stripped_bytes": 368760,
+      "source_lines": 37,
+      "times_s": [
+        0.2647209580754861,
+        0.2597219579620287,
+        0.26112070796079934,
+        0.2604210829595104,
+        0.2602990830782801
+      ],
+      "rss_bytes": [
+        241303552,
+        241303552,
+        241352704,
+        241336320,
+        241336320
+      ],
+      "median_s": 0.2604210829595104,
+      "min_s": 0.2597219579620287,
+      "peak_rss_bytes": 241352704,
+      "output_matches": true,
+      "stdout": "1999995 87333370\n",
+      "note": ""
+    },
+    {
+      "bench": "json",
+      "lang": "node",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 17,
+      "times_s": [
+        0.4374309580307454,
+        0.4435202080057934,
+        0.45786154200322926,
+        0.4439051669323817,
+        0.44803145807236433
+      ],
+      "rss_bytes": [
+        478756864,
+        477839360,
+        477790208,
+        491012096,
+        477921280
+      ],
+      "median_s": 0.4439051669323817,
+      "min_s": 0.4374309580307454,
+      "peak_rss_bytes": 491012096,
+      "output_matches": true,
+      "stdout": "1999995 87333370\n",
+      "note": ""
+    },
+    {
+      "bench": "json",
+      "lang": "bun",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 17,
+      "times_s": [
+        0.2666378340218216,
+        0.26656991604249924,
+        0.26957974990364164,
+        0.26214379200246185,
+        0.2686808330472559
+      ],
+      "rss_bytes": [
+        326352896,
+        326909952,
+        318832640,
+        293994496,
+        326008832
+      ],
+      "median_s": 0.2666378340218216,
+      "min_s": 0.26214379200246185,
+      "peak_rss_bytes": 326909952,
+      "output_matches": true,
+      "stdout": "1999995 87333370\n",
+      "note": ""
+    },
+    {
+      "bench": "json",
+      "lang": "tov",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.11452474992256612,
+      "binary_bytes": 51016,
+      "stripped_bytes": 51000,
+      "source_lines": 16,
+      "times_s": [
+        0.22466845798771828,
+        0.22836675005964935,
+        0.22218575002625585,
+        0.22636650002095848,
+        0.22850633400958031
+      ],
+      "rss_bytes": [
+        142622720,
+        142622720,
+        142622720,
+        142622720,
+        142622720
+      ],
+      "median_s": 0.22636650002095848,
+      "min_s": 0.22218575002625585,
+      "peak_rss_bytes": 142622720,
+      "output_matches": true,
+      "stdout": "1999995 87333370\n",
+      "note": ""
+    },
+    {
+      "bench": "map_insert",
+      "lang": "c",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.05140083294827491,
+      "binary_bytes": 33808,
+      "stripped_bytes": 33832,
+      "source_lines": 81,
+      "times_s": [
+        0.4549572920659557,
+        0.482288834056817,
+        0.52371362503618,
+        0.5636477080406621,
+        0.5440406249836087
+      ],
+      "rss_bytes": [
+        235454464,
+        235454464,
+        235438080,
+        235454464,
+        235470848
+      ],
+      "median_s": 0.52371362503618,
+      "min_s": 0.4549572920659557,
+      "peak_rss_bytes": 235470848,
+      "output_matches": true,
+      "stdout": "2000000 1999999000000\n",
+      "note": ""
+    },
+    {
+      "bench": "map_insert",
+      "lang": "rust",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.22831658297218382,
+      "binary_bytes": 489224,
+      "stripped_bytes": 359160,
+      "source_lines": 13,
+      "times_s": [
+        0.545209167059511,
+        0.569658707943745,
+        0.5340797080425546,
+        0.5219585419399664,
+        0.5254510829690844
+      ],
+      "rss_bytes": [
+        311410688,
+        311394304,
+        311377920,
+        311377920,
+        311394304
+      ],
+      "median_s": 0.5340797080425546,
+      "min_s": 0.5219585419399664,
+      "peak_rss_bytes": 311410688,
+      "output_matches": true,
+      "stdout": "2000000 1999999000000\n",
+      "note": ""
+    },
+    {
+      "bench": "map_insert",
+      "lang": "node",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 13,
+      "times_s": [
+        0.9385976659832522,
+        0.9709299580426887,
+        0.9327074579196051,
+        0.9452196250203997,
+        0.9546677909092978
+      ],
+      "rss_bytes": [
+        295174144,
+        295157760,
+        295026688,
+        295174144,
+        294993920
+      ],
+      "median_s": 0.9452196250203997,
+      "min_s": 0.9327074579196051,
+      "peak_rss_bytes": 295174144,
+      "output_matches": true,
+      "stdout": "2000000 1999999000000\n",
+      "note": ""
+    },
+    {
+      "bench": "map_insert",
+      "lang": "bun",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 13,
+      "times_s": [
+        0.7712448330130428,
+        0.7490073340013623,
+        0.7553826670628041,
+        0.763509750016965,
+        0.7824154999107122
+      ],
+      "rss_bytes": [
+        590675968,
+        592084992,
+        590692352,
+        590774272,
+        590692352
+      ],
+      "median_s": 0.763509750016965,
+      "min_s": 0.7490073340013623,
+      "peak_rss_bytes": 592084992,
+      "output_matches": true,
+      "stdout": "2000000 1999999000000\n",
+      "note": ""
+    },
+    {
+      "bench": "map_insert",
+      "lang": "tov",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.038274207967333496,
+      "binary_bytes": 34504,
+      "stripped_bytes": 34488,
+      "source_lines": 12,
+      "times_s": [
+        0.2759247909998521,
+        0.2762840000214055,
+        0.28754945809487253,
+        0.2720423750579357,
+        0.3070689580636099
+      ],
+      "rss_bytes": [
+        157351936,
+        157351936,
+        157351936,
+        157368320,
+        157351936
+      ],
+      "median_s": 0.2762840000214055,
+      "min_s": 0.2720423750579357,
+      "peak_rss_bytes": 157368320,
+      "output_matches": true,
+      "stdout": "2000000 1999999000000\n",
+      "note": ""
+    },
+    {
+      "bench": "nbody",
+      "lang": "c",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.05282720900140703,
+      "binary_bytes": 33552,
+      "stripped_bytes": 33576,
+      "source_lines": 90,
+      "times_s": [
+        0.31003483396489173,
+        0.3099684580229223,
+        0.3105607080506161,
+        0.3096881670644507,
+        0.3109702500514686
+      ],
+      "rss_bytes": [
+        1835008,
+        1835008,
+        1835008,
+        1835008,
+        1835008
+      ],
+      "median_s": 0.31003483396489173,
+      "min_s": 0.3096881670644507,
+      "peak_rss_bytes": 1835008,
+      "output_matches": true,
+      "stdout": "-0.169075164\n-0.169077842\n",
+      "note": ""
+    },
+    {
+      "bench": "nbody",
+      "lang": "rust",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.12115929205901921,
+      "binary_bytes": 489240,
+      "stripped_bytes": 359080,
+      "source_lines": 124,
+      "times_s": [
+        0.22139949991833419,
+        0.22012620908208191,
+        0.22220012510661036,
+        0.2205927079776302,
+        0.22200537496246397
+      ],
+      "rss_bytes": [
+        2048000,
+        2048000,
+        2048000,
+        2048000,
+        2048000
+      ],
+      "median_s": 0.22139949991833419,
+      "min_s": 0.22012620908208191,
+      "peak_rss_bytes": 2048000,
+      "output_matches": true,
+      "stdout": "-0.169075164\n-0.169077842\n",
+      "note": ""
+    },
+    {
+      "bench": "nbody",
+      "lang": "node",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 120,
+      "times_s": [
+        0.5504630000796169,
+        0.5571882909862325,
+        0.5456654580775648,
+        0.5593041670508683,
+        0.5558215000201017
+      ],
+      "rss_bytes": [
+        80855040,
+        80199680,
+        80642048,
+        80003072,
+        80674816
+      ],
+      "median_s": 0.5558215000201017,
+      "min_s": 0.5456654580775648,
+      "peak_rss_bytes": 80855040,
+      "output_matches": true,
+      "stdout": "-0.169075164\n-0.169077842\n",
+      "note": ""
+    },
+    {
+      "bench": "nbody",
+      "lang": "bun",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 120,
+      "times_s": [
+        0.5097417500801384,
+        0.5044466250110418,
+        0.5063857920467854,
+        0.5041379169560969,
+        0.5050329579971731
+      ],
+      "rss_bytes": [
+        23101440,
+        23068672,
+        23068672,
+        23117824,
+        23085056
+      ],
+      "median_s": 0.5050329579971731,
+      "min_s": 0.5041379169560969,
+      "peak_rss_bytes": 23117824,
+      "output_matches": true,
+      "stdout": "-0.169075164\n-0.169077842\n",
+      "note": ""
+    },
+    {
+      "bench": "nbody",
+      "lang": "tov",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.06626545893959701,
+      "binary_bytes": 34456,
+      "stripped_bytes": 34424,
+      "source_lines": 119,
+      "times_s": [
+        0.20547191705554724,
+        0.20579999999608845,
+        0.20589229103643447,
+        0.20596454199403524,
+        0.20614841708447784
+      ],
+      "rss_bytes": [
+        1851392,
+        1851392,
+        1851392,
+        1851392,
+        1851392
+      ],
+      "median_s": 0.20589229103643447,
+      "min_s": 0.20547191705554724,
+      "peak_rss_bytes": 1851392,
+      "output_matches": true,
+      "stdout": "-0.169075164\n-0.169077842\n",
+      "note": ""
+    },
+    {
+      "bench": "points",
+      "lang": "c",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.04113950009923428,
+      "binary_bytes": 33424,
+      "stripped_bytes": 33432,
+      "source_lines": 17,
+      "times_s": [
+        0.2883205000543967,
+        0.29619508399628103,
+        0.29826550011057407,
+        0.2869283329928294,
+        0.28549433301668614
+      ],
+      "rss_bytes": [
+        1851392,
+        1851392,
+        1851392,
+        1851392,
+        1851392
+      ],
+      "median_s": 0.2883205000543967,
+      "min_s": 0.28549433301668614,
+      "peak_rss_bytes": 1851392,
+      "output_matches": true,
+      "stdout": "600000000.0 300000000.0\n",
+      "note": ""
+    },
+    {
+      "bench": "points",
+      "lang": "rust",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.08435470808763057,
+      "binary_bytes": 489208,
+      "stripped_bytes": 359080,
+      "source_lines": 17,
+      "times_s": [
+        0.29037170810624957,
+        0.2992200830485672,
+        0.3132904999656603,
+        0.30106129101477563,
+        0.28990320896264166
+      ],
+      "rss_bytes": [
+        2015232,
+        2015232,
+        2015232,
+        2015232,
+        2015232
+      ],
+      "median_s": 0.2992200830485672,
+      "min_s": 0.28990320896264166,
+      "peak_rss_bytes": 2015232,
+      "output_matches": true,
+      "stdout": "600000000.0 300000000.0\n",
+      "note": ""
+    },
+    {
+      "bench": "points",
+      "lang": "node",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 14,
+      "times_s": [
+        1.8798620409797877,
+        2.0922702500829473,
+        1.890932457987219,
+        2.313133415998891,
+        1.8885957089951262
+      ],
+      "rss_bytes": [
+        86589440,
+        86081536,
+        86245376,
+        86720512,
+        86573056
+      ],
+      "median_s": 1.890932457987219,
+      "min_s": 1.8798620409797877,
+      "peak_rss_bytes": 86720512,
+      "output_matches": true,
+      "stdout": "600000000.0 300000000.0\n",
+      "note": ""
+    },
+    {
+      "bench": "points",
+      "lang": "bun",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 14,
+      "times_s": [
+        0.8374774160329252,
+        0.8401249588932842,
+        0.815126791014336,
+        0.8089034999720752,
+        0.8092347499914467
+      ],
+      "rss_bytes": [
+        31981568,
+        31866880,
+        31850496,
+        31850496,
+        31899648
+      ],
+      "median_s": 0.815126791014336,
+      "min_s": 0.8089034999720752,
+      "peak_rss_bytes": 31981568,
+      "output_matches": true,
+      "stdout": "600000000.0 300000000.0\n",
+      "note": ""
+    },
+    {
+      "bench": "points",
+      "lang": "tov",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.0364797500660643,
+      "binary_bytes": 34424,
+      "stripped_bytes": 34408,
+      "source_lines": 13,
+      "times_s": [
+        0.2863291249377653,
+        0.28646837500855327,
+        0.290437874966301,
+        0.2877611250150949,
+        0.2925442090490833
+      ],
+      "rss_bytes": [
+        1835008,
+        1835008,
+        1835008,
+        1835008,
+        1835008
+      ],
+      "median_s": 0.2877611250150949,
+      "min_s": 0.2863291249377653,
+      "peak_rss_bytes": 1835008,
+      "output_matches": true,
+      "stdout": "600000000.0 300000000.0\n",
+      "note": ""
+    },
+    {
+      "bench": "sort",
+      "lang": "c",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.0472223749384284,
+      "binary_bytes": 33632,
+      "stripped_bytes": 33608,
+      "source_lines": 26,
+      "times_s": [
+        0.26714641600847244,
+        0.26552170899230987,
+        0.2675901670008898,
+        0.2748977500014007,
+        0.2814676670823246
+      ],
+      "rss_bytes": [
+        25853952,
+        25853952,
+        25853952,
+        25853952,
+        25853952
+      ],
+      "median_s": 0.2675901670008898,
+      "min_s": 0.26552170899230987,
+      "peak_rss_bytes": 25853952,
+      "output_matches": true,
+      "stdout": "0.000000033 0.999999667 1499.559101\n",
+      "note": ""
+    },
+    {
+      "bench": "sort",
+      "lang": "rust",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.16268562502227724,
+      "binary_bytes": 507208,
+      "stripped_bytes": 375608,
+      "source_lines": 15,
+      "times_s": [
+        0.0744073330424726,
+        0.07336625002790242,
+        0.07241212495137006,
+        0.0738384579308331,
+        0.07278150005731732
+      ],
+      "rss_bytes": [
+        40321024,
+        40321024,
+        40321024,
+        40321024,
+        40321024
+      ],
+      "median_s": 0.07336625002790242,
+      "min_s": 0.07241212495137006,
+      "peak_rss_bytes": 40321024,
+      "output_matches": true,
+      "stdout": "0.000000033 0.999999667 1499.559101\n",
+      "note": ""
+    },
+    {
+      "bench": "sort",
+      "lang": "node",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 16,
+      "times_s": [
+        1.1603105410467833,
+        1.1637882500654086,
+        1.1845539170317352,
+        1.2182147910352796,
+        1.252896916004829
+      ],
+      "rss_bytes": [
+        279019520,
+        279232512,
+        279150592,
+        279265280,
+        279429120
+      ],
+      "median_s": 1.1845539170317352,
+      "min_s": 1.1603105410467833,
+      "peak_rss_bytes": 279429120,
+      "output_matches": true,
+      "stdout": "0.000000033 0.999999667 1499.559101\n",
+      "note": ""
+    },
+    {
+      "bench": "sort",
+      "lang": "bun",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 16,
+      "times_s": [
+        0.7113863750128075,
+        0.7459592500235885,
+        0.7304739580722526,
+        0.6940271669300273,
+        0.6923774160677567
+      ],
+      "rss_bytes": [
+        121225216,
+        110280704,
+        121470976,
+        121241600,
+        121208832
+      ],
+      "median_s": 0.7113863750128075,
+      "min_s": 0.6923774160677567,
+      "peak_rss_bytes": 121470976,
+      "output_matches": true,
+      "stdout": "0.000000033 0.999999667 1499.559101\n",
+      "note": ""
+    },
+    {
+      "bench": "sort",
+      "lang": "tov",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.042680750018917024,
+      "binary_bytes": 51096,
+      "stripped_bytes": 51080,
+      "source_lines": 15,
+      "times_s": [
+        0.047522125067189336,
+        0.047232332988642156,
+        0.046687708934769034,
+        0.048313291976228356,
+        0.04443066706880927
+      ],
+      "rss_bytes": [
+        26214400,
+        26214400,
+        26214400,
+        26214400,
+        26198016
+      ],
+      "median_s": 0.047232332988642156,
+      "min_s": 0.04443066706880927,
+      "peak_rss_bytes": 26214400,
+      "output_matches": true,
+      "stdout": "0.000000033 0.999999667 1499.559101\n",
+      "note": ""
+    },
+    {
+      "bench": "strings",
+      "lang": "c",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.04894133401103318,
+      "binary_bytes": 33904,
+      "stripped_bytes": 33928,
+      "source_lines": 64,
+      "times_s": [
+        0.2516082499641925,
+        0.2536757079651579,
+        0.258588416967541,
+        0.2508305829251185,
+        0.2614532079314813
+      ],
+      "rss_bytes": [
+        216449024,
+        216432640,
+        216449024,
+        216432640,
+        216432640
+      ],
+      "median_s": 0.2536757079651579,
+      "min_s": 0.2508305829251185,
+      "peak_rss_bytes": 216449024,
+      "output_matches": true,
+      "stdout": "3000000 43888889 40888890 428571\n",
+      "note": ""
+    },
+    {
+      "bench": "strings",
+      "lang": "rust",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.1305922499159351,
+      "binary_bytes": 470664,
+      "stripped_bytes": 342136,
+      "source_lines": 18,
+      "times_s": [
+        0.2302672080695629,
+        0.2300737500190735,
+        0.2267822918947786,
+        0.2326049580005929,
+        0.2309192499378696
+      ],
+      "rss_bytes": [
+        263061504,
+        263061504,
+        263061504,
+        263061504,
+        263061504
+      ],
+      "median_s": 0.2302672080695629,
+      "min_s": 0.2267822918947786,
+      "peak_rss_bytes": 263061504,
+      "output_matches": true,
+      "stdout": "3000000 43888889 40888890 428571\n",
+      "note": ""
+    },
+    {
+      "bench": "strings",
+      "lang": "node",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 17,
+      "times_s": [
+        0.5194677090039477,
+        0.5165039169369265,
+        0.50557783304248,
+        0.512239082949236,
+        0.5191510829608887
+      ],
+      "rss_bytes": [
+        692731904,
+        695369728,
+        700989440,
+        692191232,
+        692518912
+      ],
+      "median_s": 0.5165039169369265,
+      "min_s": 0.50557783304248,
+      "peak_rss_bytes": 700989440,
+      "output_matches": true,
+      "stdout": "3000000 43888889 40888890 428571\n",
+      "note": ""
+    },
+    {
+      "bench": "strings",
+      "lang": "bun",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 17,
+      "times_s": [
+        0.20835479092784226,
+        0.20785433403216302,
+        0.2070686660008505,
+        0.2090010829269886,
+        0.20560866594314575
+      ],
+      "rss_bytes": [
+        581386240,
+        591953920,
+        581500928,
+        581664768,
+        581828608
+      ],
+      "median_s": 0.20785433403216302,
+      "min_s": 0.20560866594314575,
+      "peak_rss_bytes": 591953920,
+      "output_matches": true,
+      "stdout": "3000000 43888889 40888890 428571\n",
+      "note": ""
+    },
+    {
+      "bench": "strings",
+      "lang": "tov",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.04196674993727356,
+      "binary_bytes": 34280,
+      "stripped_bytes": 34248,
+      "source_lines": 16,
+      "times_s": [
+        0.15648491599131376,
+        0.1552152499789372,
+        0.15787645906675607,
+        0.14905250002630055,
+        0.14911558397579938
+      ],
+      "rss_bytes": [
+        192331776,
+        192331776,
+        192331776,
+        192331776,
+        192331776
+      ],
+      "median_s": 0.1552152499789372,
+      "min_s": 0.14905250002630055,
+      "peak_rss_bytes": 192331776,
+      "output_matches": true,
+      "stdout": "3000000 43888889 40888890 428571\n",
+      "note": ""
+    }
+  ]
+}
