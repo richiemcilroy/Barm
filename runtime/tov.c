@@ -868,10 +868,14 @@ tv_str tv_f64_to_fixed(double v, tv_int digits, const char *loc) {
     int len;
     /* printf rounds exact ties to even; JS rounds them away from zero. A tie happens exactly
      * when v = m × 2^-(f+1) with m odd; then "%.{f+1}f" is exact and ends in '5'. */
-    int e2;
-    double fr = frexp(fabs(v), &e2);
-    uint64_t mant = (uint64_t)ldexp(fr, 53);
-    int e = e2 - 53;
+    /* |v| = mant × 2^e, from its bits */
+    double a = fabs(v);
+    uint64_t bits;
+    memcpy(&bits, &a, sizeof bits);
+    int be = (int)(bits >> 52);
+    uint64_t mant = bits & ((UINT64_C(1) << 52) - 1);
+    int e = be ? be - 1075 : -1074;
+    if (be) mant |= UINT64_C(1) << 52;
     while (mant && !(mant & 1)) { mant >>= 1; e++; }
     if (mant && e == -(f + 1)) {
         len = snprintf(buf, sizeof buf, "%.*f", f + 1, v);
