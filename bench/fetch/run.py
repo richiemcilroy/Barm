@@ -46,8 +46,8 @@ def sh(cmd, **kw):
 def build():
     os.makedirs(OUT, exist_ok=True)
     sh(["cargo", "build", "--release", "-q", "--manifest-path", os.path.join(ROOT, "Cargo.toml")])
-    sh(["cargo", "build", "--release", "-q", "--offline", "--manifest-path", os.path.join(HERE, "server/Cargo.toml")])
-    sh(["cargo", "build", "--release", "-q", "--offline", "--manifest-path", os.path.join(HERE, "rust-client/Cargo.toml")])
+    sh(["cargo", "build", "--release", "-q", "--locked", "--manifest-path", os.path.join(HERE, "server/Cargo.toml")])
+    sh(["cargo", "build", "--release", "-q", "--locked", "--manifest-path", os.path.join(HERE, "rust-client/Cargo.toml")])
     sh([os.path.join(ROOT, "target/release/tov"), "build", os.path.join(HERE, "client.tov"), "-o", os.path.join(OUT, "tov-client")], stdout=subprocess.DEVNULL)
     # Bun and Node run the same file as TypeScript, without Tov's `try` markers and `throws`.
     text = open(os.path.join(HERE, "client.tov")).read()

@@ -30,7 +30,7 @@ def build():
     sh(["cc", "-O2", "-o", os.path.join(OUT, "load"), os.path.join(HERE, "load.c"), "-lpthread"])
     sh(["cargo", "build", "--release", "-q", "--manifest-path", os.path.join(ROOT, "Cargo.toml")])
     sh([os.path.join(ROOT, "target/release/tov"), "build", os.path.join(HERE, "server.tov.ts"), "-o", os.path.join(OUT, "tov-server")], stdout=subprocess.DEVNULL)
-    sh(["cargo", "build", "--release", "-q", "--offline", "--manifest-path", os.path.join(HERE, "rust/Cargo.toml")])
+    sh(["cargo", "build", "--release", "-q", "--locked", "--manifest-path", os.path.join(HERE, "rust/Cargo.toml")])
 
 
 # In the Linux container (linux.sh) the binaries are prebuilt into $BIN_DIR.
