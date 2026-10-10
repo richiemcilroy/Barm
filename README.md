@@ -1,20 +1,18 @@
 # Tov
 
-**A programming language for coding agents.** Tov looks like TypeScript, so your agent already knows how to write it. The compiler checks every line and hands back the exact fix for each error. What comes out is a native binary that beats Rust: faster to run, faster to compile, in a fraction of the memory ([the numbers](#performance)).
+A programming language for coding agents. Tov reads like TypeScript, so your agent can already write it, and when the agent gets something wrong the compiler hands back the edit that fixes it. What comes out is one native binary, faster than Rust's on our benchmarks and in a fraction of the memory Bun uses ([the numbers](#performance)).
 
-Start with your agent: give it the prompt on [tov.sh](https://tov.sh), or install by hand with `curl -fsSL https://tov.sh/install.sh | sh` (builds from source; needs git and a C compiler). The language, for agents: [tov.sh/llms.txt](https://tov.sh/llms.txt).
+To start, paste the prompt on [tov.sh](https://tov.sh) into your agent. It installs Tov and reads [tov.sh/llms.txt](https://tov.sh/llms.txt), which is the language written up for agents. To install it yourself, run `curl -fsSL https://tov.sh/install.sh | sh`. That builds Tov from source, so it needs git and a C compiler.
 
-- **Nothing new to learn.** TypeScript's syntax with Bun's and Node's APIs: `Bun.serve`, `fetch`, `node:fs`, `async`/`await`. If code looks like TypeScript it behaves like TypeScript, or it doesn't compile.
-- **Nothing hidden.** No `any`, `null` or `==`. Every call that can fail is marked `try`, integer overflow stops the program, and arrays and records are values, so nothing changes behind the agent's back.
-- **Errors that come with the fix.** Every error has a code, a reason and a fix. `tov check --json` returns the exact edit and marks the ones that are safe to apply as they are.
-- **Faster than Rust, in less of everything.** A program compiles in about 40 ms (Rust: 98), runs up to 3× faster than Rust's, and a web server serves 242,000 requests a second on one core in 1.6 MB (Rust's axum: 216,000 in 4.4 MB; Bun: 111,000 in 17 MB; macOS, M4 Max).
-- **Your npm packages still work.** Tov programs import npm packages, and apps written for Bun run on Tov unchanged.
+Code that looks like TypeScript behaves like TypeScript, or doesn't compile. Bun's and Node's APIs are there (`Bun.serve`, `fetch`, `node:fs`, `async`/`await`), and so are npm packages: an app written for Bun runs on Tov unchanged. What Tov leaves out is what makes programs hard to follow. There's no `any`, `null` or `==`, a call that can fail is marked `try`, integer overflow stops the program, and arrays and records are values, so nothing changes behind the agent's back. Errors have a code, and where the fix is clear, `tov check --json` returns the exact edit and says whether it's safe to apply as it is.
+
+A program compiles in about 42 ms (Rust: 98). A web server serves 242,000 requests a second on one core in 1.6 MB of memory, against 216,000 in 4.4 MB for Rust's axum and 111,000 in 17 MB for Bun (macOS, M4 Max).
 
 The landing page, [site/](site/), is a Tov program: `cd site && tov dev`.
 
 ## Status
 
-Tov is early: it's at milestone 3 of its spec, and it changes every day.
+Tov is early, and it changes every day. It's at version 0.0.1.
 
 | Works today | Not yet |
 |---|---|
@@ -69,7 +67,7 @@ and for tools (`tov check --json`, trimmed):
 
 A `safe` fix can be applied as it is, and `tov explain T0831` describes any code. With the fix applied, `tov build hello.tov` writes a 152 KB binary.
 
-To get an agent started, point it at [docs/spec.md](docs/spec.md): it lists only what differs from TypeScript, so it's short.
+To get an agent started, give it [tov.sh/llms.txt](https://tov.sh/llms.txt). It's [docs/spec.md](docs/spec.md), which lists only what differs from TypeScript, with a short guide to the commands in front.
 
 ## Example
 

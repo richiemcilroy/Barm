@@ -66,11 +66,19 @@ const races: Race[] = [
   },
 ]
 
+// a margin as people say it: "12% faster" when it's small, "2.3× faster" when it isn't
+// (a ratio of times or of amounts: 1.12 is 12% faster or more, and 1 / 1.12 = 11% less)
+function by(ratio: f64, word: string): string {
+  if (ratio >= 1.5) return `${ratio.toFixed(1)}× ${word}`
+  const pct = word === "less" || word === "smaller" ? (1.0 - 1.0 / ratio) * 100.0 : (ratio - 1.0) * 100.0
+  return `${Math.round(pct)}% ${word}`
+}
+
 function renderLane(r: Race, l: Lane, tov: f64): string {
   const ratio = r.higher ? tov / l.value : l.value / tov
   const us = l.who === "Tov"
   const seconds = Math.min(pace * ratio, 9.0)
-  const vs = us ? (r.worse === "more" ? "least" : "fastest") : `${ratio.toFixed(1)}× ${r.worse}`
+  const vs = us ? (r.worse === "more" ? "least" : "fastest") : by(ratio, r.worse)
   return `<li class="lane${us ? " us" : ""}" style="--t:${seconds.toFixed(2)}s"><span class="who">${l.who}</span><span class="track"><span class="ball"></span></span><span class="val"><b>${l.label}</b><i>${vs}</i></span></li>`
 }
 
@@ -140,7 +148,7 @@ function leadOf(r: Row): Lead {
 
 function leadText(r: Row): string {
   const l = leadOf(r)
-  return `${l.ratio.toFixed(1)}× ${r.word} than ${l.rival}`
+  return `${by(l.ratio, r.word)} than ${l.rival}`
 }
 
 // One benchmark's chart: a bar per runtime, labelled, Tov's first and in amber.
@@ -203,7 +211,10 @@ function renderClips(): string {
   return `<ul class="clips" aria-label="How many times faster than x264, by recording">${rows}</ul>`
 }
 
-const capLogo = `<svg class="cap-logo" viewBox="0 0 1631 1631" width="44" height="44" aria-label="Cap" role="img"><rect x="20" y="20" width="1590" height="1590" rx="306" fill="#fff" stroke="#E7EAF0" stroke-width="41"/><circle cx="815.5" cy="815.5" r="652.4" fill="#4785FF"/><circle cx="815.5" cy="815.5" r="530.1" fill="#ADC9FF"/><circle cx="815.5" cy="815.5" r="407.7" fill="#fff"/></svg>`
+function capMark(cls: string, size: int): string {
+  return `<svg class="${cls}" viewBox="0 0 1631 1631" width="${size}" height="${size}" aria-hidden="true"><rect x="20" y="20" width="1590" height="1590" rx="306" fill="#fff" stroke="#E7EAF0" stroke-width="41"/><circle cx="815.5" cy="815.5" r="652.4" fill="#4785FF"/><circle cx="815.5" cy="815.5" r="530.1" fill="#ADC9FF"/><circle cx="815.5" cy="815.5" r="407.7" fill="#fff"/></svg>`
+}
+const capLogo = capMark("cap-logo", 44)
 
 // ---------------------------------------------------------------- the agent
 
@@ -231,6 +242,9 @@ const singLink = `<a class="sing" href="#singalong" data-sing><span class="sing-
 function copyButton(target: string, label: string, done: string, cls: string): string {
   return `<button type="button" class="copy ${cls}" data-copy="${target}" data-done="${done}">${copyIcon}<span class="label">${label}</span></button>`
 }
+
+// the way to the repository, beside the prompt
+const starButton = `<a class="star" href="${repo}"><svg class="star-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.8l2.75 5.57 6.15.9-4.45 4.33 1.05 6.12L12 16.83l-5.5 2.89 1.05-6.12L3.1 9.27l6.15-.9z"/></svg><span>Star on GitHub</span><svg class="gh" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></a>`
 
 // the agent loop: a server as an agent first writes it, the compiler's answer, and the build
 // (real output: tov check --json, trimmed, and tov build)
@@ -313,7 +327,7 @@ const stages: Stage[] = [
     name: "Check",
     metric: "0.3 ms",
     title: "Tov checks every line",
-    body: "The checker, written in Rust, catches what TypeScript lets through: a call that can fail without <code>try</code>, a value shared where it should be copied, a <code>switch</code> that misses a case. Each error has a code and the edit that fixes it, which <code>tov check --json</code> hands to your agent.",
+    body: "The checker, written in Rust, catches what TypeScript lets through: a call that can fail without <code>try</code>, a value shared where it should be copied, a <code>switch</code> that misses a case. Each error has a code and, where the fix is clear, the edit that makes it, which <code>tov check --json</code> hands to your agent.",
     art: [
       `<span class="d">// without the "rect" case</span>`,
       `<span class="d">$</span> tov check shapes.tov`,
@@ -434,20 +448,20 @@ export function renderPage(footer: string): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Tov, the programming language for coding agents</title>
-<meta name="description" content="Faster than Rust, written like TypeScript. Tov is the programming language for coding agents: the syntax they know, the exact fix for every error, and native binaries that beat Rust on speed, compile time and memory.">
+<meta name="description" content="Tov is a programming language for coding agents. It reads like TypeScript, its errors come with the edit that fixes them, and it builds native binaries that beat Rust's.">
 <meta name="theme-color" content="#FBFBFA">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://tov.sh/">
 <meta property="og:site_name" content="Tov">
 <meta property="og:title" content="Tov: faster than Rust, written like TypeScript">
-<meta property="og:description" content="The programming language for coding agents. Native binaries that beat Rust on speed, compile time and memory.">
+<meta property="og:description" content="A programming language for coding agents. It reads like TypeScript and builds native binaries that beat Rust's.">
 <meta property="og:image" content="https://tov.sh/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="Tov: faster than Rust, written like TypeScript. Tov serves 242k requests a second, Rust 216k and Bun 111k.">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Tov: faster than Rust, written like TypeScript">
-<meta name="twitter:description" content="The programming language for coding agents. Native binaries that beat Rust on speed, compile time and memory.">
+<meta name="twitter:description" content="A programming language for coding agents. It reads like TypeScript and builds native binaries that beat Rust's.">
 <meta name="twitter:image" content="https://tov.sh/og.png">
 <link rel="icon" href="/logo.svg" type="image/svg+xml">
 <link rel="icon" href="/icon-32.png" type="image/png" sizes="32x32">
@@ -476,11 +490,12 @@ export function renderPage(footer: string): string {
     <div class="hero">
       ${singLink}
       <h1><span>Faster than Rust.</span> <span>Written like TypeScript.</span></h1>
-      <p class="lede">The programming language for coding agents. They already know the syntax, every error comes with its fix, and the binaries <strong>beat Rust's</strong> on speed, compile time and memory.</p>
+      <p class="lede">A programming language for coding agents. Your agent already writes TypeScript, so it can already write Tov, and when it gets something wrong the compiler hands back the edit that fixes it. What it ships is a native binary that <strong>beats Rust's</strong>.</p>
       <div class="actions">
-        ${copyButton("prompt", "Copy the prompt for your agent", "Copied: paste it to your agent", "primary")}
-        <div class="install"><code><span class="d">$</span> ${installLine}</code>${copyButton("install", "Copy", "Copied", "small")}</div>
+        ${copyButton("prompt", "Copy the prompt for your agent", "Copied. Paste it into your agent", "primary")}
+        ${starButton}
       </div>
+      <div class="install"><code><span class="d">$</span> ${installLine}</code>${copyButton("install", "Copy", "Copied", "small")}</div>
 
       ${renderRaces()}
     </div>
@@ -492,47 +507,47 @@ export function renderPage(footer: string): string {
     </section>
 
     <section id="agents">
-      <h2>From your agent's first try to a binary</h2>
+      <h2>How an agent writes Tov</h2>
       <div class="loop" role="group" aria-label="How an agent works with Tov">
         <div class="step"><h3><span>1</span>Your agent writes TypeScript</h3><pre>${written}</pre></div>
-        <div class="step"><h3><span>2</span>Tov says exactly what to fix</h3><pre>${checked}</pre></div>
+        <div class="step"><h3><span>2</span>Tov hands back the fix</h3><pre>${checked}</pre></div>
         <div class="step"><h3><span>3</span>You ship a native binary</h3><pre>${shipped}</pre></div>
       </div>
       <div class="reasons">
         <div>
-          <h3>Nothing new to learn</h3>
-          <p>TypeScript's syntax with Bun's and Node's APIs: <code>Bun.serve</code>, <code>fetch</code>, <code>node:fs</code>, <code>async</code>/<code>await</code> and npm packages.</p>
+          <h3>It's TypeScript</h3>
+          <p>With the APIs your agent knows from Bun and Node. <code>Bun.serve</code>, <code>fetch</code>, <code>node:fs</code>, <code>async</code>/<code>await</code> and npm packages work as it expects.</p>
         </div>
         <div>
-          <h3>Nothing hidden</h3>
-          <p>No <code>any</code>, <code>null</code> or <code>==</code>. Calls that can fail are marked <code>try</code>. Code that looks like TypeScript behaves like it, or doesn't compile.</p>
+          <h3>Less to get wrong</h3>
+          <p>There's no <code>any</code>, <code>null</code> or <code>==</code>, and a call that can fail is marked <code>try</code>. If code looks like TypeScript it behaves like TypeScript, and if it can't, it doesn't compile.</p>
         </div>
         <div>
-          <h3>Feedback in milliseconds</h3>
-          <p>Programs compile in about 40 ms. <code>--watch</code> restarts on save, and <code>tov test</code> runs the tests next to the code.</p>
+          <h3>A 42 ms compile</h3>
+          <p><code>--watch</code> restarts the program on save, and <code>tov test</code> runs the tests that sit next to the code.</p>
         </div>
       </div>
     </section>
 
     <section id="speed">
       <div class="bench">
-        <h2>Faster than Rust, in less of everything</h2>
-        <p class="intro">Tov compiles to C, and counts references instead of collecting garbage: no pauses, and small binaries.</p>
+        <h2>Against Rust, C, Bun and Node</h2>
+        <p class="intro">Tov compiles to C and counts references instead of collecting garbage, so there are no collector pauses and the binaries stay small.</p>
         ${renderBench()}
-        <p class="fine">Apple M4 Max; every program prints the same output. Tov beat Rust on every measurement but one, a tie. Tov checks integer overflow by default; Rust's release builds don't. <a href="${repo}/tree/main/bench">Method and every result</a>.</p>
+        <p class="fine">Measured on an Apple M4 Max, and each program prints the same output in every language. Tov checks integer overflow by default; Rust's release builds don't. <a href="${repo}/tree/main/bench">Method and every result</a>.</p>
       </div>
     </section>
 
     <section id="cap">
       <div class="cap-head">
         <p class="pair" aria-hidden="true">${capLogo}<span>×</span><img src="/logo.svg" alt="" width="55" height="44"></p>
-        <h2>Cap with Tov, an experiment</h2>
-        <p class="intro">Cap is an open-source screen recorder. Two parts of its video pipeline have been tried on Tov: a new encoder written in Tov, and its media server, compiled by Tov as it is. Both are experiments: <strong>Cap doesn't run on Tov in production yet.</strong></p>
+        <h2>Trying Tov on Cap</h2>
+        <p class="intro">Cap is our open-source screen recorder. We've tried two parts of its video pipeline on Tov: a new encoder written in Tov, and the media server Cap already has, compiled by Tov as it is. <strong>Neither runs in Cap's production yet.</strong></p>
       </div>
       <div class="cap-grid">
         <article class="cap-card enc">
-          <h3>An experimental video encoder</h3>
-          <p>Every Cap recording is encoded to H.264 video. An experimental encoder for it, written in Tov and made for what's on a screen, was compared with x264, the standard encoder, at the same picture quality. <a href="https://github.com/CapSoftware/Cap/tree/capcodec-encoder-aa45/capcodec">The encoder is on GitHub</a>.</p>
+          <h3>A screen encoder, written in Tov</h3>
+          <p>Every Cap recording ends up as H.264 video. We wrote an encoder for it in Tov, tuned for what's on a screen, and compared it with x264 at the same picture quality. <a href="https://github.com/CapSoftware/Cap/tree/capcodec-encoder-aa45/capcodec">The encoder is on GitHub</a>.</p>
           <p class="cap-big"><b>5.2×</b><span>faster than x264, on average</span></p>
           ${renderClips()}
           <dl class="cap-stats">
@@ -542,13 +557,13 @@ export function renderPage(footer: string): string {
           <p class="cap-fine">12 screen recordings at 1080p, on one thread, against x264's veryfast preset. <a href="https://github.com/CapSoftware/Cap/blob/capcodec-encoder-aa45/apps/media-server/capcodec-benchmarks.md">Every result</a>.</p>
         </article>
         <article class="cap-card ms">
-          <h3>Its media server, in a benchmark</h3>
-          <p>Cap's media server reads uploaded videos and pulls out their audio. It's a TypeScript app written for Bun, with npm packages and FFmpeg. In a benchmark, Tov runs it without changing its code (this file is the whole port), though Cap still serves it with Bun.</p>
+          <h3>The media server, unchanged</h3>
+          <p>Cap's media server is a Bun app (Hono, zod and FFmpeg) that probes uploaded videos and pulls out their audio. Tov runs it without changing a line; the file below is the whole port. Cap still serves it with Bun.</p>
           <pre class="code">${npmExample}</pre>
           <ul class="facts">
-            <li><b>105 ms</b><span>to start (Bun: 132)</span></li>
-            <li><b>23% less</b><span>CPU for each video it reads</span></li>
-            <li><b>65 MB</b><span>of memory after a burst of requests (Bun: 68–70)</span></li>
+            <li><b>105 ms</b><span>to start (Bun: 120)</span></li>
+            <li><b>27% less</b><span>CPU for each video it reads</span></li>
+            <li><b>129 MB</b><span>of memory at its peak under load (Bun: 143)</span></li>
           </ul>
           <p class="cap-fine">Against Bun 1.4 on an Apple M4 Max. <a href="${repo}/tree/main/bench/cap-media">Method and every result</a>.</p>
         </article>
@@ -559,7 +574,7 @@ export function renderPage(footer: string): string {
       <div class="start">
         <div>
           <h2>Start with your agent</h2>
-          <p>Paste this to your coding agent. It installs Tov, reads <a href="/llms.txt">llms.txt</a>, and fixes its own mistakes with <code>tov check --json</code>.</p>
+          <p>Paste this into your agent. It installs Tov, reads <a href="/llms.txt">llms.txt</a>, and from then on checks its own work with <code>tov check --json</code>.</p>
         </div>
         <div class="prompt-card">
           <pre>${esc(agentPrompt)}</pre>
@@ -600,7 +615,7 @@ export function renderPage(footer: string): string {
   <div class="wrap">
     <img src="/logo.svg" alt="" width="44" height="35">
     <div class="foot">
-      <p class="by">From the team behind <a href="https://cap.so">Cap</a>, the open-source screen recorder.</p>
+      <p class="by">From the team behind <a class="cap-link" href="https://cap.so">${capMark("cap-mark", 18)}Cap</a>, the open-source screen recorder.</p>
       <p>${footer}</p>
     </div>
   </div>

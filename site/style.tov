@@ -113,12 +113,13 @@ h1 span + span { color: var(--ink-3); }
 .actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
 
 @media (prefers-reduced-motion: no-preference) {
-  .sing, h1 span, .lede, .actions, .race {
+  .sing, h1 span, .lede, .actions, .install, .race {
     animation: rise 1s cubic-bezier(.2, .8, .2, 1) both;
   }
   h1 span + span { animation-delay: .08s; }
   .lede { animation-delay: .16s; }
   .actions { animation-delay: .24s; }
+  .install { animation-delay: .3s; }
   .race { animation-delay: .36s; }
 }
 @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
@@ -150,9 +151,31 @@ h1 span + span { color: var(--ink-3); }
   .sing-eq i:nth-child(3) { animation-duration: 1.05s; animation-delay: -.5s; }
 }
 @keyframes sing-eq { from { transform: scaleY(.3); } to { transform: scaleY(1); } }
-.install { display: flex; align-items: center; gap: 10px; background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; padding: 5px 5px 5px 16px; max-width: 100%; }
-.install code { font-size: .875rem; white-space: nowrap; overflow-x: auto; color: var(--ink); }
-.install .d { color: var(--ink-3); }
+.install { display: inline-flex; align-items: center; gap: 6px; margin: 16px 0 0; padding: 0 0 0 2px; max-width: 100%; }
+.install code { font-size: .75rem; white-space: nowrap; overflow-x: auto; color: var(--ink-3); }
+.install .d { color: var(--ink-3); opacity: .7; }
+.install .copy.small { padding: 3px 7px; font-size: .75rem; border-radius: 6px; gap: 5px; border-color: transparent; background: none; color: var(--ink-3); }
+.install .copy.small svg { width: 12px; height: 12px; }
+.install .copy.small:hover { background: var(--sunk); }
+.install .copy.done { background: var(--green); color: var(--paper); }
+
+/* ---- the star */
+.star {
+  display: inline-flex; align-items: center; gap: 9px;
+  padding: 11px 16px 11px 14px; border-radius: 10px; border: 1px solid color-mix(in srgb, var(--crust) 45%, var(--rule));
+  font-weight: 500; font-size: .9375rem; line-height: 1.2; color: var(--ink); text-decoration: none;
+  background: var(--panel);
+  transition: background .2s ease, border-color .2s ease;
+}
+.star:hover { background: color-mix(in srgb, var(--crust) 8%, var(--panel)); border-color: var(--crust); }
+.star:active { transform: scale(.98); }
+.star-icon { width: 16px; height: 16px; flex: none; fill: var(--crust); stroke: var(--crust); stroke-width: 1.5; stroke-linejoin: round; }
+.star .gh { width: 15px; height: 15px; flex: none; fill: var(--ink-3); transition: fill .2s ease; }
+.star:hover .gh { fill: var(--ink-2); }
+
+/* ---- the footer's Cap */
+.cap-link { display: inline-flex; align-items: center; gap: 6px; margin-left: 4px; vertical-align: -3px; font-weight: 500; color: var(--ink); }
+.cap-mark { width: 16px; height: 16px; flex: none; }
 
 /* ---- the race */
 .race {
@@ -362,7 +385,7 @@ footer { margin: 144px 0 0; padding: 28px 0 44px; border-top: 1px solid var(--ru
 footer .wrap { display: flex; gap: 14px; align-items: center; }
 footer img { width: 36px; height: auto; flex: none; }
 footer p { margin: 0; color: var(--ink-3); font-size: .875rem; }
-footer b { color: var(--ink-2); font-variant-numeric: tabular-nums; font-weight: 600; }
+footer b { color: var(--ink-2); font-weight: 600; }
 footer .foot { display: grid; gap: 4px; }
 footer .by { color: var(--ink-2); }
 
@@ -394,8 +417,7 @@ footer .by { color: var(--ink-2); }
   .hbar { grid-template-columns: 3.4rem minmax(0, 1fr) 5.4rem; gap: 10px; }
   .hb-track { height: 20px; }
   .hb-val { font-size: .8125rem; }
-  .install { width: 100%; }
-  .copy.primary { width: 100%; justify-content: center; }
+  .copy.primary, .star { width: 100%; justify-content: center; }
   .cap-card { padding: 24px 18px 20px; }
   .clips li { grid-template-columns: 7.2rem minmax(0, 1fr) 2.4rem; gap: 8px; }
   .clips::after { padding-left: calc(7.2rem + 8px); }
